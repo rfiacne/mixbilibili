@@ -11,12 +11,14 @@ pub fn is_ffmpeg_available() -> bool {
 }
 
 /// Get ffmpeg path if available
+#[allow(dead_code)]
 pub fn ffmpeg_path() -> Option<std::path::PathBuf> {
     which::which("ffmpeg").ok()
 }
 
 /// Supported operating systems
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Os {
     Windows,
     MacOS,
@@ -46,6 +48,7 @@ pub fn detect_os() -> Os {
 
 /// Result of an installation attempt
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct InstallResult {
     pub success: bool,
     pub output: String,

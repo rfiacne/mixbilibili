@@ -1,7 +1,7 @@
 // src/merger.rs
 use crate::cli::OutputFormat;
 use crate::ffmpeg;
-use crate::scanner::{FilePair, ScanResult, ScanStats};
+use crate::scanner::{FilePair, ScanResult};
 use colored::Colorize;
 use rayon::prelude::*;
 use std::path::Path;
@@ -268,6 +268,7 @@ mod merge_tests {
 #[cfg(test)]
 mod exec_tests {
     use super::*;
+    use crate::scanner::ScanStats;
     use tempfile::tempdir;
 
     #[test]

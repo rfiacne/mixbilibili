@@ -28,6 +28,7 @@ pub struct ScanStats {
 
 /// Result of scanning a directory
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ScanResult {
     /// Valid file pairs ready for merging
     pub pairs: Vec<FilePair>,
