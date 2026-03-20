@@ -1,4 +1,5 @@
-use clap::ValueEnum;
+use clap::{Parser, ValueEnum};
+use std::path::PathBuf;
 
 /// Supported output formats
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -77,5 +78,118 @@ mod tests {
         assert!(!OutputFormat::Mkv.needs_faststart());
         assert!(OutputFormat::Mp4.needs_faststart());
         assert!(OutputFormat::Mov.needs_faststart());
+    }
+}
+
+/// A CLI tool for batch merging Bilibili video and audio files
+#[derive(Debug, Clone, Parser)]
+#[command(version, about, long_about = None)]
+pub struct Args {
+    /// Source directory containing mp4/m4a files
+    #[arg(short, long, default_value = ".")]
+    pub source: PathBuf,
+
+    /// Output directory for merged files (auto-created)
+    #[arg(short, long, default_value = ".")]
+    pub output: PathBuf,
+
+    /// Delete source files after successful merge
+    #[arg(short = 'd', long, default_value_t = true)]
+    pub sdel: bool,
+
+    /// Output format: mkv, mp4, mov
+    #[arg(short, long, default_value = "mkv", value_name = "FORMAT")]
+    pub format: String,
+
+    /// Number of parallel ffmpeg processes
+    #[arg(short = 'j', long, default_value_t = num_cpus::get())]
+    pub jobs: usize,
+}
+
+impl Args {
+    /// Parse and validate the format string into OutputFormat
+    pub fn parsed_format(&self) -> Result<OutputFormat, String> {
+        OutputFormat::parse(&self.format)
+    }
+
+    /// Validate and normalize arguments
+    pub fn validate(&mut self) -> Result<(), String> {
+        // Clamp jobs to valid range
+        if self.jobs < 1 {
+            eprintln!("Warning: jobs must be >= 1, clamping to 1");
+            self.jobs = 1;
+        } else if self.jobs > 32 {
+            eprintln!("Warning: jobs must be <= 32, clamping to 32");
+            self.jobs = 32;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod args_tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_jobs_clamp_to_min() {
+        let mut args = Args {
+            source: PathBuf::from("."),
+            output: PathBuf::from("."),
+            sdel: true,
+            format: "mkv".to_string(),
+            jobs: 0,
+        };
+        args.validate().unwrap();
+        assert_eq!(args.jobs, 1);
+    }
+
+    #[test]
+    fn test_validate_jobs_clamp_to_max() {
+        let mut args = Args {
+            source: PathBuf::from("."),
+            output: PathBuf::from("."),
+            sdel: true,
+            format: "mkv".to_string(),
+            jobs: 100,
+        };
+        args.validate().unwrap();
+        assert_eq!(args.jobs, 32);
+    }
+
+    #[test]
+    fn test_validate_jobs_in_range() {
+        let mut args = Args {
+            source: PathBuf::from("."),
+            output: PathBuf::from("."),
+            sdel: true,
+            format: "mkv".to_string(),
+            jobs: 4,
+        };
+        args.validate().unwrap();
+        assert_eq!(args.jobs, 4);
+    }
+
+    #[test]
+    fn test_parsed_format_valid() {
+        let args = Args {
+            source: PathBuf::from("."),
+            output: PathBuf::from("."),
+            sdel: true,
+            format: "mp4".to_string(),
+            jobs: 4,
+        };
+        assert_eq!(args.parsed_format().unwrap(), OutputFormat::Mp4);
+    }
+
+    #[test]
+    fn test_parsed_format_invalid() {
+        let args = Args {
+            source: PathBuf::from("."),
+            output: PathBuf::from("."),
+            sdel: true,
+            format: "invalid".to_string(),
+            jobs: 4,
+        };
+        assert!(args.parsed_format().is_err());
     }
 }
