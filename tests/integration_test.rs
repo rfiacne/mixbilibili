@@ -1,5 +1,6 @@
 // tests/integration_test.rs
 use std::process::Command;
+use tempfile::tempdir;
 
 fn get_binary_path() -> std::path::PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -53,4 +54,19 @@ fn test_nonexistent_source() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("does not exist") || stderr.contains("Error"));
+}
+
+#[test]
+fn test_empty_directory() {
+    let dir = tempdir().unwrap();
+
+    let output = Command::new(get_binary_path())
+        .arg("-s")
+        .arg(dir.path())
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("No file pairs to merge"));
 }
