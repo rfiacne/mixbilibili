@@ -1,5 +1,8 @@
 // src/ffmpeg.rs
 
+use std::io::{self, BufRead, Write};
+use std::process::Command;
+
 /// Check if ffmpeg is available in PATH
 pub fn is_ffmpeg_available() -> bool {
     which::which("ffmpeg").is_ok()
@@ -105,6 +108,73 @@ pub fn get_manual_instructions(os: Os) -> &'static str {
     }
 }
 
+/// Prompt user for ffmpeg installation
+/// Returns true if user agreed and installation succeeded
+pub fn prompt_and_install(os: Os) -> bool {
+    if let Some((pm_name, _)) = get_install_command(os) {
+        print!("ffmpeg not found. Install via {}? [y/N]: ", pm_name);
+        io::stdout().flush().ok();
+
+        let mut input = String::new();
+        if io::stdin().lock().read_line(&mut input).is_ok() {
+            let input = input.trim().to_lowercase();
+            if input == "y" || input == "yes" {
+                return run_install(os);
+            }
+        }
+    }
+
+    // Print manual instructions and exit
+    println!("{}", get_manual_instructions(os));
+    false
+}
+
+/// Run the installation command
+fn run_install(os: Os) -> bool {
+    if let Some((_, cmd)) = get_install_command(os) {
+        println!("Running: {}", cmd);
+
+        let result = if cfg!(target_os = "windows") {
+            Command::new("cmd").args(["/C", &cmd]).status()
+        } else {
+            Command::new("sh").args(["-c", &cmd]).status()
+        };
+
+        match result {
+            Ok(status) if status.success() => {
+                // Verify installation
+                if is_ffmpeg_available() {
+                    println!("ffmpeg installed successfully!");
+                    return true;
+                } else {
+                    println!("Installation completed but ffmpeg not found in PATH.");
+                    println!("You may need to restart your terminal.");
+                }
+            }
+            Ok(status) => {
+                println!("Installation failed with exit code: {:?}", status.code());
+            }
+            Err(e) => {
+                println!("Failed to run installation: {}", e);
+            }
+        }
+    }
+
+    println!("{}", get_manual_instructions(os));
+    false
+}
+
+/// Ensure ffmpeg is available, prompting for installation if needed
+/// Returns true if ffmpeg is available (was already or installed successfully)
+pub fn ensure_ffmpeg() -> bool {
+    if is_ffmpeg_available() {
+        return true;
+    }
+
+    let os = detect_os();
+    prompt_and_install(os)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +248,19 @@ mod pm_tests {
     fn test_get_install_command_unknown_returns_none() {
         let result = get_install_command(Os::Unknown);
         assert!(result.is_none());
+    }
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+
+    #[test]
+    fn test_ensure_ffmpeg_returns_true_if_available() {
+        // If ffmpeg is installed, ensure_ffmpeg should return true immediately
+        // We can't easily test the prompt flow without mocking stdin
+        if is_ffmpeg_available() {
+            assert!(ensure_ffmpeg());
+        }
     }
 }
