@@ -72,6 +72,24 @@ impl MergeSummary {
     pub fn all_success(&self) -> bool {
         self.failed_count == 0
     }
+
+    /// Print a formatted summary report
+    pub fn print_report(&self) {
+        println!("{}", "================================".bright_black());
+        println!("{}", "Merge complete".green().bold());
+        println!("{}: {}", "Success".green(), self.success_count);
+        println!("{}: {}", "Failed".red(), self.failed_count);
+        println!("{}: {} (aria2 files present)", "Skipped".yellow(), self.skipped_count);
+        println!("{}: {} (missing pair)", "Orphaned".bright_black(), self.orphaned_count);
+        println!("{}", "================================".bright_black());
+
+        if !self.failures.is_empty() {
+            println!("\n{}", "Failed files:".red());
+            for (name, error) in &self.failures {
+                println!("  - {}: {}", name, error);
+            }
+        }
+    }
 }
 
 /// Merge a single file pair
