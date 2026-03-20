@@ -23,3 +23,21 @@ fn test_help_flag() {
     assert!(stdout.contains("--format"));
     assert!(stdout.contains("--jobs"));
 }
+
+#[test]
+fn test_invalid_format() {
+    let output = Command::new(get_binary_path())
+        .arg("-f")
+        .arg("avi")
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Check for the error message (may contain ANSI color codes)
+    assert!(
+        stderr.contains("Invalid format") && stderr.contains("avi"),
+        "Expected error message not found in: {}",
+        stderr
+    );
+}
