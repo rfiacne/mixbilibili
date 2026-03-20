@@ -41,3 +41,16 @@ fn test_invalid_format() {
         stderr
     );
 }
+
+#[test]
+fn test_nonexistent_source() {
+    let output = Command::new(get_binary_path())
+        .arg("-s")
+        .arg("/nonexistent/path/12345")
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("does not exist") || stderr.contains("Error"));
+}
