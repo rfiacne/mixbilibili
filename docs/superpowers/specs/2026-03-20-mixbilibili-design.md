@@ -37,6 +37,8 @@ src/
 └── merger.rs    # Parallel merge execution, cleanup
 ```
 
+> **Cross-Platform Path Handling:** All file paths use `std::path::PathBuf` throughout the codebase to ensure correct handling of path separators across Windows, macOS, and Linux.
+
 ## 4. Workflow
 
 ### 4.1 Phase 1: Environment Check
@@ -45,19 +47,22 @@ src/
    - Detect OS (Windows/macOS/Linux)
    - Prompt user: "ffmpeg not found. Install via {package-manager}? [y/N]"
    - If yes: Run appropriate package manager command
+     - **Windows**: Try `winget` first; if not available, fall back to `choco`
    - If no or failure: Print manual install instructions (see Section 7), exit with code 1
 
 > **Design Note:** Original requirements specified automatic installation without prompting. Changed to prompted installation to give users control over system modifications.
 
 ### 4.2 Phase 2: File Scan & Pairing
 1. Validate source directory exists; exit with error if not found
-2. Scan source directory (non-recursive) for `.mp4` and `.m4a` files
-3. Group by stem (filename without extension)
-4. Filter out pairs with `.aria2` control files (checked in source directory only):
-   - Skip if `{stem}.aria2` exists
-   - Skip if `{stem}.mp4.aria2` exists
-   - Skip if `{stem}.m4a.aria2` exists
-5. If no valid pairs found: Print message "No file pairs to merge", exit with code 0
+2. Validate output directory is writable (create if needed, or check permissions); exit with error if not writable
+3. Scan source directory (non-recursive) for `.mp4` and `.m4a` files
+4. Group by stem (filename without extension)
+5. Filter out pairs with `.aria2` control files (checked in source directory only):
+   - **Skip pair if ANY of the following aria2 files exist:**
+     - `{stem}.aria2`
+     - `{stem}.mp4.aria2`
+     - `{stem}.m4a.aria2`
+6. If no valid pairs found: Print message "No file pairs to merge", exit with code 0
 
 > **Note:** Directory scanning is non-recursive. Only files directly in the source directory are processed.
 
@@ -147,7 +152,7 @@ Failed files:
 > - **Success**: Merged successfully
 > - **Failed**: Merge attempted but failed
 > - **Skipped**: Valid pair found but aria2 file exists (download in progress)
-> - **Orphaned**: mp4 or m4a file without matching pair (not processed)
+> - **Orphaned**: mp4 or m4a file without matching pair (not processed) - **Enhancement**
 
 ## 7. Platform-Specific Behavior
 
