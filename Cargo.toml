@@ -1,0 +1,16 @@
+[package]
+name = "mixbilibili"
+version = "0.1.0"
+edition = "2021"
+description = "A CLI tool for batch merging Bilibili video and audio files"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+which = "6"
+rayon = "1"
+num_cpus = "1"
+colored = "2"
+
+[dev-dependencies]
+tempfile = "3"
