@@ -1,8 +1,9 @@
 // src/merger.rs
 use crate::cli::OutputFormat;
 use crate::ffmpeg;
-use crate::scanner::FilePair;
+use crate::scanner::{FilePair, ScanResult, ScanStats};
 use colored::Colorize;
+use rayon::prelude::*;
 use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::time::Duration;
@@ -131,6 +132,69 @@ fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Resul
     }
 }
 
+/// Execute parallel merges with controlled concurrency
+pub fn execute_merges(
+    scan_result: ScanResult,
+    output_dir: &Path,
+    format: OutputFormat,
+    jobs: usize,
+    delete_source: bool,
+) -> MergeSummary {
+    let output_dir = output_dir.to_path_buf();
+
+    // Store pairs for later reference during deletion
+    let pairs = scan_result.pairs.clone();
+
+    // Configure thread pool
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs)
+        .build()
+        .unwrap();
+
+    // Execute merges in parallel with indices
+    let results: Vec<MergeResult> = pool.install(|| {
+        pairs
+            .par_iter()
+            .enumerate()
+            .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format))
+            .collect()
+    });
+
+    // Build summary
+    let mut summary = MergeSummary::new();
+    summary.skipped_count = scan_result.stats.skipped;
+    summary.orphaned_count = scan_result.stats.orphaned;
+
+    for result in results {
+        if result.success {
+            summary.success_count += 1;
+
+            // Delete source files if requested
+            if delete_source {
+                let pair = &pairs[result.pair_index];
+                delete_source_files(pair);
+            }
+        } else {
+            summary.failed_count += 1;
+            if let Some(error) = result.error {
+                summary.failures.push((result.pair_name, error));
+            }
+        }
+    }
+
+    summary
+}
+
+/// Delete source files after successful merge
+fn delete_source_files(pair: &FilePair) {
+    if let Err(e) = std::fs::remove_file(&pair.video) {
+        eprintln!("Warning: Failed to delete {}: {}", pair.video.display(), e);
+    }
+    if let Err(e) = std::fs::remove_file(&pair.audio) {
+        eprintln!("Warning: Failed to delete {}: {}", pair.audio.display(), e);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +244,58 @@ mod merge_tests {
         };
         assert!(!result.success);
         assert!(result.error.is_some());
+    }
+}
+
+#[cfg(test)]
+mod exec_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_execute_merges_empty_pairs() {
+        let dir = tempdir().unwrap();
+        let scan_result = ScanResult {
+            pairs: vec![],
+            stats: ScanStats::default(),
+            skipped_names: vec![],
+        };
+
+        let summary = execute_merges(
+            scan_result,
+            dir.path(),
+            OutputFormat::Mkv,
+            1,
+            false,
+        );
+
+        assert_eq!(summary.success_count, 0);
+        assert_eq!(summary.failed_count, 0);
+        assert!(summary.all_success());
+    }
+
+    #[test]
+    fn test_execute_merges_with_skipped_stats() {
+        let dir = tempdir().unwrap();
+        let scan_result = ScanResult {
+            pairs: vec![],
+            stats: ScanStats {
+                pairs: 0,
+                skipped: 5,
+                orphaned: 3,
+            },
+            skipped_names: vec![],
+        };
+
+        let summary = execute_merges(
+            scan_result,
+            dir.path(),
+            OutputFormat::Mkv,
+            1,
+            false,
+        );
+
+        assert_eq!(summary.skipped_count, 5);
+        assert_eq!(summary.orphaned_count, 3);
     }
 }
