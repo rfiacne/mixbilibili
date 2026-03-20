@@ -1,7 +1,7 @@
 # mixbilibili CLI - Design Specification
 
 **Date:** 2026-03-20
-**Status:** Under Review
+**Status:** Approved
 **Language:** Rust
 
 ## 1. Overview
