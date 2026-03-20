@@ -18,7 +18,14 @@
 | `-f` | `--format` | String | `mkv` | Output format (mkv, mp4, mov) - **Enhancement** |
 | `-j` | `--jobs` | usize | CPU cores | Max concurrent ffmpeg processes - **Enhancement** |
 
-> **Design Note:** `-f/--format` and `-j/--jobs` are intentional enhancements beyond original requirements, added to support configurable output format and parallel processing.
+### Input Validation
+
+| Argument | Validation | On Invalid |
+|----------|------------|------------|
+| `-f/--format` | Must be one of: `mkv`, `mp4`, `mov` (case-insensitive) | Exit 1 with error: "Invalid format '{value}'. Supported: mkv, mp4, mov" |
+| `-j/--jobs` | Must be >= 1 and <= 32 | Clamp to valid range (1-32), log warning |
+
+> **Design Note:** `-f/--format` and `-j/--jobs` are intentional enhancements beyond original requirements. Rationale: Configurable output format is a common user request for compatibility with different players; parallel processing with job control is industry standard for batch media tools.
 
 ## 3. Architecture
 
@@ -44,13 +51,15 @@ src/
 
 ### 4.2 Phase 2: File Scan & Pairing
 1. Validate source directory exists; exit with error if not found
-2. Scan source directory for `.mp4` and `.m4a` files
+2. Scan source directory (non-recursive) for `.mp4` and `.m4a` files
 3. Group by stem (filename without extension)
-4. Filter out pairs with `.aria2` control files:
+4. Filter out pairs with `.aria2` control files (checked in source directory only):
    - Skip if `{stem}.aria2` exists
    - Skip if `{stem}.mp4.aria2` exists
    - Skip if `{stem}.m4a.aria2` exists
 5. If no valid pairs found: Print message "No file pairs to merge", exit with code 0
+
+> **Note:** Directory scanning is non-recursive. Only files directly in the source directory are processed.
 
 ### 4.3 Phase 3: Parallel Merge
 1. Create output directory if it doesn't exist (handle permission errors)
@@ -75,6 +84,8 @@ ffmpeg -hide_banner -loglevel error \
 ```
 
 > **Note:** `-movflags +faststart` is only valid for MP4/MOV containers, not MKV.
+>
+> **Correction from Requirements:** The original requirements specified `-movflags +faststart` for MKV output, which is technically invalid (ffmpeg ignores it for MKV). This spec corrects the command to only apply the flag for MP4/MOV formats where it has effect.
 
 ### 4.4 Phase 4: Cleanup & Report
 1. On merge success + `--sdel=true`: Delete source `.mp4` and `.m4a`
@@ -89,19 +100,22 @@ ffmpeg -hide_banner -loglevel error \
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 which = "6"
-walkdir = "2"
 rayon = "1"
 num_cpus = "1"
 colored = "2"  # Optional: for colored output
 ```
+
+> **Note:** `walkdir` removed since scanning is non-recursive; using `std::fs::read_dir` instead.
 
 ## 6. Error Handling
 
 ### Exit Codes
 | Code | Meaning |
 |------|---------|
-| 0 | Success (all merges completed, or no pairs to merge) |
-| 1 | Some merges failed, or ffmpeg not available |
+| 0 | Success (all merges completed successfully, or no pairs to merge) |
+| 1 | ffmpeg not available, OR at least one merge failed |
+
+> **Note:** Exit code 1 covers two scenarios: (1) ffmpeg not found and user declined installation; (2) ffmpeg available but one or more merges failed. These are mutually exclusive since merge attempts only proceed if ffmpeg is available. |
 
 ### Error Categories
 | Error | Handling |
@@ -121,12 +135,19 @@ Merge complete
 Success: 15
 Failed:  2
 Skipped: 3 (aria2 files present)
+Orphaned: 4 (missing pair)
 ================================
 
 Failed files:
   - video1: ffmpeg exited with code 1
   - video2: Permission denied
 ```
+
+> **Count Definitions:**
+> - **Success**: Merged successfully
+> - **Failed**: Merge attempted but failed
+> - **Skipped**: Valid pair found but aria2 file exists (download in progress)
+> - **Orphaned**: mp4 or m4a file without matching pair (not processed)
 
 ## 7. Platform-Specific Behavior
 
@@ -186,5 +207,6 @@ To install ffmpeg manually:
 | Permission denied on output directory | Exit early with error |
 | Corrupted mp4/m4a file | ffmpeg fails, log error, continue |
 | Empty source directory | Exit 0 with "No file pairs to merge" |
-| Only mp4 without matching m4a | Skip, not included in any count |
-| Only m4a without matching mp4 | Skip, not included in any count |
+| Only mp4 without matching m4a | Count as "Orphaned", not processed |
+| Only m4a without matching mp4 | Count as "Orphaned", not processed |
+| Subdirectories in source directory | Ignored (non-recursive scan) |
