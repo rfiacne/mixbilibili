@@ -61,6 +61,8 @@ pub struct MergeSummary {
     pub orphaned_count: usize,
     /// List of failed merges with errors
     pub failures: Vec<(String, String)>,
+    /// Number of source deletion failures
+    pub deletion_failures: usize,
 }
 
 impl MergeSummary {
@@ -81,6 +83,9 @@ impl MergeSummary {
         println!("{}: {}", "Failed".red(), self.failed_count);
         println!("{}: {} (aria2 files present)", "Skipped".yellow(), self.skipped_count);
         println!("{}: {} (missing pair)", "Orphaned".bright_black(), self.orphaned_count);
+        if self.deletion_failures > 0 {
+            println!("{}: {}", "Deletion failures".red(), self.deletion_failures);
+        }
         println!("{}", "================================".bright_black());
 
         if !self.failures.is_empty() {
@@ -99,6 +104,16 @@ pub fn merge_pair(
     output_dir: &Path,
     format: OutputFormat,
 ) -> MergeResult {
+    // Validate stem doesn't contain path separators
+    if pair.stem.contains('/') || pair.stem.contains('\\') {
+        return MergeResult {
+            pair_index,
+            pair_name: pair.stem.clone(),
+            success: false,
+            error: Some(format!("Invalid characters in filename: {}", pair.stem)),
+        };
+    }
+
     let output_path = output_dir.join(format!("{}.{}", pair.stem, format.extension()));
 
     let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, format);
@@ -190,7 +205,10 @@ pub fn execute_merges(
             // Delete source files if requested
             if delete_source {
                 let pair = &pairs[result.pair_index];
-                delete_source_files(pair);
+                if let Err(e) = delete_source_files(pair) {
+                    eprintln!("Warning: {}", e);
+                    summary.deletion_failures += 1;
+                }
             }
         } else {
             summary.failed_count += 1;
@@ -204,12 +222,19 @@ pub fn execute_merges(
 }
 
 /// Delete source files after successful merge
-fn delete_source_files(pair: &FilePair) {
-    if let Err(e) = std::fs::remove_file(&pair.video) {
-        eprintln!("Warning: Failed to delete {}: {}", pair.video.display(), e);
-    }
-    if let Err(e) = std::fs::remove_file(&pair.audio) {
-        eprintln!("Warning: Failed to delete {}: {}", pair.audio.display(), e);
+/// Returns Ok(()) if both files deleted, or Err with details of any failures
+fn delete_source_files(pair: &FilePair) -> Result<(), String> {
+    let video_result = std::fs::remove_file(&pair.video);
+    let audio_result = std::fs::remove_file(&pair.audio);
+
+    match (video_result, audio_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), Ok(())) => Err(format!("Failed to delete video '{}': {}", pair.video.display(), e)),
+        (Ok(()), Err(e)) => Err(format!("Failed to delete audio '{}': {}", pair.audio.display(), e)),
+        (Err(ve), Err(ae)) => Err(format!(
+            "Failed to delete both files: video '{}' ({}, audio '{}' ({})",
+            pair.video.display(), ve, pair.audio.display(), ae
+        )),
     }
 }
 

@@ -39,6 +39,8 @@ pub struct ScanResult {
 }
 
 /// Scan a directory for mp4/m4a file pairs
+///
+/// Note: Files with non-UTF8 names are silently skipped during scanning.
 pub fn scan_directory(source_dir: &Path) -> Result<ScanResult, String> {
     if !source_dir.exists() {
         return Err(format!("Source directory does not exist: {}", source_dir.display()));
