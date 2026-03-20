@@ -1491,9 +1491,8 @@ pub fn execute_merges(
     // Execute merges in parallel with indices
     let results: Vec<MergeResult> = pool.install(|| {
         pairs
-            .iter()
-            .enumerate()
             .par_iter()
+            .enumerate()
             .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format))
             .collect()
     });
@@ -1588,27 +1587,12 @@ mod exec_tests {
 }
 ```
 
-- [ ] **Step 2: Fix par_iter usage**
-
-The `enumerate().par_iter()` pattern needs adjustment. Update the code:
-
-```rust
-// Replace the par_iter section with:
-let results: Vec<MergeResult> = pool.install(|| {
-    pairs
-        .par_iter()
-        .enumerate()
-        .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format))
-        .collect()
-});
-```
-
-- [ ] **Step 3: Run tests**
+- [ ] **Step 2: Run tests**
 
 Run: `cargo test merger::exec_tests`
 Expected: Tests pass
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add src/merger.rs
@@ -1846,8 +1830,9 @@ fn test_invalid_format() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // Check for the error message (may contain ANSI color codes)
     assert!(
-        stderr.contains("Invalid format 'avi'. Supported: mkv, mp4, mov"),
+        stderr.contains("Invalid format") && stderr.contains("avi"),
         "Expected error message not found in: {}",
         stderr
     );
@@ -2071,10 +2056,10 @@ git commit -m "chore: final build verification"
 
 This plan creates a complete Rust CLI tool with:
 - CLI parsing via clap derive with `ValueEnum` for format validation
-- TDD approach: tests written before implementation for all modules
+- Comprehensive unit tests alongside implementation code
 - ffmpeg environment management with OS-specific install prompts
 - Directory scanning with aria2 file filtering
 - Parallel merge execution with rayon (using pair indices for efficient deletion)
 - Colored output and summary reporting
-- Comprehensive unit and integration tests
+- Integration tests for CLI behavior
 - Each test as a separate task for proper TDD tracking
