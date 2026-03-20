@@ -1,6 +1,8 @@
 // src/ffmpeg.rs
 
+use crate::cli::OutputFormat;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::process::Command;
 
 /// Check if ffmpeg is available in PATH
@@ -175,6 +177,36 @@ pub fn ensure_ffmpeg() -> bool {
     prompt_and_install(os)
 }
 
+/// Build ffmpeg merge command
+pub fn build_merge_command(
+    video_path: &Path,
+    audio_path: &Path,
+    output_path: &Path,
+    format: OutputFormat,
+) -> Command {
+    let mut cmd = Command::new("ffmpeg");
+
+    cmd.arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(video_path)
+        .arg("-i")
+        .arg(audio_path)
+        .arg("-c:v")
+        .arg("copy")
+        .arg("-c:a")
+        .arg("copy");
+
+    if format.needs_faststart() {
+        cmd.arg("-movflags").arg("+faststart");
+    }
+
+    cmd.arg("-y").arg(output_path);
+
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +294,72 @@ mod install_tests {
         if is_ffmpeg_available() {
             assert!(ensure_ffmpeg());
         }
+    }
+}
+
+#[cfg(test)]
+mod cmd_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_build_merge_command_mkv_no_faststart() {
+        let video = PathBuf::from("video.mp4");
+        let audio = PathBuf::from("video.m4a");
+        let output = PathBuf::from("output/video.mkv");
+
+        let cmd = build_merge_command(&video, &audio, &output, OutputFormat::Mkv);
+
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("-hide_banner")));
+        assert!(!args.contains(&std::ffi::OsStr::new("+faststart")));
+    }
+
+    #[test]
+    fn test_build_merge_command_mp4_has_faststart() {
+        let video = PathBuf::from("video.mp4");
+        let audio = PathBuf::from("video.m4a");
+        let output = PathBuf::from("output/video.mp4");
+
+        let cmd = build_merge_command(&video, &audio, &output, OutputFormat::Mp4);
+
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("+faststart")));
+    }
+
+    #[test]
+    fn test_build_merge_command_mov_has_faststart() {
+        let video = PathBuf::from("video.mp4");
+        let audio = PathBuf::from("video.m4a");
+        let output = PathBuf::from("output/video.mov");
+
+        let cmd = build_merge_command(&video, &audio, &output, OutputFormat::Mov);
+
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("+faststart")));
+    }
+
+    #[test]
+    fn test_build_merge_command_has_copy_codecs() {
+        let video = PathBuf::from("video.mp4");
+        let audio = PathBuf::from("video.m4a");
+        let output = PathBuf::from("output/video.mkv");
+
+        let cmd = build_merge_command(&video, &audio, &output, OutputFormat::Mkv);
+
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("copy")));
+    }
+
+    #[test]
+    fn test_build_merge_command_has_overwrite_flag() {
+        let video = PathBuf::from("video.mp4");
+        let audio = PathBuf::from("video.m4a");
+        let output = PathBuf::from("output/video.mkv");
+
+        let cmd = build_merge_command(&video, &audio, &output, OutputFormat::Mkv);
+
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("-y")));
     }
 }
