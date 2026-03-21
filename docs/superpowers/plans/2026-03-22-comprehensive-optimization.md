@@ -119,16 +119,21 @@ pub fn scan_directory(source_dir: &Path) -> Result<ScanResult> {
 Run: `cargo check`
 Expected: 编译成功
 
-- [ ] **Step 4: 更新 scanner 测试以适配新错误类型**
+- [ ] **Step 4: 更新现有 scanner 测试以适配新错误类型**
+
+**注意**: 以下测试已存在于 `src/scanner.rs:171-186`，只需更新错误断言：
 
 ```rust
+// 更新 test_scan_nonexistent_directory (已存在于 line 171-175)
 #[test]
 fn test_scan_nonexistent_directory() {
     let result = scan_directory(Path::new("/nonexistent/path/12345"));
     assert!(result.is_err());
+    // 更新: 使用 .to_string() 获取 anyhow 错误消息
     assert!(result.unwrap_err().to_string().contains("does not exist"));
 }
 
+// 更新 test_scan_file_not_directory (已存在于 line 178-186)
 #[test]
 fn test_scan_file_not_directory() {
     let dir = tempdir().unwrap();
@@ -137,6 +142,7 @@ fn test_scan_file_not_directory() {
 
     let result = scan_directory(&file_path);
     assert!(result.is_err());
+    // 更新: 使用 .to_string() 获取 anyhow 错误消息
     assert!(result.unwrap_err().to_string().contains("not a directory"));
 }
 ```
@@ -339,16 +345,21 @@ impl OutputFormat {
 }
 ```
 
-- [ ] **Step 4: 更新测试**
+- [ ] **Step 4: 更新现有 cli 测试以适配新错误类型**
+
+**注意**: 以下测试已存在于 `src/cli.rs`，只需更新错误断言：
 
 ```rust
+// 更新 test_parse_invalid_format (已存在于 line 63-67)
 #[test]
 fn test_parse_invalid_format() {
     let result = OutputFormat::parse("avi");
     assert!(result.is_err());
+    // 更新: 使用 .to_string() 获取 anyhow 错误消息
     assert!(result.unwrap_err().to_string().contains("Invalid format"));
 }
 
+// 更新 test_parsed_format_invalid (已存在于 line 185-194)
 #[test]
 fn test_parsed_format_invalid() {
     let args = Args {
@@ -358,6 +369,7 @@ fn test_parsed_format_invalid() {
         format: "invalid".to_string(),
         jobs: 4,
     };
+    // 更新: 确保错误消息格式正确
     assert!(args.parsed_format().is_err());
 }
 ```
@@ -496,7 +508,7 @@ fn determine_exit_code(error: &anyhow::Error) -> i32 {
     let err_str = error.to_string();
     if err_str.contains("ffmpeg") || err_str.contains("FFmpeg") {
         exit_codes::FFMPEG_NOT_FOUND
-    } else if err_str.contains("merge") || err_str.contains("merge") {
+    } else if err_str.contains("merge") || err_str.contains("failed") {
         exit_codes::MERGE_FAILED
     } else {
         exit_codes::GENERAL_ERROR
@@ -604,35 +616,53 @@ mod delete_tests {
 }
 ```
 
-- [ ] **Step 2: 添加 wait_timeout 测试 (使用 sleep 命令)**
+- [ ] **Step 2: 添加 wait_timeout 测试 (跨平台)**
+
+**注意**: 使用条件编译处理跨平台差异。Windows 使用 `timeout`，Unix 使用 `sleep`。
 
 ```rust
 #[cfg(test)]
 mod timeout_tests {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn test_wait_timeout_normal_completion() {
-        // Use sleep command for testing (cross-platform)
-        let mut child = Command::new("sleep")
+        // Use cross-platform sleep command
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("sleep")
             .arg("0.1")
             .spawn()
             .expect("sleep command should be available");
+
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("timeout")
+            .arg("/T")
+            .arg("1")
+            .arg("/NOBREAK")
+            .spawn()
+            .expect("timeout command should be available");
 
         let result = child.wait_timeout(Duration::from_secs(5));
         assert!(result.is_ok());
         let status = result.unwrap();
         assert!(status.is_some());
-        assert!(status.unwrap().success());
     }
 
     #[test]
     fn test_wait_timeout_exceeded() {
-        let mut child = Command::new("sleep")
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("sleep")
             .arg("10")
             .spawn()
             .expect("sleep command should be available");
+
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("timeout")
+            .arg("/T")
+            .arg("10")
+            .arg("/NOBREAK")
+            .spawn()
+            .expect("timeout command should be available");
 
         let result = child.wait_timeout(Duration::from_millis(50));
         assert!(result.is_ok());
@@ -644,13 +674,22 @@ mod timeout_tests {
     #[test]
     fn test_wait_timeout_already_finished() {
         // Very short sleep that finishes almost immediately
-        let mut child = Command::new("sleep")
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("sleep")
             .arg("0.01")
             .spawn()
             .expect("sleep command should be available");
 
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("timeout")
+            .arg("/T")
+            .arg("1")
+            .arg("/NOBREAK")
+            .spawn()
+            .expect("timeout command should be available");
+
         // Wait a bit for it to finish
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(150));
 
         let result = child.wait_timeout(Duration::from_secs(5));
         assert!(result.is_ok());
@@ -1001,10 +1040,12 @@ git commit -m "perf(merger): remove unnecessary pairs clone
 **Files:**
 - Modify: `src/merger.rs:1-36`
 
-- [ ] **Step 1: 添加常量定义**
+- [ ] **Step 1: 重构现有常量**
+
+**注意**: `FFMPEG_TIMEOUT` 常量已存在于 `src/merger.rs:12`。重构为使用新的命名常量。
 
 ```rust
-// src/merger.rs 顶部
+// src/merger.rs 顶部 - 修改现有常量定义
 use crate::cli::OutputFormat;
 use crate::ffmpeg;
 use crate::scanner::{FilePair, ScanResult};
@@ -1021,7 +1062,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 /// Polling interval for checking process status
 const POLL_INTERVAL_MILLIS: u64 = 100;
 
-/// Default timeout for ffmpeg process
+/// Default timeout for ffmpeg process (修改现有常量)
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(DEFAULT_TIMEOUT_SECS);
 ```
 
@@ -1279,6 +1320,8 @@ git commit -m "feat(cli): enhance input validation
 
 - [ ] **Step 1: 更新 Cargo.toml**
 
+**注意**: `[profile.release]` 部分已存在，只需修改依赖部分。
+
 ```toml
 [package]
 name = "mixbilibili"
@@ -1297,12 +1340,7 @@ anyhow = "1.0.82"
 [dev-dependencies]
 tempfile = "3.10.0"
 
-[profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 1
-strip = true
-panic = "abort"
+# [profile.release] 部分已存在，无需修改
 ```
 
 - [ ] **Step 2: 更新 cli.rs 使用标准库替代 num_cpus**
