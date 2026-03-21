@@ -18,6 +18,26 @@
 
 ---
 
+## 数据流
+
+```
+CLI 解析 (cli.rs)
+       ↓
+   Cli 结构体
+       ↓
+目录扫描 (scanner.rs)
+       ↓
+  ScanResult { pairs, errors }
+       ↓
+合并执行 (merger.rs)
+       ↓
+  FFmpeg 调用 (ffmpeg.rs)
+       ↓
+   输出文件
+```
+
+---
+
 ## 阶段一 (P1): 高优先级优化
 
 ### 1.1 错误处理重构
@@ -63,24 +83,23 @@
 
 **目标**: 为关键路径添加测试覆盖。
 
+**现有测试** (`src/scanner.rs` 已有):
+- 空目录扫描 (`test_scan_empty_directory`)
+- aria2 文件过滤 (`test_scan_skips_aria2_files_*`)
+- 孤立文件计数 (`test_scan_counts_orphaned_*`)
+
 **新增测试**:
 
-1. `src/scanner.rs` (补充):
-   - 空目录扫描
-   - 只有视频文件的情况
-   - 正在下载的文件过滤 (aria2)
-
-2. `src/merger.rs` (新增):
+1. `src/merger.rs` (新增):
    - `delete_source_files` 正常删除测试
    - `delete_source_files` 文件不存在时的处理
    - `run_with_timeout` 正常完成测试
    - `run_with_timeout` 超时终止测试
 
-3. `src/main.rs` (集成测试模块):
+2. `src/main.rs` (集成测试模块):
    - 完整合并流程测试（创建临时视频/音频文件）
 
 **文件改动**:
-- `src/scanner.rs`
 - `src/merger.rs`
 - `src/main.rs`
 
@@ -107,6 +126,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install ffmpeg
+        run: sudo apt-get install -y ffmpeg
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
       - run: cargo test
@@ -120,6 +141,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y ffmpeg
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg
       - run: cargo build --release
       - uses: actions/upload-artifact@v4
         with:
@@ -162,15 +192,18 @@ jobs:
    - 选项 A: 使用 `rayon` 全局线程池（推荐，改动最小）
    - 选项 B: 接受 `ThreadPool` 参数
 
-3. 优化忙等待 (`src/merger.rs:23-35`):
+3. 优化忙等待 (`src/merger.rs` - `ChildExt` trait):
+   - 当前 `wait_timeout` 使用轮询循环 (100ms 间隔)
+   - 实现为 `ChildExt` trait 的方法
+
    ```rust
    // 使用 Condvar 替代轮询
    use std::sync::{Arc, Condvar, Mutex};
 
-   fn wait_timeout(child: &mut Child, timeout: Duration) -> Result<ExitStatus> {
-       let pair = Arc::new((Mutex::new(false), Condvar::new()));
-       // 实现细节...
+   trait ChildExt {
+       fn wait_timeout(&mut self, timeout: Duration) -> Result<ExitStatus>;
    }
+   // 实现使用 Condvar 等待，避免忙轮询
    ```
 
 **文件改动**:
@@ -341,30 +374,43 @@ impl Cli {
 
 ### 3.3 安全细节
 
-**目标**: 修复潜在竞态条件。
+**目标**: 修复输出目录写权限检查中的潜在竞态条件。
 
-**变更** (`src/main.rs:57-64`):
+**位置**: `src/main.rs:57-65` (输出目录写权限检查)
+
+**问题**: 当前实现先创建测试文件再删除，存在 TOCTOU (Time-of-Check-Time-of-Use) 竞态。
+
+**变更**:
 
 ```rust
 // Before: 先测试写权限再删除 (TOCTOU)
-let test_file = source.join(".mixbilibili_test");
-File::create(&test_file)?;
-fs::remove_file(&test_file)?;
-
-// After: 原子创建
-use std::fs::OpenOptions;
-let test_file = source.join(".mixbilibili_test");
-match OpenOptions::new()
-    .write(true)
-    .create_new(true)  // 原子创建，失败则文件已存在
-    .open(&test_file)
-{
-    Ok(_) => fs::remove_file(&test_file)?,
-    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-        // 文件已存在，说明可写
-        fs::remove_file(&test_file)?;
+if args.output.exists() {
+    let test_file = args.output.join(".mixbilibili_write_test");
+    if std::fs::File::create(&test_file).is_err() {
+        eprintln!("{} Output directory is not writable: {}", "Error:".red(), args.output.display());
+        std::process::exit(1);
     }
-    Err(e) => return Err(e).context("Cannot write to source directory"),
+    let _ = std::fs::remove_file(&test_file);
+}
+
+// After: 原子创建检查
+if args.output.exists() {
+    let test_file = args.output.join(".mixbilibili_write_test");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)  // 原子创建，失败则文件已存在或无权限
+        .open(&test_file)
+    {
+        Ok(_) => { let _ = std::fs::remove_file(&test_file); }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // 文件已存在，说明可写，删除它
+            let _ = std::fs::remove_file(&test_file);
+        }
+        Err(_) => {
+            eprintln!("{} Output directory is not writable: {}", "Error:".red(), args.output.display());
+            std::process::exit(1);
+        }
+    }
 }
 ```
 
@@ -401,9 +447,14 @@ P3.3 安全细节
 
 | 风险 | 缓解措施 |
 |------|----------|
-| 错误处理改动影响现有逻辑 | 先写测试，再重构 |
-| 性能优化引入新 bug | 保持简单实现，避免过度优化 |
+| 错误处理改动影响现有逻辑 | 先写测试，再重构；保持错误信息语义不变 |
+| 性能优化引入新 bug | 保持简单实现，避免过度优化；添加测试验证 |
 | CI 配置复杂度 | 使用成熟模板，逐步扩展 |
+| anyhow 迁移破坏现有错误模式 | 统一使用 `.context()` 添加上下文，不改变控制流 |
+| CI 测试因缺少 ffmpeg 失败 | 在 workflow 中显式安装 ffmpeg (apt/brew/choco) |
+| 跨平台 CI 差异 | 使用条件步骤处理不同平台的 ffmpeg 安装 |
+| 测试依赖 ffmpeg 不稳定 | 使用 mock 或跳过需要真实 ffmpeg 的集成测试 |
+| 退出码变更影响消费者 | 在 CHANGELOG 中明确标注此行为变更 |
 
 ---
 
