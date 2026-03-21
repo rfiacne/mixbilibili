@@ -93,8 +93,25 @@ CLI 解析 (cli.rs)
 1. `src/merger.rs` (新增):
    - `delete_source_files` 正常删除测试
    - `delete_source_files` 文件不存在时的处理
-   - `run_with_timeout` 正常完成测试
-   - `run_with_timeout` 超时终止测试
+   - `run_with_timeout` 正常完成测试 (使用 `Command::new("sleep")` 模拟)
+   - `run_with_timeout` 超时终止测试 (使用 `Command::new("sleep")` 模拟)
+
+   **测试策略**: 使用 `sleep` 命令替代 ffmpeg 进行超时测试，避免依赖外部工具：
+   ```rust
+   #[test]
+   fn test_wait_timeout_normal() {
+       let mut child = Command::new("sleep").arg("0.1").spawn().unwrap();
+       let result = child.wait_timeout(Duration::from_secs(5));
+       assert!(result.is_ok());
+   }
+
+   #[test]
+   fn test_wait_timeout_exceeded() {
+       let mut child = Command::new("sleep").arg("10").spawn().unwrap();
+       let result = child.wait_timeout(Duration::from_millis(100));
+       assert!(result.is_err() || result.unwrap().code() == Some(-1));
+   }
+   ```
 
 2. `src/main.rs` (集成测试模块):
    - 完整合并流程测试（创建临时视频/音频文件）
@@ -163,7 +180,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
       - name: Upload Release Assets
-        # 上传到 GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: binary-*/mixbilibili*
 ```
 
 **新增文件**:
@@ -192,19 +211,10 @@ jobs:
    - 选项 A: 使用 `rayon` 全局线程池（推荐，改动最小）
    - 选项 B: 接受 `ThreadPool` 参数
 
-3. 优化忙等待 (`src/merger.rs` - `ChildExt` trait):
-   - 当前 `wait_timeout` 使用轮询循环 (100ms 间隔)
-   - 实现为 `ChildExt` trait 的方法
-
-   ```rust
-   // 使用 Condvar 替代轮询
-   use std::sync::{Arc, Condvar, Mutex};
-
-   trait ChildExt {
-       fn wait_timeout(&mut self, timeout: Duration) -> Result<ExitStatus>;
-   }
-   // 实现使用 Condvar 等待，避免忙轮询
-   ```
+3. ~~优化忙等待~~: 保持现有实现
+   - 当前的 100ms 轮询间隔对 CPU 影响极小
+   - `Child::wait()` 是阻塞的，无法与 Condvar 配合
+   - 改为 Condvar 实现需要额外线程，复杂度收益比不佳
 
 **文件改动**:
 - `src/merger.rs`
@@ -215,10 +225,10 @@ jobs:
 
 **变更**:
 
-1. 清理未使用代码 (`src/ffmpeg.rs`):
-   - `Os` enum: 若无跨平台安装计划，移除
-   - `InstallResult`: 同上
-   - `ffmpeg_path()`: 若不使用，移除；或标记为未来功能
+1. 审查未使用代码 (`src/ffmpeg.rs`):
+   - `Os` enum: **保留** - 被 `detect_os()` 使用
+   - `InstallResult`: **保留** - 被安装相关函数使用
+   - `ffmpeg_path()`: **检查是否使用** - 若不使用，移除；否则移除 `#[allow(dead_code)]`
 
 2. 消除魔法数字:
    ```rust
@@ -292,9 +302,11 @@ impl Cli {
    clap = { version = "4.5.0", features = ["derive"] }
    colored = "2.1.0"
    rayon = "1.10.0"
-   tempfile = "3.10.0"
    which = "6.0.0"
    anyhow = "1.0.82"
+
+   [dev-dependencies]
+   tempfile = "3.10.0"  # 已存在，只需锁定版本
    ```
 
 2. 移除 `num_cpus`:
