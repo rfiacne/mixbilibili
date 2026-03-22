@@ -11,7 +11,7 @@ pub fn is_ffmpeg_available() -> bool {
 }
 
 /// Get ffmpeg path if available
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn ffmpeg_path() -> Option<std::path::PathBuf> {
     which::which("ffmpeg").ok()
 }
@@ -44,14 +44,6 @@ pub fn detect_os() -> Os {
     {
         Os::Unknown
     }
-}
-
-/// Result of an installation attempt
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct InstallResult {
-    pub success: bool,
-    pub output: String,
 }
 
 /// Get install command for the current OS
