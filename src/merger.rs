@@ -348,3 +348,145 @@ mod exec_tests {
         assert_eq!(summary.orphaned_count, 3);
     }
 }
+
+#[cfg(test)]
+mod delete_tests {
+    use super::*;
+    use tempfile::tempdir;
+    use std::fs::File;
+
+    #[test]
+    fn test_delete_source_files_success() {
+        let dir = tempdir().unwrap();
+        let video_path = dir.path().join("video.mp4");
+        let audio_path = dir.path().join("video.m4a");
+
+        File::create(&video_path).unwrap();
+        File::create(&audio_path).unwrap();
+
+        let pair = FilePair {
+            video: video_path.clone(),
+            audio: audio_path.clone(),
+            stem: "video".to_string(),
+        };
+
+        let result = delete_source_files(&pair);
+        assert!(result.is_ok());
+        assert!(!video_path.exists());
+        assert!(!audio_path.exists());
+    }
+
+    #[test]
+    fn test_delete_source_files_video_missing() {
+        let dir = tempdir().unwrap();
+        let video_path = dir.path().join("video.mp4");
+        let audio_path = dir.path().join("video.m4a");
+
+        // Only create audio, video is missing
+        File::create(&audio_path).unwrap();
+
+        let pair = FilePair {
+            video: video_path.clone(),
+            audio: audio_path,
+            stem: "video".to_string(),
+        };
+
+        let result = delete_source_files(&pair);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Failed to delete video"));
+    }
+
+    #[test]
+    fn test_delete_source_files_both_missing() {
+        let dir = tempdir().unwrap();
+        let video_path = dir.path().join("video.mp4");
+        let audio_path = dir.path().join("video.m4a");
+
+        // Neither file exists
+        let pair = FilePair {
+            video: video_path,
+            audio: audio_path,
+            stem: "video".to_string(),
+        };
+
+        let result = delete_source_files(&pair);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Failed to delete both"));
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn test_wait_timeout_normal_completion() {
+        // Use cross-platform sleep command
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("sleep")
+            .arg("0.1")
+            .spawn()
+            .expect("sleep command should be available");
+
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("timeout")
+            .arg("/T")
+            .arg("1")
+            .arg("/NOBREAK")
+            .spawn()
+            .expect("timeout command should be available");
+
+        let result = child.wait_timeout(Duration::from_secs(5));
+        assert!(result.is_ok());
+        let status = result.unwrap();
+        assert!(status.is_some());
+    }
+
+    #[test]
+    fn test_wait_timeout_exceeded() {
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("sleep command should be available");
+
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("timeout")
+            .arg("/T")
+            .arg("10")
+            .arg("/NOBREAK")
+            .spawn()
+            .expect("timeout command should be available");
+
+        let result = child.wait_timeout(Duration::from_millis(50));
+        assert!(result.is_ok());
+        // Should return None indicating timeout
+        let status = result.unwrap();
+        assert!(status.is_none());
+    }
+
+    #[test]
+    fn test_wait_timeout_already_finished() {
+        // Very short sleep that finishes almost immediately
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("sleep")
+            .arg("0.01")
+            .spawn()
+            .expect("sleep command should be available");
+
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("timeout")
+            .arg("/T")
+            .arg("1")
+            .arg("/NOBREAK")
+            .spawn()
+            .expect("timeout command should be available");
+
+        // Wait a bit for it to finish
+        std::thread::sleep(Duration::from_millis(150));
+
+        let result = child.wait_timeout(Duration::from_secs(5));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+}
