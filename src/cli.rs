@@ -1,3 +1,4 @@
+use anyhow::{Result, bail};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
@@ -11,12 +12,12 @@ pub enum OutputFormat {
 
 impl OutputFormat {
     /// Parse format string, returns error message if invalid
-    pub fn parse(s: &str) -> Result<Self, String> {
+    pub fn parse(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "mkv" => Ok(Self::Mkv),
             "mp4" => Ok(Self::Mp4),
             "mov" => Ok(Self::Mov),
-            _ => Err(format!("Invalid format '{}'. Supported: mkv, mp4, mov", s)),
+            _ => bail!("Invalid format '{}'. Supported: mkv, mp4, mov", s),
         }
     }
 
@@ -63,7 +64,7 @@ mod tests {
     fn test_parse_invalid_format() {
         let result = OutputFormat::parse("avi");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Invalid format 'avi'. Supported: mkv, mp4, mov");
+        assert!(result.unwrap_err().to_string().contains("Invalid format"));
     }
 
     #[test]
@@ -108,12 +109,12 @@ pub struct Args {
 
 impl Args {
     /// Parse and validate the format string into OutputFormat
-    pub fn parsed_format(&self) -> Result<OutputFormat, String> {
+    pub fn parsed_format(&self) -> Result<OutputFormat> {
         OutputFormat::parse(&self.format)
     }
 
     /// Validate and normalize arguments
-    pub fn validate(&mut self) -> Result<(), String> {
+    pub fn validate(&mut self) -> Result<()> {
         // Clamp jobs to valid range
         if self.jobs < 1 {
             eprintln!("Warning: jobs must be >= 1, clamping to 1");
