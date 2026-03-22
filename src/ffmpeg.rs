@@ -79,7 +79,10 @@ pub fn get_install_command(os: Os) -> Option<(String, String)> {
         }
         Os::Linux => {
             if which::which("apt").is_ok() {
-                Some(("apt".to_string(), "sudo apt update && sudo apt install -y ffmpeg".to_string()))
+                Some((
+                    "apt".to_string(),
+                    "sudo apt update && sudo apt install -y ffmpeg".to_string(),
+                ))
             } else {
                 None
             }
@@ -110,9 +113,7 @@ pub fn get_manual_instructions(os: Os) -> &'static str {
              2. Using snap: sudo snap install ffmpeg\n\
              3. Manual build: https://trac.ffmpeg.org/wiki/CompilationGuide"
         }
-        Os::Unknown => {
-            "Please install ffmpeg from https://ffmpeg.org/download.html"
-        }
+        Os::Unknown => "Please install ffmpeg from https://ffmpeg.org/download.html",
     }
 }
 
@@ -240,7 +241,10 @@ mod os_tests {
     #[test]
     fn test_detect_os_returns_valid_value() {
         let os = detect_os();
-        assert!(matches!(os, Os::Windows | Os::MacOS | Os::Linux | Os::Unknown));
+        assert!(matches!(
+            os,
+            Os::Windows | Os::MacOS | Os::Linux | Os::Unknown
+        ));
     }
 
     #[test]

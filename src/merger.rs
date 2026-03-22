@@ -2,7 +2,7 @@
 use crate::cli::OutputFormat;
 use crate::ffmpeg;
 use crate::scanner::{FilePair, ScanResult};
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use colored::Colorize;
 use rayon::prelude::*;
 use std::path::Path;
@@ -90,8 +90,16 @@ impl MergeSummary {
         println!("{}", "Merge complete".green().bold());
         println!("{}: {}", "Success".green(), self.success_count);
         println!("{}: {}", "Failed".red(), self.failed_count);
-        println!("{}: {} (aria2 files present)", "Skipped".yellow(), self.skipped_count);
-        println!("{}: {} (missing pair)", "Orphaned".bright_black(), self.orphaned_count);
+        println!(
+            "{}: {} (aria2 files present)",
+            "Skipped".yellow(),
+            self.skipped_count
+        );
+        println!(
+            "{}: {} (missing pair)",
+            "Orphaned".bright_black(),
+            self.orphaned_count
+        );
         if self.deletion_failures > 0 {
             println!("{}: {}", "Deletion failures".red(), self.deletion_failures);
         }
@@ -149,7 +157,12 @@ pub fn merge_pair(
             }
         }
         Ok(status) => {
-            println!("{} {}: ffmpeg exited with code {:?}", "✗".red(), pair.stem, status.code());
+            println!(
+                "{} {}: ffmpeg exited with code {:?}",
+                "✗".red(),
+                pair.stem,
+                status.code()
+            );
             MergeResult {
                 pair_index,
                 pair_name: pair.stem.clone(),
@@ -171,8 +184,7 @@ pub fn merge_pair(
 
 /// Run a command with timeout
 fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus> {
-    let mut child = cmd.spawn()
-        .context("Failed to spawn ffmpeg process")?;
+    let mut child = cmd.spawn().context("Failed to spawn ffmpeg process")?;
 
     match child.wait_timeout(timeout) {
         Ok(Some(status)) => Ok(status),
@@ -262,14 +274,21 @@ fn delete_source_files(pair: &FilePair) -> Result<()> {
     match (video_result, audio_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(e), Ok(())) => Err(anyhow::anyhow!(
-            "Failed to delete video '{}': {}", pair.video.display(), e
+            "Failed to delete video '{}': {}",
+            pair.video.display(),
+            e
         )),
         (Ok(()), Err(e)) => Err(anyhow::anyhow!(
-            "Failed to delete audio '{}': {}", pair.audio.display(), e
+            "Failed to delete audio '{}': {}",
+            pair.audio.display(),
+            e
         )),
         (Err(ve), Err(ae)) => Err(anyhow::anyhow!(
             "Failed to delete both files: video '{}' ({}), audio '{}' ({})",
-            pair.video.display(), ve, pair.audio.display(), ae
+            pair.video.display(),
+            ve,
+            pair.audio.display(),
+            ae
         )),
     }
 }
@@ -341,13 +360,7 @@ mod exec_tests {
             skipped_names: vec![],
         };
 
-        let summary = execute_merges(
-            scan_result,
-            dir.path(),
-            OutputFormat::Mkv,
-            1,
-            false,
-        );
+        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false);
 
         assert_eq!(summary.success_count, 0);
         assert_eq!(summary.failed_count, 0);
@@ -367,13 +380,7 @@ mod exec_tests {
             skipped_names: vec![],
         };
 
-        let summary = execute_merges(
-            scan_result,
-            dir.path(),
-            OutputFormat::Mkv,
-            1,
-            false,
-        );
+        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false);
 
         assert_eq!(summary.skipped_count, 5);
         assert_eq!(summary.orphaned_count, 3);
@@ -383,8 +390,8 @@ mod exec_tests {
 #[cfg(test)]
 mod delete_tests {
     use super::*;
-    use tempfile::tempdir;
     use std::fs::File;
+    use tempfile::tempdir;
 
     #[test]
     fn test_delete_source_files_success() {
@@ -424,7 +431,10 @@ mod delete_tests {
 
         let result = delete_source_files(&pair);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to delete video"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to delete video"));
     }
 
     #[test]
@@ -442,7 +452,10 @@ mod delete_tests {
 
         let result = delete_source_files(&pair);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to delete both"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to delete both"));
     }
 }
 

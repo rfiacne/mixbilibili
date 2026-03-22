@@ -1,8 +1,8 @@
 // src/main.rs
 mod cli;
 mod ffmpeg;
-mod scanner;
 mod merger;
+mod scanner;
 
 use anyhow::Result;
 use clap::Parser;
@@ -61,13 +61,7 @@ fn run() -> Result<()> {
 
     // Phase 3: Execute merges
     println!("Processing {} file pairs...", scan_result.pairs.len());
-    let summary = merger::execute_merges(
-        scan_result,
-        &args.output,
-        format,
-        args.jobs,
-        args.sdel,
-    );
+    let summary = merger::execute_merges(scan_result, &args.output, format, args.jobs, args.sdel);
 
     // Phase 4: Print report
     summary.print_report();
@@ -88,7 +82,9 @@ fn check_output_writable(output: &std::path::Path) -> Result<()> {
             .create_new(true)
             .open(&test_file)
         {
-            Ok(_) => { let _ = std::fs::remove_file(&test_file); }
+            Ok(_) => {
+                let _ = std::fs::remove_file(&test_file);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let _ = std::fs::remove_file(&test_file);
             }

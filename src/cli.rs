@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
@@ -152,7 +152,10 @@ impl Args {
         if self.output != self.source {
             // Output will be created if it doesn't exist
             if self.output.exists() && !self.output.is_dir() {
-                bail!("Output path exists but is not a directory: {}", self.output.display());
+                bail!(
+                    "Output path exists but is not a directory: {}",
+                    self.output.display()
+                );
             }
         }
 
@@ -231,8 +234,8 @@ mod args_tests {
 #[cfg(test)]
 mod validation_tests {
     use super::*;
-    use tempfile::tempdir;
     use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn test_validate_source_not_exists() {

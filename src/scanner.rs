@@ -1,5 +1,5 @@
 // src/scanner.rs
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
@@ -72,8 +72,7 @@ pub fn scan_directory(source_dir: &Path) -> Result<ScanResult> {
     }
 
     // Check read permission
-    let entries = fs::read_dir(source_dir)
-        .context("Failed to read directory")?;
+    let entries = fs::read_dir(source_dir).context("Failed to read directory")?;
 
     // Collect all mp4 and m4a files
     let mut mp4_files: HashMap<String, PathBuf> = HashMap::new();
@@ -117,9 +116,7 @@ pub fn scan_directory(source_dir: &Path) -> Result<ScanResult> {
     let mut stats = ScanStats::default();
     let mut skipped_names = Vec::new();
 
-    let all_stems: HashSet<_> = mp4_files.keys()
-        .chain(m4a_files.keys())
-        .collect();
+    let all_stems: HashSet<_> = mp4_files.keys().chain(m4a_files.keys()).collect();
 
     for stem in all_stems {
         let has_aria2 = aria2_files.contains(stem.as_str())
@@ -147,7 +144,11 @@ pub fn scan_directory(source_dir: &Path) -> Result<ScanResult> {
         }
     }
 
-    Ok(ScanResult { pairs, stats, skipped_names })
+    Ok(ScanResult {
+        pairs,
+        stats,
+        skipped_names,
+    })
 }
 
 #[cfg(test)]
@@ -177,8 +178,8 @@ mod tests {
 #[cfg(test)]
 mod scan_tests {
     use super::*;
-    use tempfile::tempdir;
     use std::fs::File;
+    use tempfile::tempdir;
 
     #[test]
     fn test_scan_empty_directory() {
