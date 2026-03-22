@@ -103,8 +103,15 @@ pub struct Args {
     pub format: String,
 
     /// Number of parallel ffmpeg processes
-    #[arg(short = 'j', long, default_value_t = num_cpus::get())]
+    #[arg(short = 'j', long, default_value_t = default_jobs())]
     pub jobs: usize,
+}
+
+/// Get default number of jobs based on available parallelism
+fn default_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1)
 }
 
 impl Args {
