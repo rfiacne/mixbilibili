@@ -176,8 +176,8 @@ pub fn execute_merges(
 ) -> MergeSummary {
     let output_dir = output_dir.to_path_buf();
 
-    // Store pairs for later reference during deletion
-    let pairs = scan_result.pairs.clone();
+    // Use reference instead of clone
+    let pairs = &scan_result.pairs;
 
     // Configure thread pool
     let pool = rayon::ThreadPoolBuilder::new()
