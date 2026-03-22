@@ -1,26 +1,36 @@
+use anyhow::{bail, Result};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
-/// Supported output formats
+/// Supported output formats for merged files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
+    /// Matroska Video container (.mkv)
     Mkv,
+    /// MPEG-4 Part 14 container (.mp4)
     Mp4,
+    /// QuickTime File Format (.mov)
     Mov,
 }
 
 impl OutputFormat {
-    /// Parse format string, returns error message if invalid
-    pub fn parse(s: &str) -> Result<Self, String> {
+    /// Parse format string, returns error if invalid.
+    ///
+    /// # Supported formats
+    ///
+    /// - `mkv` - Matroska Video
+    /// - `mp4` - MPEG-4
+    /// - `mov` - QuickTime
+    pub fn parse(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "mkv" => Ok(Self::Mkv),
             "mp4" => Ok(Self::Mp4),
             "mov" => Ok(Self::Mov),
-            _ => Err(format!("Invalid format '{}'. Supported: mkv, mp4, mov", s)),
+            _ => bail!("Invalid format '{}'. Supported: mkv, mp4, mov", s),
         }
     }
 
-    /// Get file extension for this format
+    /// Get file extension for this format.
     pub fn extension(&self) -> &'static str {
         match self {
             Self::Mkv => "mkv",
@@ -29,7 +39,7 @@ impl OutputFormat {
         }
     }
 
-    /// Returns true if format requires -movflags +faststart
+    /// Returns true if format requires `-movflags +faststart` ffmpeg flag.
     pub fn needs_faststart(&self) -> bool {
         matches!(self, Self::Mp4 | Self::Mov)
     }
@@ -63,7 +73,7 @@ mod tests {
     fn test_parse_invalid_format() {
         let result = OutputFormat::parse("avi");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Invalid format 'avi'. Supported: mkv, mp4, mov");
+        assert!(result.unwrap_err().to_string().contains("Invalid format"));
     }
 
     #[test]
@@ -102,18 +112,25 @@ pub struct Args {
     pub format: String,
 
     /// Number of parallel ffmpeg processes
-    #[arg(short = 'j', long, default_value_t = num_cpus::get())]
+    #[arg(short = 'j', long, default_value_t = default_jobs())]
     pub jobs: usize,
+}
+
+/// Get default number of jobs based on available parallelism
+fn default_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1)
 }
 
 impl Args {
     /// Parse and validate the format string into OutputFormat
-    pub fn parsed_format(&self) -> Result<OutputFormat, String> {
+    pub fn parsed_format(&self) -> Result<OutputFormat> {
         OutputFormat::parse(&self.format)
     }
 
     /// Validate and normalize arguments
-    pub fn validate(&mut self) -> Result<(), String> {
+    pub fn validate(&mut self) -> Result<()> {
         // Clamp jobs to valid range
         if self.jobs < 1 {
             eprintln!("Warning: jobs must be >= 1, clamping to 1");
@@ -122,6 +139,26 @@ impl Args {
             eprintln!("Warning: jobs must be <= 32, clamping to 32");
             self.jobs = 32;
         }
+
+        // Validate source directory
+        if !self.source.exists() {
+            bail!("Source directory does not exist: {}", self.source.display());
+        }
+        if !self.source.is_dir() {
+            bail!("Source path is not a directory: {}", self.source.display());
+        }
+
+        // Validate output directory (if different from source)
+        if self.output != self.source {
+            // Output will be created if it doesn't exist
+            if self.output.exists() && !self.output.is_dir() {
+                bail!(
+                    "Output path exists but is not a directory: {}",
+                    self.output.display()
+                );
+            }
+        }
+
         Ok(())
     }
 }
@@ -191,5 +228,77 @@ mod args_tests {
             jobs: 4,
         };
         assert!(args.parsed_format().is_err());
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_validate_source_not_exists() {
+        let mut args = Args {
+            source: PathBuf::from("/nonexistent/path/12345"),
+            output: PathBuf::from("."),
+            sdel: true,
+            format: "mkv".to_string(),
+            jobs: 4,
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn test_validate_source_is_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("file.txt");
+        fs::File::create(&file).unwrap();
+
+        let mut args = Args {
+            source: file,
+            output: PathBuf::from("."),
+            sdel: true,
+            format: "mkv".to_string(),
+            jobs: 4,
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not a directory"));
+    }
+
+    #[test]
+    fn test_validate_output_is_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("output.txt");
+        fs::File::create(&file).unwrap();
+
+        let mut args = Args {
+            source: dir.path().to_path_buf(),
+            output: file,
+            sdel: true,
+            format: "mkv".to_string(),
+            jobs: 4,
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not a directory"));
+    }
+
+    #[test]
+    fn test_validate_success() {
+        let dir = tempdir().unwrap();
+
+        let mut args = Args {
+            source: dir.path().to_path_buf(),
+            output: dir.path().to_path_buf(),
+            sdel: true,
+            format: "mkv".to_string(),
+            jobs: 4,
+        };
+        let result = args.validate();
+        assert!(result.is_ok());
     }
 }

@@ -1,58 +1,78 @@
 // src/scanner.rs
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// A pair of video and audio files to merge
+/// A pair of video and audio files to merge.
+///
+/// Represents matched video (.mp4) and audio (.m4a) files
+/// with the same filename stem.
 #[derive(Debug, Clone)]
 pub struct FilePair {
-    /// The video file (.mp4)
+    /// The video file path (.mp4)
     pub video: PathBuf,
-    /// The audio file (.m4a)
+    /// The audio file path (.m4a)
     pub audio: PathBuf,
-    /// The stem (filename without extension)
+    /// The filename stem (filename without extension)
     pub stem: String,
 }
 
-/// Statistics from scanning
+/// Statistics from directory scanning.
 #[derive(Debug, Clone, Default)]
 pub struct ScanStats {
-    /// Number of valid pairs found
+    /// Number of valid file pairs found
     pub pairs: usize,
-    /// Number of pairs skipped due to aria2 files
+    /// Number of pairs skipped due to aria2 control files
     pub skipped: usize,
-    /// Number of orphaned files (mp4 or m4a without pair)
+    /// Number of orphaned files (mp4 or m4a without matching pair)
     pub orphaned: usize,
 }
 
-/// Result of scanning a directory
+/// Result of scanning a directory for media file pairs.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct ScanResult {
     /// Valid file pairs ready for merging
     pub pairs: Vec<FilePair>,
-    /// Statistics
+    /// Scanning statistics
     pub stats: ScanStats,
-    /// Names of skipped pairs (for aria2)
+    /// Names of skipped pairs (aria2 downloads in progress)
     pub skipped_names: Vec<String>,
 }
 
-/// Scan a directory for mp4/m4a file pairs
+/// Scan a directory for matching mp4/m4a file pairs.
 ///
-/// Note: Files with non-UTF8 names are silently skipped during scanning.
-pub fn scan_directory(source_dir: &Path) -> Result<ScanResult, String> {
+/// # Arguments
+///
+/// * `source_dir` - The directory to scan for media files
+///
+/// # Returns
+///
+/// A `ScanResult` containing matched pairs and statistics.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The source directory does not exist
+/// - The source path is not a directory
+/// - The directory cannot be read
+///
+/// # Note
+///
+/// Files with non-UTF8 names are silently skipped during scanning.
+pub fn scan_directory(source_dir: &Path) -> Result<ScanResult> {
     if !source_dir.exists() {
-        return Err(format!("Source directory does not exist: {}", source_dir.display()));
+        anyhow::bail!("Source directory does not exist: {}", source_dir.display());
     }
 
     if !source_dir.is_dir() {
-        return Err(format!("Source path is not a directory: {}", source_dir.display()));
+        anyhow::bail!("Source path is not a directory: {}", source_dir.display());
     }
 
     // Check read permission
-    let entries = fs::read_dir(source_dir)
-        .map_err(|e| format!("Failed to read directory: {}", e))?;
+    let entries = fs::read_dir(source_dir).context("Failed to read directory")?;
 
     // Collect all mp4 and m4a files
     let mut mp4_files: HashMap<String, PathBuf> = HashMap::new();
@@ -60,7 +80,7 @@ pub fn scan_directory(source_dir: &Path) -> Result<ScanResult, String> {
     let mut aria2_files: HashSet<String> = HashSet::new();
 
     for entry in entries {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let entry = entry.context("Failed to read directory entry")?;
         let path = entry.path();
 
         // Skip directories
@@ -96,9 +116,7 @@ pub fn scan_directory(source_dir: &Path) -> Result<ScanResult, String> {
     let mut stats = ScanStats::default();
     let mut skipped_names = Vec::new();
 
-    let all_stems: HashSet<_> = mp4_files.keys()
-        .chain(m4a_files.keys())
-        .collect();
+    let all_stems: HashSet<_> = mp4_files.keys().chain(m4a_files.keys()).collect();
 
     for stem in all_stems {
         let has_aria2 = aria2_files.contains(stem.as_str())
@@ -126,7 +144,11 @@ pub fn scan_directory(source_dir: &Path) -> Result<ScanResult, String> {
         }
     }
 
-    Ok(ScanResult { pairs, stats, skipped_names })
+    Ok(ScanResult {
+        pairs,
+        stats,
+        skipped_names,
+    })
 }
 
 #[cfg(test)]
@@ -156,8 +178,8 @@ mod tests {
 #[cfg(test)]
 mod scan_tests {
     use super::*;
-    use tempfile::tempdir;
     use std::fs::File;
+    use tempfile::tempdir;
 
     #[test]
     fn test_scan_empty_directory() {
@@ -171,7 +193,7 @@ mod scan_tests {
     fn test_scan_nonexistent_directory() {
         let result = scan_directory(Path::new("/nonexistent/path/12345"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("does not exist"));
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
 
     #[test]
@@ -182,7 +204,7 @@ mod scan_tests {
 
         let result = scan_directory(&file_path);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not a directory"));
+        assert!(result.unwrap_err().to_string().contains("not a directory"));
     }
 
     #[test]
