@@ -43,37 +43,38 @@ impl ChildExt for Child {
     }
 }
 
-/// Result of a single merge operation
+/// Result of a single merge operation.
 #[derive(Debug)]
 pub struct MergeResult {
     /// Index of the pair in the original pairs vector
     pub pair_index: usize,
-    /// The file pair that was processed
+    /// The stem name of the processed pair
     pub pair_name: String,
     /// Whether the merge succeeded
     pub success: bool,
-    /// Error message if failed
+    /// Error message if the merge failed
     pub error: Option<String>,
 }
 
-/// Summary of all merge operations
+/// Summary of all merge operations.
 #[derive(Debug, Default)]
 pub struct MergeSummary {
     /// Number of successful merges
     pub success_count: usize,
     /// Number of failed merges
     pub failed_count: usize,
-    /// Number of skipped pairs (aria2)
+    /// Number of skipped pairs (aria2 files present)
     pub skipped_count: usize,
     /// Number of orphaned files
     pub orphaned_count: usize,
-    /// List of failed merges with errors
+    /// List of failed merges with error messages
     pub failures: Vec<(String, String)>,
-    /// Number of source deletion failures
+    /// Number of source file deletion failures
     pub deletion_failures: usize,
 }
 
 impl MergeSummary {
+    /// Create a new empty merge summary.
     pub fn new() -> Self {
         Self::default()
     }
@@ -105,7 +106,18 @@ impl MergeSummary {
     }
 }
 
-/// Merge a single file pair
+/// Merge a single file pair using ffmpeg.
+///
+/// # Arguments
+///
+/// * `pair` - The file pair to merge
+/// * `pair_index` - Index for tracking in results
+/// * `output_dir` - Directory for output file
+/// * `format` - Output format (MKV, MP4, MOV)
+///
+/// # Returns
+///
+/// A `MergeResult` indicating success or failure.
 pub fn merge_pair(
     pair: &FilePair,
     pair_index: usize,
@@ -173,7 +185,19 @@ fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Resul
     }
 }
 
-/// Execute parallel merges with controlled concurrency
+/// Execute parallel merges with controlled concurrency.
+///
+/// # Arguments
+///
+/// * `scan_result` - Result from directory scanning
+/// * `output_dir` - Directory for output files
+/// * `format` - Output format
+/// * `jobs` - Number of parallel processes
+/// * `delete_source` - Whether to delete source files after success
+///
+/// # Returns
+///
+/// A `MergeSummary` with results of all operations.
 pub fn execute_merges(
     scan_result: ScanResult,
     output_dir: &Path,

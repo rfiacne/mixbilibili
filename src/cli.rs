@@ -2,16 +2,25 @@ use anyhow::{Result, bail};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
-/// Supported output formats
+/// Supported output formats for merged files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
+    /// Matroska Video container (.mkv)
     Mkv,
+    /// MPEG-4 Part 14 container (.mp4)
     Mp4,
+    /// QuickTime File Format (.mov)
     Mov,
 }
 
 impl OutputFormat {
-    /// Parse format string, returns error message if invalid
+    /// Parse format string, returns error if invalid.
+    ///
+    /// # Supported formats
+    ///
+    /// - `mkv` - Matroska Video
+    /// - `mp4` - MPEG-4
+    /// - `mov` - QuickTime
     pub fn parse(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "mkv" => Ok(Self::Mkv),
@@ -21,7 +30,7 @@ impl OutputFormat {
         }
     }
 
-    /// Get file extension for this format
+    /// Get file extension for this format.
     pub fn extension(&self) -> &'static str {
         match self {
             Self::Mkv => "mkv",
@@ -30,7 +39,7 @@ impl OutputFormat {
         }
     }
 
-    /// Returns true if format requires -movflags +faststart
+    /// Returns true if format requires `-movflags +faststart` ffmpeg flag.
     pub fn needs_faststart(&self) -> bool {
         matches!(self, Self::Mp4 | Self::Mov)
     }

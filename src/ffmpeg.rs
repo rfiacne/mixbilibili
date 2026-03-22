@@ -5,28 +5,36 @@ use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::process::Command;
 
-/// Check if ffmpeg is available in PATH
+/// Check if ffmpeg is available in PATH.
+///
+/// # Returns
+///
+/// `true` if ffmpeg can be found, `false` otherwise.
 pub fn is_ffmpeg_available() -> bool {
     which::which("ffmpeg").is_ok()
 }
 
-/// Get ffmpeg path if available
+/// Get ffmpeg path if available.
 #[cfg(test)]
 pub fn ffmpeg_path() -> Option<std::path::PathBuf> {
     which::which("ffmpeg").ok()
 }
 
-/// Supported operating systems
+/// Supported operating systems for package management.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Os {
+    /// Microsoft Windows
     Windows,
+    /// Apple macOS
     MacOS,
+    /// Linux distributions
     Linux,
+    /// Unknown or unsupported OS
     Unknown,
 }
 
-/// Detect current operating system
+/// Detect current operating system.
 pub fn detect_os() -> Os {
     #[cfg(target_os = "windows")]
     {
@@ -46,7 +54,10 @@ pub fn detect_os() -> Os {
     }
 }
 
-/// Get install command for the current OS
+/// Get install command for the current OS.
+///
+/// Returns a tuple of (package_manager_name, command_string) if a suitable
+/// package manager is found.
 pub fn get_install_command(os: Os) -> Option<(String, String)> {
     match os {
         Os::Windows => {
