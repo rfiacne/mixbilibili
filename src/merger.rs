@@ -10,7 +10,13 @@ use std::process::{Child, ExitStatus};
 use std::time::Duration;
 
 /// Default timeout for ffmpeg process (5 minutes)
-const FFMPEG_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
+
+/// Polling interval for checking process status
+const POLL_INTERVAL_MILLIS: u64 = 100;
+
+/// Default timeout for ffmpeg process
+const FFMPEG_TIMEOUT: Duration = Duration::from_secs(DEFAULT_TIMEOUT_SECS);
 
 /// Extension trait for waiting with timeout
 trait ChildExt {
@@ -20,6 +26,7 @@ trait ChildExt {
 impl ChildExt for Child {
     fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>> {
         let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(POLL_INTERVAL_MILLIS);
 
         loop {
             match self.try_wait() {
@@ -28,7 +35,7 @@ impl ChildExt for Child {
                     if start.elapsed() >= timeout {
                         return Ok(None);
                     }
-                    std::thread::sleep(Duration::from_millis(100));
+                    std::thread::sleep(poll_interval);
                 }
                 Err(e) => return Err(e).context("Failed to check process status"),
             }
