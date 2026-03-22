@@ -123,6 +123,23 @@ impl Args {
             eprintln!("Warning: jobs must be <= 32, clamping to 32");
             self.jobs = 32;
         }
+
+        // Validate source directory
+        if !self.source.exists() {
+            bail!("Source directory does not exist: {}", self.source.display());
+        }
+        if !self.source.is_dir() {
+            bail!("Source path is not a directory: {}", self.source.display());
+        }
+
+        // Validate output directory (if different from source)
+        if self.output != self.source {
+            // Output will be created if it doesn't exist
+            if self.output.exists() && !self.output.is_dir() {
+                bail!("Output path exists but is not a directory: {}", self.output.display());
+            }
+        }
+
         Ok(())
     }
 }
@@ -192,5 +209,77 @@ mod args_tests {
             jobs: 4,
         };
         assert!(args.parsed_format().is_err());
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    use tempfile::tempdir;
+    use std::fs;
+
+    #[test]
+    fn test_validate_source_not_exists() {
+        let mut args = Args {
+            source: PathBuf::from("/nonexistent/path/12345"),
+            output: PathBuf::from("."),
+            sdel: true,
+            format: "mkv".to_string(),
+            jobs: 4,
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn test_validate_source_is_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("file.txt");
+        fs::File::create(&file).unwrap();
+
+        let mut args = Args {
+            source: file,
+            output: PathBuf::from("."),
+            sdel: true,
+            format: "mkv".to_string(),
+            jobs: 4,
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not a directory"));
+    }
+
+    #[test]
+    fn test_validate_output_is_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("output.txt");
+        fs::File::create(&file).unwrap();
+
+        let mut args = Args {
+            source: dir.path().to_path_buf(),
+            output: file,
+            sdel: true,
+            format: "mkv".to_string(),
+            jobs: 4,
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not a directory"));
+    }
+
+    #[test]
+    fn test_validate_success() {
+        let dir = tempdir().unwrap();
+
+        let mut args = Args {
+            source: dir.path().to_path_buf(),
+            output: dir.path().to_path_buf(),
+            sdel: true,
+            format: "mkv".to_string(),
+            jobs: 4,
+        };
+        let result = args.validate();
+        assert!(result.is_ok());
     }
 }
