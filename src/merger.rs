@@ -2,6 +2,7 @@
 use crate::cli::OutputFormat;
 use crate::ffmpeg;
 use crate::scanner::{FilePair, ScanResult};
+use anyhow::{Result, Context};
 use colored::Colorize;
 use rayon::prelude::*;
 use std::path::Path;
@@ -13,11 +14,11 @@ const FFMPEG_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Extension trait for waiting with timeout
 trait ChildExt {
-    fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>, std::io::Error>;
+    fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>>;
 }
 
 impl ChildExt for Child {
-    fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>, std::io::Error> {
+    fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>> {
         let start = std::time::Instant::now();
 
         loop {
@@ -29,7 +30,7 @@ impl ChildExt for Child {
                     }
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                Err(e) => return Err(e),
+                Err(e) => return Err(e).context("Failed to check process status"),
             }
         }
     }
@@ -143,25 +144,25 @@ pub fn merge_pair(
                 pair_index,
                 pair_name: pair.stem.clone(),
                 success: false,
-                error: Some(e),
+                error: Some(e.to_string()),
             }
         }
     }
 }
 
 /// Run a command with timeout
-fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus, String> {
+fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus> {
     let mut child = cmd.spawn()
-        .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
+        .context("Failed to spawn ffmpeg process")?;
 
     match child.wait_timeout(timeout) {
         Ok(Some(status)) => Ok(status),
         Ok(None) => {
             let _ = child.kill();
             let _ = child.wait();
-            Err("ffmpeg process timed out after 5 minutes".to_string())
+            anyhow::bail!("ffmpeg process timed out after 5 minutes");
         }
-        Err(e) => Err(format!("Failed to wait for ffmpeg: {}", e)),
+        Err(e) => Err(e).context("Failed to wait for ffmpeg process"),
     }
 }
 
@@ -223,16 +224,20 @@ pub fn execute_merges(
 
 /// Delete source files after successful merge
 /// Returns Ok(()) if both files deleted, or Err with details of any failures
-fn delete_source_files(pair: &FilePair) -> Result<(), String> {
+fn delete_source_files(pair: &FilePair) -> Result<()> {
     let video_result = std::fs::remove_file(&pair.video);
     let audio_result = std::fs::remove_file(&pair.audio);
 
     match (video_result, audio_result) {
         (Ok(()), Ok(())) => Ok(()),
-        (Err(e), Ok(())) => Err(format!("Failed to delete video '{}': {}", pair.video.display(), e)),
-        (Ok(()), Err(e)) => Err(format!("Failed to delete audio '{}': {}", pair.audio.display(), e)),
-        (Err(ve), Err(ae)) => Err(format!(
-            "Failed to delete both files: video '{}' ({}, audio '{}' ({})",
+        (Err(e), Ok(())) => Err(anyhow::anyhow!(
+            "Failed to delete video '{}': {}", pair.video.display(), e
+        )),
+        (Ok(()), Err(e)) => Err(anyhow::anyhow!(
+            "Failed to delete audio '{}': {}", pair.audio.display(), e
+        )),
+        (Err(ve), Err(ae)) => Err(anyhow::anyhow!(
+            "Failed to delete both files: video '{}' ({}), audio '{}' ({})",
             pair.video.display(), ve, pair.audio.display(), ae
         )),
     }
