@@ -1,4 +1,5 @@
 // src/scanner.rs
+use anyhow::{Result, Context};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
@@ -41,18 +42,21 @@ pub struct ScanResult {
 /// Scan a directory for mp4/m4a file pairs
 ///
 /// Note: Files with non-UTF8 names are silently skipped during scanning.
-pub fn scan_directory(source_dir: &Path) -> Result<ScanResult, String> {
+///
+/// # Errors
+/// Returns an error if the directory cannot be read.
+pub fn scan_directory(source_dir: &Path) -> Result<ScanResult> {
     if !source_dir.exists() {
-        return Err(format!("Source directory does not exist: {}", source_dir.display()));
+        anyhow::bail!("Source directory does not exist: {}", source_dir.display());
     }
 
     if !source_dir.is_dir() {
-        return Err(format!("Source path is not a directory: {}", source_dir.display()));
+        anyhow::bail!("Source path is not a directory: {}", source_dir.display());
     }
 
     // Check read permission
     let entries = fs::read_dir(source_dir)
-        .map_err(|e| format!("Failed to read directory: {}", e))?;
+        .context("Failed to read directory")?;
 
     // Collect all mp4 and m4a files
     let mut mp4_files: HashMap<String, PathBuf> = HashMap::new();
@@ -60,7 +64,7 @@ pub fn scan_directory(source_dir: &Path) -> Result<ScanResult, String> {
     let mut aria2_files: HashSet<String> = HashSet::new();
 
     for entry in entries {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let entry = entry.context("Failed to read directory entry")?;
         let path = entry.path();
 
         // Skip directories
@@ -171,7 +175,7 @@ mod scan_tests {
     fn test_scan_nonexistent_directory() {
         let result = scan_directory(Path::new("/nonexistent/path/12345"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("does not exist"));
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
 
     #[test]
@@ -182,7 +186,7 @@ mod scan_tests {
 
         let result = scan_directory(&file_path);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not a directory"));
+        assert!(result.unwrap_err().to_string().contains("not a directory"));
     }
 
     #[test]
