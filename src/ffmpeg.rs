@@ -5,36 +5,24 @@ use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::process::Command;
 
-/// Check if ffmpeg is available in PATH.
-///
-/// # Returns
-///
-/// `true` if ffmpeg can be found, `false` otherwise.
 pub fn is_ffmpeg_available() -> bool {
     which::which("ffmpeg").is_ok()
 }
 
-/// Get ffmpeg path if available.
 #[cfg(test)]
 pub fn ffmpeg_path() -> Option<std::path::PathBuf> {
     which::which("ffmpeg").ok()
 }
 
-/// Supported operating systems for package management.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Os {
-    /// Microsoft Windows
     Windows,
-    /// Apple macOS
     MacOS,
-    /// Linux distributions
     Linux,
-    /// Unknown or unsupported OS
     Unknown,
 }
 
-/// Detect current operating system.
 pub fn detect_os() -> Os {
     #[cfg(target_os = "windows")]
     {
@@ -54,14 +42,9 @@ pub fn detect_os() -> Os {
     }
 }
 
-/// Get install command for the current OS.
-///
-/// Returns a tuple of (package_manager_name, command_string) if a suitable
-/// package manager is found.
 pub fn get_install_command(os: Os) -> Option<(String, String)> {
     match os {
         Os::Windows => {
-            // Try winget first
             if which::which("winget").is_ok() {
                 Some(("winget".to_string(), "winget install ffmpeg".to_string()))
             } else if which::which("choco").is_ok() {
@@ -91,7 +74,6 @@ pub fn get_install_command(os: Os) -> Option<(String, String)> {
     }
 }
 
-/// Get manual install instructions for the current OS
 pub fn get_manual_instructions(os: Os) -> &'static str {
     match os {
         Os::Windows => {
@@ -117,8 +99,6 @@ pub fn get_manual_instructions(os: Os) -> &'static str {
     }
 }
 
-/// Prompt user for ffmpeg installation
-/// Returns true if user agreed and installation succeeded
 pub fn prompt_and_install(os: Os) -> bool {
     if let Some((pm_name, _)) = get_install_command(os) {
         print!("ffmpeg not found. Install via {}? [y/N]: ", pm_name);
@@ -138,7 +118,6 @@ pub fn prompt_and_install(os: Os) -> bool {
     false
 }
 
-/// Run the installation command
 fn run_install(os: Os) -> bool {
     if let Some((_, cmd)) = get_install_command(os) {
         println!("Running: {}", cmd);
@@ -151,7 +130,6 @@ fn run_install(os: Os) -> bool {
 
         match result {
             Ok(status) if status.success() => {
-                // Verify installation
                 if is_ffmpeg_available() {
                     println!("ffmpeg installed successfully!");
                     return true;
@@ -173,8 +151,6 @@ fn run_install(os: Os) -> bool {
     false
 }
 
-/// Ensure ffmpeg is available, prompting for installation if needed
-/// Returns true if ffmpeg is available (was already or installed successfully)
 pub fn ensure_ffmpeg() -> bool {
     if is_ffmpeg_available() {
         return true;
@@ -184,7 +160,6 @@ pub fn ensure_ffmpeg() -> bool {
     prompt_and_install(os)
 }
 
-/// Build ffmpeg merge command
 pub fn build_merge_command(
     video_path: &Path,
     audio_path: &Path,

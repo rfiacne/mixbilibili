@@ -35,9 +35,8 @@ fn test_invalid_format() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Check for the error message (may contain ANSI color codes)
     assert!(
-        stderr.contains("Invalid format") && stderr.contains("avi"),
+        stderr.contains("invalid value") && stderr.contains("avi"),
         "Expected error message not found in: {}",
         stderr
     );

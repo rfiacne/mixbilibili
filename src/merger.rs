@@ -1,4 +1,3 @@
-// src/merger.rs
 use crate::cli::OutputFormat;
 use crate::ffmpeg;
 use crate::scanner::{FilePair, ScanResult};
@@ -9,16 +8,9 @@ use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::time::Duration;
 
-/// Default timeout for ffmpeg process (5 minutes)
-const DEFAULT_TIMEOUT_SECS: u64 = 300;
+const FFMPEG_TIMEOUT: Duration = Duration::from_secs(300);
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Polling interval for checking process status
-const POLL_INTERVAL_MILLIS: u64 = 100;
-
-/// Default timeout for ffmpeg process
-const FFMPEG_TIMEOUT: Duration = Duration::from_secs(DEFAULT_TIMEOUT_SECS);
-
-/// Extension trait for waiting with timeout
 trait ChildExt {
     fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>>;
 }
@@ -26,7 +18,6 @@ trait ChildExt {
 impl ChildExt for Child {
     fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>> {
         let start = std::time::Instant::now();
-        let poll_interval = Duration::from_millis(POLL_INTERVAL_MILLIS);
 
         loop {
             match self.try_wait() {
@@ -35,7 +26,7 @@ impl ChildExt for Child {
                     if start.elapsed() >= timeout {
                         return Ok(None);
                     }
-                    std::thread::sleep(poll_interval);
+                    std::thread::sleep(POLL_INTERVAL);
                 }
                 Err(e) => return Err(e).context("Failed to check process status"),
             }
@@ -43,48 +34,33 @@ impl ChildExt for Child {
     }
 }
 
-/// Result of a single merge operation.
 #[derive(Debug)]
 pub struct MergeResult {
-    /// Index of the pair in the original pairs vector
     pub pair_index: usize,
-    /// The stem name of the processed pair
     pub pair_name: String,
-    /// Whether the merge succeeded
     pub success: bool,
-    /// Error message if the merge failed
     pub error: Option<String>,
 }
 
-/// Summary of all merge operations.
 #[derive(Debug, Default)]
 pub struct MergeSummary {
-    /// Number of successful merges
     pub success_count: usize,
-    /// Number of failed merges
     pub failed_count: usize,
-    /// Number of skipped pairs (aria2 files present)
     pub skipped_count: usize,
-    /// Number of orphaned files
     pub orphaned_count: usize,
-    /// List of failed merges with error messages
     pub failures: Vec<(String, String)>,
-    /// Number of source file deletion failures
     pub deletion_failures: usize,
 }
 
 impl MergeSummary {
-    /// Create a new empty merge summary.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Check if all operations succeeded
     pub fn all_success(&self) -> bool {
         self.failed_count == 0
     }
 
-    /// Print a formatted summary report
     pub fn print_report(&self) {
         println!("{}", "================================".bright_black());
         println!("{}", "Merge complete".green().bold());
@@ -114,25 +90,12 @@ impl MergeSummary {
     }
 }
 
-/// Merge a single file pair using ffmpeg.
-///
-/// # Arguments
-///
-/// * `pair` - The file pair to merge
-/// * `pair_index` - Index for tracking in results
-/// * `output_dir` - Directory for output file
-/// * `format` - Output format (MKV, MP4, MOV)
-///
-/// # Returns
-///
-/// A `MergeResult` indicating success or failure.
 pub fn merge_pair(
     pair: &FilePair,
     pair_index: usize,
     output_dir: &Path,
     format: OutputFormat,
 ) -> MergeResult {
-    // Validate stem doesn't contain path separators
     if pair.stem.contains('/') || pair.stem.contains('\\') {
         return MergeResult {
             pair_index,
@@ -182,7 +145,6 @@ pub fn merge_pair(
     }
 }
 
-/// Run a command with timeout
 fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus> {
     let mut child = cmd.spawn().context("Failed to spawn ffmpeg process")?;
 
@@ -197,19 +159,6 @@ fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Resul
     }
 }
 
-/// Execute parallel merges with controlled concurrency.
-///
-/// # Arguments
-///
-/// * `scan_result` - Result from directory scanning
-/// * `output_dir` - Directory for output files
-/// * `format` - Output format
-/// * `jobs` - Number of parallel processes
-/// * `delete_source` - Whether to delete source files after success
-///
-/// # Returns
-///
-/// A `MergeSummary` with results of all operations.
 pub fn execute_merges(
     scan_result: ScanResult,
     output_dir: &Path,
@@ -218,55 +167,52 @@ pub fn execute_merges(
     delete_source: bool,
 ) -> MergeSummary {
     let output_dir = output_dir.to_path_buf();
+    let pairs = scan_result.pairs;
 
-    // Use reference instead of clone
-    let pairs = &scan_result.pairs;
-
-    // Configure thread pool
-    let pool = rayon::ThreadPoolBuilder::new()
+    let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs)
-        .build()
-        .unwrap();
+        .build_global();
 
-    // Execute merges in parallel with indices
-    let results: Vec<MergeResult> = pool.install(|| {
-        pairs
-            .par_iter()
-            .enumerate()
-            .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format))
-            .collect()
-    });
+    let results: Vec<MergeResult> = pairs
+        .par_iter()
+        .enumerate()
+        .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format))
+        .collect();
 
-    // Build summary
     let mut summary = MergeSummary::new();
     summary.skipped_count = scan_result.stats.skipped;
     summary.orphaned_count = scan_result.stats.orphaned;
 
-    for result in results {
+    if delete_source {
+        results.par_iter().filter(|r| r.success).for_each(|result| {
+            let pair = &pairs[result.pair_index];
+            if let Err(e) = delete_source_files(pair) {
+                eprintln!("Warning: {}", e);
+            }
+        });
+    }
+
+    for result in &results {
         if result.success {
             summary.success_count += 1;
-
-            // Delete source files if requested
-            if delete_source {
-                let pair = &pairs[result.pair_index];
-                if let Err(e) = delete_source_files(pair) {
-                    eprintln!("Warning: {}", e);
-                    summary.deletion_failures += 1;
-                }
-            }
         } else {
             summary.failed_count += 1;
-            if let Some(error) = result.error {
-                summary.failures.push((result.pair_name, error));
+            if let Some(error) = &result.error {
+                summary
+                    .failures
+                    .push((result.pair_name.clone(), error.clone()));
             }
         }
+    }
+
+    if delete_source {
+        let deleted_count = results.iter().filter(|r| r.success).count();
+        summary.deletion_failures = deleted_count - summary.success_count;
     }
 
     summary
 }
 
-/// Delete source files after successful merge
-/// Returns Ok(()) if both files deleted, or Err with details of any failures
 fn delete_source_files(pair: &FilePair) -> Result<()> {
     let video_result = std::fs::remove_file(&pair.video);
     let audio_result = std::fs::remove_file(&pair.audio);
