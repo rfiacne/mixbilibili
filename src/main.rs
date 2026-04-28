@@ -2,6 +2,7 @@
 mod cli;
 mod ffmpeg;
 mod merger;
+mod progress;
 mod scanner;
 
 use anyhow::Result;
@@ -10,17 +11,58 @@ use cli::Args;
 use colored::Colorize;
 
 mod exit_codes {
-    #[allow(dead_code)]
-    pub const SUCCESS: i32 = 0;
     pub const GENERAL_ERROR: i32 = 1;
     pub const FFMPEG_NOT_FOUND: i32 = 2;
     pub const MERGE_FAILED: i32 = 3;
 }
 
+#[derive(Debug)]
+enum AppError {
+    FfmpegNotFound,
+    MergeFailed,
+    Other(String),
+}
+
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppError::FfmpegNotFound => write!(f, "ffmpeg not found"),
+            AppError::MergeFailed => write!(f, "Some merges failed"),
+            AppError::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl From<AppError> for anyhow::Error {
+    fn from(err: AppError) -> Self {
+        anyhow::Error::msg(err.to_string())
+    }
+}
+
+fn error_category(error: &anyhow::Error) -> AppError {
+    let err_str = error.to_string();
+    if err_str.contains("ffmpeg") || err_str.contains("FFmpeg") {
+        AppError::FfmpegNotFound
+    } else if err_str.contains("failed") || err_str.contains("Failed") {
+        AppError::MergeFailed
+    } else {
+        AppError::Other(err_str)
+    }
+}
+
+fn exit_code_for_error(error: &AppError) -> i32 {
+    match error {
+        AppError::FfmpegNotFound => exit_codes::FFMPEG_NOT_FOUND,
+        AppError::MergeFailed => exit_codes::MERGE_FAILED,
+        AppError::Other(_) => exit_codes::GENERAL_ERROR,
+    }
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("{} {}", "Error:".red(), e);
-        std::process::exit(determine_exit_code(&e));
+        let category = error_category(&e);
+        std::process::exit(exit_code_for_error(&category));
     }
 }
 
@@ -30,8 +72,8 @@ fn run() -> Result<()> {
 
     let format = args.format;
 
-    if !ffmpeg::ensure_ffmpeg() {
-        std::process::exit(exit_codes::FFMPEG_NOT_FOUND);
+    if !ffmpeg::ensure_ffmpeg()? {
+        return Err(AppError::FfmpegNotFound.into());
     }
 
     let scan_result = scanner::scan_directory(&args.source)?;
@@ -54,18 +96,7 @@ fn run() -> Result<()> {
     if summary.all_success() {
         Ok(())
     } else {
-        Err(anyhow::anyhow!("Some merges failed"))
-    }
-}
-
-fn determine_exit_code(error: &anyhow::Error) -> i32 {
-    let err_str = error.to_string();
-    if err_str.contains("ffmpeg") || err_str.contains("FFmpeg") {
-        exit_codes::FFMPEG_NOT_FOUND
-    } else if err_str.contains("merge") || err_str.contains("failed") {
-        exit_codes::MERGE_FAILED
-    } else {
-        exit_codes::GENERAL_ERROR
+        Err(AppError::MergeFailed.into())
     }
 }
 
@@ -75,27 +106,39 @@ mod integration_tests {
 
     #[test]
     fn test_exit_codes_constants() {
-        assert_eq!(exit_codes::SUCCESS, 0);
         assert_eq!(exit_codes::GENERAL_ERROR, 1);
         assert_eq!(exit_codes::FFMPEG_NOT_FOUND, 2);
         assert_eq!(exit_codes::MERGE_FAILED, 3);
     }
 
     #[test]
-    fn test_determine_exit_code_general() {
+    fn test_error_category_general() {
         let err = anyhow::anyhow!("Some random error");
-        assert_eq!(determine_exit_code(&err), exit_codes::GENERAL_ERROR);
+        let category = error_category(&err);
+        assert!(matches!(category, AppError::Other(_)));
+        assert_eq!(exit_code_for_error(&category), exit_codes::GENERAL_ERROR);
     }
 
     #[test]
-    fn test_determine_exit_code_ffmpeg() {
+    fn test_error_category_ffmpeg() {
         let err = anyhow::anyhow!("ffmpeg not found in PATH");
-        assert_eq!(determine_exit_code(&err), exit_codes::FFMPEG_NOT_FOUND);
+        let category = error_category(&err);
+        assert!(matches!(category, AppError::FfmpegNotFound));
+        assert_eq!(exit_code_for_error(&category), exit_codes::FFMPEG_NOT_FOUND);
     }
 
     #[test]
-    fn test_determine_exit_code_merge() {
+    fn test_error_category_merge() {
         let err = anyhow::anyhow!("Some merges failed to complete");
-        assert_eq!(determine_exit_code(&err), exit_codes::MERGE_FAILED);
+        let category = error_category(&err);
+        assert!(matches!(category, AppError::MergeFailed));
+        assert_eq!(exit_code_for_error(&category), exit_codes::MERGE_FAILED);
+    }
+
+    #[test]
+    fn test_app_error_display() {
+        assert_eq!(AppError::FfmpegNotFound.to_string(), "ffmpeg not found");
+        assert_eq!(AppError::MergeFailed.to_string(), "Some merges failed");
+        assert_eq!(AppError::Other("test".to_string()).to_string(), "test");
     }
 }
