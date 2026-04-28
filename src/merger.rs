@@ -240,7 +240,11 @@ fn do_merge(
             if let Some(p) = progress {
                 p.set_message(&format!("retry {attempt} {}", pair.stem));
             } else if verbose {
-                println!("{} Retrying {} (attempt {attempt})", "↻".yellow(), pair.stem);
+                println!(
+                    "{} Retrying {} (attempt {attempt})",
+                    "↻".yellow(),
+                    pair.stem
+                );
             }
         }
 

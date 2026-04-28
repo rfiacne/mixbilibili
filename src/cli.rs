@@ -249,7 +249,11 @@ mod validation_tests {
 
         let mut args = make_args();
         args.source = file;
-        assert!(args.validate().unwrap_err().to_string().contains("not a directory"));
+        assert!(args
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("not a directory"));
     }
 
     #[test]
@@ -261,7 +265,11 @@ mod validation_tests {
         let mut args = make_args();
         args.source = dir.path().to_path_buf();
         args.output = file;
-        assert!(args.validate().unwrap_err().to_string().contains("not a directory"));
+        assert!(args
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("not a directory"));
     }
 
     #[test]

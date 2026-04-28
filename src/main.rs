@@ -277,8 +277,12 @@ fn execute(
 fn accumulate_summary(final_summary: &mut merger::MergeSummary, batch: &merger::MergeSummary) {
     final_summary.success_count += batch.success_count;
     final_summary.failed_count += batch.failed_count;
-    final_summary.durations.extend(batch.durations.iter().copied());
-    final_summary.failures.extend(batch.failures.iter().cloned());
+    final_summary
+        .durations
+        .extend(batch.durations.iter().copied());
+    final_summary
+        .failures
+        .extend(batch.failures.iter().cloned());
 }
 
 fn update_state_from_batch(
