@@ -10,7 +10,7 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn parse(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "mkv" => Ok(Self::Mkv),
@@ -96,6 +96,10 @@ pub struct Args {
 
     #[arg(short = 'j', long, default_value_t = default_jobs())]
     pub jobs: usize,
+
+    /// Show progress bar during batch operations
+    #[arg(short = 'p', long, default_value_t = true)]
+    pub progress: bool,
 }
 
 fn default_jobs() -> usize {
@@ -135,6 +139,7 @@ mod args_tests {
             sdel: true,
             format: OutputFormat::Mkv,
             jobs: 0,
+            progress: true,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 1);
@@ -148,6 +153,7 @@ mod args_tests {
             sdel: true,
             format: OutputFormat::Mkv,
             jobs: 100,
+            progress: true,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 32);
@@ -161,6 +167,7 @@ mod args_tests {
             sdel: true,
             format: OutputFormat::Mkv,
             jobs: 4,
+            progress: true,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 4);
@@ -185,6 +192,7 @@ mod validation_tests {
             sdel: true,
             format: OutputFormat::Mkv,
             jobs: 4,
+            progress: true,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -203,6 +211,7 @@ mod validation_tests {
             sdel: true,
             format: OutputFormat::Mkv,
             jobs: 4,
+            progress: true,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -219,6 +228,7 @@ mod validation_tests {
             sdel: true,
             format: OutputFormat::Mkv,
             jobs: 4,
+            progress: true,
         };
         let result = args.validate();
         assert!(result.is_ok());
