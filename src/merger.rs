@@ -92,6 +92,7 @@ impl MergeSummary {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn merge_pair(
     pair: &FilePair,
     pair_index: usize,
@@ -111,10 +112,12 @@ pub fn merge_pair(
     // In dry-run mode, just report success without actual merge
     if dry_run {
         if verbose {
-            println!("[dry-run] ffmpeg -i {} -i {} -> {}",
+            println!(
+                "[dry-run] ffmpeg -i {} -i {} -> {}",
                 pair.video.display(),
                 pair.audio.display(),
-                output_path.display());
+                output_path.display()
+            );
         }
         if progress.is_none() {
             println!("{} {} [dry-run]", "○".cyan(), pair.stem);
@@ -138,17 +141,24 @@ pub fn merge_pair(
             if let Some(p) = progress {
                 p.set_message(&format!("retry {} {}", attempt, pair.stem));
             } else if verbose {
-                println!("{} Retrying {} (attempt {})", "↻".yellow(), pair.stem, attempt);
+                println!(
+                    "{} Retrying {} (attempt {})",
+                    "↻".yellow(),
+                    pair.stem,
+                    attempt
+                );
             }
             // Brief pause before retry
             std::thread::sleep(Duration::from_secs(1));
         }
 
         if verbose && attempt == 0 {
-            println!("Running: ffmpeg -i {} -i {} -> {}",
+            println!(
+                "Running: ffmpeg -i {} -i {} -> {}",
                 pair.video.display(),
                 pair.audio.display(),
-                output_path.display());
+                output_path.display()
+            );
         }
 
         match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT) {
@@ -183,7 +193,11 @@ pub fn merge_pair(
                         pair_index,
                         pair_name: pair.stem.clone(),
                         success: false,
-                        error: Some(format!("ffmpeg exited with code {:?} after {} retries", status.code(), max_retries)),
+                        error: Some(format!(
+                            "ffmpeg exited with code {:?} after {} retries",
+                            status.code(),
+                            max_retries
+                        )),
                     };
                 }
                 // Rebuild command for retry
@@ -233,6 +247,7 @@ fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Resul
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_merges(
     scan_result: ScanResult,
     output_dir: &Path,
@@ -256,7 +271,18 @@ pub fn execute_merges(
     let results: Vec<MergeResult> = pairs
         .par_iter()
         .enumerate()
-        .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format, progress_ref, dry_run, verbose, retry))
+        .map(|(idx, pair)| {
+            merge_pair(
+                pair,
+                idx,
+                &output_dir,
+                format,
+                progress_ref,
+                dry_run,
+                verbose,
+                retry,
+            )
+        })
         .collect();
 
     if let Some(p) = &progress {
@@ -389,7 +415,17 @@ mod exec_tests {
             skipped_names: vec![],
         };
 
-        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false, None, false, false, 0);
+        let summary = execute_merges(
+            scan_result,
+            dir.path(),
+            OutputFormat::Mkv,
+            1,
+            false,
+            None,
+            false,
+            false,
+            0,
+        );
 
         assert_eq!(summary.success_count, 0);
         assert_eq!(summary.failed_count, 0);
@@ -409,7 +445,17 @@ mod exec_tests {
             skipped_names: vec![],
         };
 
-        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false, None, false, false, 0);
+        let summary = execute_merges(
+            scan_result,
+            dir.path(),
+            OutputFormat::Mkv,
+            1,
+            false,
+            None,
+            false,
+            false,
+            0,
+        );
 
         assert_eq!(summary.skipped_count, 5);
         assert_eq!(summary.orphaned_count, 3);
@@ -538,7 +584,10 @@ mod delete_tests {
         );
 
         // Video should be deleted (even though overall operation failed)
-        assert!(!video_path.exists(), "Video should be deleted despite partial failure");
+        assert!(
+            !video_path.exists(),
+            "Video should be deleted despite partial failure"
+        );
     }
 }
 

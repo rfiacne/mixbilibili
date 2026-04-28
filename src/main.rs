@@ -100,7 +100,10 @@ fn run() -> Result<()> {
 
     if pairs_to_process.is_empty() {
         if existing_state.is_some() {
-            println!("{}", "All files already merged from previous session".green());
+            println!(
+                "{}",
+                "All files already merged from previous session".green()
+            );
         } else {
             println!("{}", "No file pairs to merge".yellow());
         }
@@ -113,9 +116,8 @@ fn run() -> Result<()> {
     }
 
     // Initialize state for tracking
-    let mut merge_state = existing_state.unwrap_or_else(|| {
-        state::MergeState::new(&args.source, &args.output, &format.to_string())
-    });
+    let mut merge_state = existing_state
+        .unwrap_or_else(|| state::MergeState::new(&args.source, &args.output, &format.to_string()));
 
     // Add pending items
     for pair in &pairs_to_process {
@@ -167,7 +169,7 @@ fn run() -> Result<()> {
                 merge_state.mark_completed(&pair.stem);
             }
         }
-        
+
         // Clear state if all successful
         if summary.all_success() {
             state::MergeState::clear(&args.source)?;

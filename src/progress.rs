@@ -12,13 +12,13 @@ impl MergeProgress {
     pub fn new(total: usize) -> Self {
         let bar = ProgressBar::new(total as u64);
         bar.set_style(
-            ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
-                .unwrap()
-                .progress_chars("=>-"),
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
         );
-        Self {
-            bar: Arc::new(bar),
-        }
+        Self { bar: Arc::new(bar) }
     }
 
     /// Increment progress by 1
@@ -37,6 +37,7 @@ impl MergeProgress {
     }
 
     /// Get the underlying progress bar for cloning
+    #[allow(dead_code)]
     pub fn bar(&self) -> Arc<ProgressBar> {
         self.bar.clone()
     }

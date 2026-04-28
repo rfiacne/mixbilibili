@@ -81,9 +81,10 @@ impl MergeState {
 
     /// Add a pending file stem
     pub fn add_pending(&mut self, stem: &str) {
-        if !self.pending.contains(&stem.to_string()) 
+        if !self.pending.contains(&stem.to_string())
             && !self.completed.contains(&stem.to_string())
-            && !self.failed.contains(&stem.to_string()) {
+            && !self.failed.contains(&stem.to_string())
+        {
             self.pending.push(stem.to_string());
         }
     }
@@ -105,11 +106,7 @@ mod tests {
 
     #[test]
     fn test_state_creation() {
-        let state = MergeState::new(
-            Path::new("/source"),
-            Path::new("/output"),
-            "mkv",
-        );
+        let state = MergeState::new(Path::new("/source"), Path::new("/output"), "mkv");
         assert_eq!(state.format, "mkv");
         assert!(state.completed.is_empty());
         assert!(state.failed.is_empty());
@@ -168,9 +165,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = MergeState::new(dir.path(), dir.path(), "mkv");
         state.save(dir.path()).unwrap();
-        
+
         assert!(MergeState::state_file_path(dir.path()).exists());
-        
+
         MergeState::clear(dir.path()).unwrap();
         assert!(!MergeState::state_file_path(dir.path()).exists());
     }
