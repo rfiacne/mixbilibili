@@ -96,7 +96,11 @@ fn run() -> Result<()> {
         None
     };
 
-    let summary = merger::execute_merges(scan_result, &args.output, format, args.jobs, args.sdel, progress);
+    let summary = merger::execute_merges(scan_result, &args.output, format, args.jobs, args.sdel, progress, args.dry_run);
+
+    if args.dry_run {
+        println!("{}", "Dry-run complete. No files were modified.".cyan());
+    }
 
     summary.print_report();
 

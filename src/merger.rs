@@ -98,11 +98,28 @@ pub fn merge_pair(
     output_dir: &Path,
     format: OutputFormat,
     progress: Option<&MergeProgress>,
+    dry_run: bool,
 ) -> MergeResult {
     let output_path = output_dir.join(format!("{}.{}", pair.stem, format.extension()));
 
     if let Some(p) = progress {
         p.set_message(&pair.stem);
+    }
+
+    // In dry-run mode, just report success without actual merge
+    if dry_run {
+        if progress.is_none() {
+            println!("{} {} [dry-run]", "○".cyan(), pair.stem);
+        }
+        if let Some(p) = progress {
+            p.inc();
+        }
+        return MergeResult {
+            pair_index,
+            pair_name: pair.stem.clone(),
+            success: true,
+            error: None,
+        };
     }
 
     let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, format);
@@ -179,6 +196,7 @@ pub fn execute_merges(
     jobs: usize,
     delete_source: bool,
     progress: Option<MergeProgress>,
+    dry_run: bool,
 ) -> MergeSummary {
     let output_dir = output_dir.to_path_buf();
     let pairs = scan_result.pairs;
@@ -192,7 +210,7 @@ pub fn execute_merges(
     let results: Vec<MergeResult> = pairs
         .par_iter()
         .enumerate()
-        .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format, progress_ref))
+        .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format, progress_ref, dry_run))
         .collect();
 
     if let Some(p) = &progress {
@@ -203,7 +221,8 @@ pub fn execute_merges(
     summary.skipped_count = scan_result.stats.skipped;
     summary.orphaned_count = scan_result.stats.orphaned;
 
-    if delete_source {
+    // In dry-run mode, don't delete source files
+    if delete_source && !dry_run {
         let deletion_failure_count = AtomicUsize::new(0);
         results.par_iter().filter(|r| r.success).for_each(|result| {
             let pair = &pairs[result.pair_index];
@@ -324,7 +343,7 @@ mod exec_tests {
             skipped_names: vec![],
         };
 
-        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false, None);
+        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false, None, false);
 
         assert_eq!(summary.success_count, 0);
         assert_eq!(summary.failed_count, 0);
@@ -344,7 +363,7 @@ mod exec_tests {
             skipped_names: vec![],
         };
 
-        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false, None);
+        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false, None, false);
 
         assert_eq!(summary.skipped_count, 5);
         assert_eq!(summary.orphaned_count, 3);
