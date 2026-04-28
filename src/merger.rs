@@ -7,7 +7,6 @@ use colored::Colorize;
 use rayon::prelude::*;
 use std::path::Path;
 use std::process::{Child, ExitStatus};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(300);
@@ -70,10 +69,6 @@ pub struct MergeSummary {
 }
 
 impl MergeSummary {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Total time spent across all merge operations.
     pub fn total_duration(&self) -> Duration {
         self.durations.iter().sum()
@@ -81,10 +76,11 @@ impl MergeSummary {
 
     /// Average duration per merge operation.
     pub fn avg_duration(&self) -> Option<Duration> {
-        if self.durations.is_empty() {
+        let count = self.durations.len();
+        if count == 0 {
             return None;
         }
-        Some(self.total_duration() / self.durations.len() as u32)
+        Some(self.total_duration() / count as u32)
     }
 
     /// Fastest merge duration.
@@ -349,48 +345,55 @@ pub fn execute_merges(
     let output_dir = output_dir.to_path_buf();
     let pairs = scan_result.pairs;
 
-    let _ = rayon::ThreadPoolBuilder::new()
-        .num_threads(jobs)
-        .build_global();
-
     let progress_ref = progress.as_ref();
 
-    let results: Vec<MergeResult> = pairs
-        .par_iter()
-        .enumerate()
-        .map(|(idx, pair)| {
-            merge_pair(
-                pair,
-                idx,
-                &output_dir,
-                format,
-                progress_ref,
-                dry_run,
-                verbose,
-                retry,
-            )
-        })
-        .collect();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs)
+        .build()
+        .expect("Failed to build thread pool");
+
+    let results: Vec<MergeResult> = pool.install(|| {
+        pairs
+            .par_iter()
+            .enumerate()
+            .map(|(idx, pair)| {
+                merge_pair(
+                    pair,
+                    idx,
+                    &output_dir,
+                    format,
+                    progress_ref,
+                    dry_run,
+                    verbose,
+                    retry,
+                )
+            })
+            .collect()
+    });
 
     if let Some(p) = &progress {
         p.finish();
     }
 
-    let mut summary = MergeSummary::new();
+    let mut summary = MergeSummary::default();
     summary.skipped_count = scan_result.stats.skipped;
     summary.orphaned_count = scan_result.stats.orphaned;
 
-    // In dry-run mode, don't delete source files
     if delete_source && !dry_run {
-        let deletion_failure_count = AtomicUsize::new(0);
-        results.par_iter().filter(|r| r.success).for_each(|result| {
-            let pair = &pairs[result.pair_index];
-            if let Err(e) = delete_source_files(pair) {
-                eprintln!("Warning: {}", e);
-                deletion_failure_count.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-        summary.deletion_failures = deletion_failure_count.load(Ordering::Relaxed);
+        let deletion_failures: usize = results
+            .par_iter()
+            .filter(|r| r.success)
+            .map(|result| {
+                let pair = &pairs[result.pair_index];
+                if let Err(e) = delete_source_files(pair) {
+                    eprintln!("Warning: {e}");
+                    1
+                } else {
+                    0
+                }
+            })
+            .sum();
+        summary.deletion_failures = deletion_failures;
     }
 
     for result in &results {
@@ -581,9 +584,6 @@ mod exec_tests {
 
     #[test]
     fn test_deletion_failures_counted_correctly() {
-        // Verify that deletion_failures counter is properly structured
-        // After fix: execute_merges uses AtomicUsize to track actual deletion failures
-
         let summary = MergeSummary {
             success_count: 5,
             failed_count: 0,
@@ -593,8 +593,6 @@ mod exec_tests {
             deletion_failures: 2,
             durations: vec![],
         };
-
-        // deletion_failures is usize, can represent actual failure count
         assert_eq!(summary.deletion_failures, 2);
     }
 }

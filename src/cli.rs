@@ -20,7 +20,7 @@ impl OutputFormat {
         }
     }
 
-    pub fn extension(&self) -> &'static str {
+    pub fn extension(self) -> &'static str {
         match self {
             Self::Mkv => "mkv",
             Self::Mp4 => "mp4",
@@ -28,7 +28,7 @@ impl OutputFormat {
         }
     }
 
-    pub fn needs_faststart(&self) -> bool {
+    pub fn needs_faststart(self) -> bool {
         matches!(self, Self::Mp4 | Self::Mov)
     }
 }

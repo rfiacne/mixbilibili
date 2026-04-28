@@ -32,10 +32,6 @@ enum AppError {
 
     #[error("source directory is not readable: {path}")]
     UnreadableSource { path: String },
-
-    #[error("{0}")]
-    #[allow(dead_code)]
-    Other(anyhow::Error),
 }
 
 impl AppError {
@@ -44,24 +40,17 @@ impl AppError {
             AppError::FfmpegNotFound => exit_codes::FFMPEG_NOT_FOUND,
             AppError::MergeFailed { .. } => exit_codes::MERGE_FAILED,
             AppError::UnreadableSource { .. } => exit_codes::GENERAL_ERROR,
-            AppError::Other(_) => exit_codes::GENERAL_ERROR,
         }
     }
 }
 
 /// Extract the exit code from an anyhow error.
-///
-/// This replaces the old `error_category()` function that did string matching.
-/// It tries downcasting to AppError first (typed match), then falls back to
-/// minimal string inspection for errors from internal modules (scanner, state,
-/// merger) that still return anyhow.
+/// Tries downcasting to AppError first, then falls back to string matching.
 fn get_exit_code(e: &anyhow::Error) -> i32 {
     if let Some(app_err) = e.downcast_ref::<AppError>() {
         return app_err.exit_code();
     }
 
-    // Fallback: internal modules return anyhow errors.
-    // We inspect the string only for those, not for external/library errors.
     let msg = e.to_string();
     if msg.contains("ffmpeg") || msg.contains("FFmpeg") {
         return exit_codes::FFMPEG_NOT_FOUND;
@@ -387,10 +376,6 @@ mod integration_tests {
                 path: "test".to_string()
             }
             .exit_code(),
-            exit_codes::GENERAL_ERROR
-        );
-        assert_eq!(
-            AppError::Other(anyhow::anyhow!("oops")).exit_code(),
             exit_codes::GENERAL_ERROR
         );
     }
