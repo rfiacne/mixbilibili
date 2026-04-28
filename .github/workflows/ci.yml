@@ -116,10 +116,20 @@ jobs:
 
           if [ "${{ matrix.archive }}" = "tar.gz" ]; then
             tar -czf "dist/${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
-          else
-            zip -j "dist/${ARCHIVE_NAME}.zip" "${ARCHIVE_NAME}/${{ matrix.bin }}"
           fi
           rm -rf "${ARCHIVE_NAME}"
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "dev" }
+          $target = "${{ matrix.target }}"
+          $archiveName = "mixbilibili-$version-$target"
+          New-Item -ItemType Directory -Force -Path $archiveName | Out-Null
+          Copy-Item "target/$target/release/${{ matrix.bin }}" $archiveName
+          Compress-Archive -Path $archiveName -DestinationPath "dist/$archiveName.zip"
+          Remove-Item -Recurse -Force $archiveName
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
