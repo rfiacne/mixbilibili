@@ -95,14 +95,13 @@ fn init() -> Result<(Args, cli::OutputFormat)> {
 struct ScanContext {
     /// Pairs ready for merging (filtered by resume state).
     pairs: Vec<scanner::FilePair>,
-    /// Track state for resume capability.
-    merge_state: state::MergeState,
     /// Original scan statistics (skipped, orphaned, etc.).
     stats: scanner::ScanStats,
 }
 
 /// Scan source directory and filter pairs based on resume state.
-fn scan_and_filter(args: &Args) -> Result<Option<ScanContext>> {
+/// Returns the scan context and initialized merge state.
+fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState)>> {
     // Check for resume state
     let existing_state = if args.resume {
         state::MergeState::load(&args.source)?
@@ -153,11 +152,12 @@ fn scan_and_filter(args: &Args) -> Result<Option<ScanContext>> {
         merge_state.save(&args.source)?;
     }
 
-    Ok(Some(ScanContext {
+    let ctx = ScanContext {
         pairs: pairs_to_process,
-        merge_state,
         stats: scan_result.stats,
-    }))
+    };
+
+    Ok(Some((ctx, merge_state)))
 }
 
 fn main() {
@@ -172,15 +172,15 @@ fn run() -> Result<()> {
     let (args, format) = init()?;
 
     // Phase 2: Scan and filter
-    let Some(ctx) = scan_and_filter(&args)? else {
+    let Some((ctx, mut merge_state)) = scan_and_filter(&args)? else {
         return Ok(());
     };
 
-    // Phase 3: Execute merges
-    let summary = execute(&args, &ctx, format)?;
+    // Phase 3: Execute merges (with incremental state saves)
+    let summary = execute(&args, &ctx, &mut merge_state, format)?;
 
     // Phase 4: Update state and report
-    finalize(&args, ctx.merge_state, &summary)?;
+    finalize(&args, merge_state, &summary)?;
 
     if args.dry_run {
         println!("{}", "Dry-run complete. No files were modified.".cyan());
@@ -198,10 +198,18 @@ fn run() -> Result<()> {
     }
 }
 
+/// How many merges between incremental state saves.
+/// Prevents losing all progress if interrupted mid-batch.
+const STATE_SAVE_INTERVAL: usize = 5;
+
 /// Execute the actual merge operations for all filtered pairs.
+///
+/// Splits pairs into batches of STATE_SAVE_INTERVAL. After each batch,
+/// saves merge state so resume can recover from interruption.
 fn execute(
     args: &Args,
     ctx: &ScanContext,
+    merge_state: &mut state::MergeState,
     format: cli::OutputFormat,
 ) -> Result<merger::MergeSummary> {
     println!("Processing {} file pairs...", ctx.pairs.len());
@@ -212,23 +220,56 @@ fn execute(
         None
     };
 
-    let scan_result = scanner::ScanResult {
-        pairs: ctx.pairs.clone(),
-        stats: ctx.stats.clone(),
-        skipped_names: vec![],
-    };
+    let mut final_summary = merger::MergeSummary::default();
 
-    Ok(merger::execute_merges(
-        scan_result,
-        &args.output,
-        format,
-        args.jobs,
-        args.sdel,
-        progress,
-        args.dry_run,
-        args.verbose,
-        args.retry,
-    ))
+    // Process in batches, saving state between batches
+    for chunk in ctx.pairs.chunks(STATE_SAVE_INTERVAL) {
+        let scan_result = scanner::ScanResult {
+            pairs: chunk.to_vec(),
+            stats: scanner::ScanStats::default(),
+            skipped_names: vec![],
+        };
+
+        let batch_summary = merger::execute_merges(
+            scan_result,
+            &args.output,
+            format,
+            args.jobs,
+            args.sdel,
+            progress.clone(),
+            args.dry_run,
+            args.verbose,
+            args.retry,
+        );
+
+        // Accumulate results
+        final_summary.success_count += batch_summary.success_count;
+        final_summary.failed_count += batch_summary.failed_count;
+
+        // Incremental state save after each batch
+        if !args.dry_run {
+            for (name, _) in &batch_summary.failures {
+                merge_state.mark_failed(name);
+            }
+            for pair in chunk {
+                if !batch_summary.failures.iter().any(|(n, _)| n == &pair.stem) {
+                    merge_state.mark_completed(&pair.stem);
+                }
+            }
+            if let Err(e) = merge_state.save(&args.source) {
+                eprintln!("Warning: failed to save incremental state: {}", e);
+            }
+        }
+
+        // Move failures after state save
+        final_summary.failures.extend(batch_summary.failures);
+    }
+
+    // Merge in scan stats
+    final_summary.skipped_count = ctx.stats.skipped;
+    final_summary.orphaned_count = ctx.stats.orphaned;
+
+    Ok(final_summary)
 }
 
 /// Update merge state based on results and persist or clear as appropriate.
@@ -269,6 +310,12 @@ mod integration_tests {
         assert_eq!(exit_codes::GENERAL_ERROR, 1);
         assert_eq!(exit_codes::FFMPEG_NOT_FOUND, 2);
         assert_eq!(exit_codes::MERGE_FAILED, 3);
+    }
+
+    #[test]
+    fn test_state_save_interval_constant() {
+        // Ensure reasonable batch size for incremental saves
+        assert!(STATE_SAVE_INTERVAL >= 1 && STATE_SAVE_INTERVAL <= 20);
     }
 
     #[test]
