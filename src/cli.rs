@@ -104,6 +104,10 @@ pub struct Args {
     /// Preview operations without executing (no files created/deleted)
     #[arg(short = 'n', long)]
     pub dry_run: bool,
+
+    /// Show detailed output including ffmpeg commands
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
 }
 
 fn default_jobs() -> usize {
@@ -145,6 +149,7 @@ mod args_tests {
             jobs: 0,
             progress: true,
             dry_run: false,
+            verbose: false,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 1);
@@ -160,6 +165,7 @@ mod args_tests {
             jobs: 100,
             progress: true,
             dry_run: false,
+            verbose: false,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 32);
@@ -175,6 +181,7 @@ mod args_tests {
             jobs: 4,
             progress: true,
             dry_run: false,
+            verbose: false,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 4);
@@ -190,6 +197,18 @@ mod args_tests {
     fn test_dry_run_flag_enabled() {
         let args = Args::try_parse_from(["mixbilibili", "--dry-run"]).unwrap();
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn test_verbose_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.verbose);
+    }
+
+    #[test]
+    fn test_verbose_flag_enabled() {
+        let args = Args::try_parse_from(["mixbilibili", "--verbose"]).unwrap();
+        assert!(args.verbose);
     }
 }
 
@@ -213,6 +232,7 @@ mod validation_tests {
             jobs: 4,
             progress: true,
             dry_run: false,
+            verbose: false,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -233,6 +253,7 @@ mod validation_tests {
             jobs: 4,
             progress: true,
             dry_run: false,
+            verbose: false,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -251,6 +272,7 @@ mod validation_tests {
             jobs: 4,
             progress: true,
             dry_run: false,
+            verbose: false,
         };
         let result = args.validate();
         assert!(result.is_ok());
