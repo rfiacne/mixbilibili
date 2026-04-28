@@ -169,10 +169,6 @@ pub fn merge_pair(
 ) -> MergeResult {
     let output_path = output_dir.join(format!("{}.{}", pair.stem, format.extension()));
 
-    if let Some(p) = progress {
-        p.set_message(&pair.stem);
-    }
-
     if dry_run {
         return do_dry_run(pair, &output_path, pair_index, progress, verbose);
     }
@@ -256,11 +252,11 @@ fn do_merge(
         let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, output_path, format);
         match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT) {
             Ok(status) if status.success() => {
-                if progress.is_none() {
-                    println!("{} {}", "✓".green(), pair.stem);
-                }
                 if let Some(p) = progress {
                     p.inc();
+                }
+                if progress.is_none() {
+                    println!("{} {}", "✓".green(), pair.stem);
                 }
                 return MergeResult {
                     pair_index,
@@ -271,6 +267,9 @@ fn do_merge(
                 };
             }
             Ok(status) if attempt == max_retries => {
+                if let Some(p) = progress {
+                    p.inc();
+                }
                 if progress.is_none() {
                     println!(
                         "{} {}: ffmpeg exited with code {:?}",
@@ -278,9 +277,6 @@ fn do_merge(
                         pair.stem,
                         status.code()
                     );
-                }
-                if let Some(p) = progress {
-                    p.inc();
                 }
                 return MergeResult {
                     pair_index,
@@ -295,11 +291,11 @@ fn do_merge(
                 };
             }
             Err(e) if attempt == max_retries => {
-                if progress.is_none() {
-                    println!("{} {}: {}", "✗".red(), pair.stem, e);
-                }
                 if let Some(p) = progress {
                     p.inc();
+                }
+                if progress.is_none() {
+                    println!("{} {}: {}", "✗".red(), pair.stem, e);
                 }
                 return MergeResult {
                     pair_index,

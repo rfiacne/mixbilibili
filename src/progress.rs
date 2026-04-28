@@ -11,11 +11,9 @@ impl MergeProgress {
     pub fn new(total: usize) -> Self {
         let bar = ProgressBar::new(total as u64);
         bar.set_style(
-            ProgressStyle::with_template(
-                "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}",
-            )
-            .unwrap()
-            .progress_chars("=>-"),
+            ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len}")
+                .unwrap()
+                .progress_chars("=>-"),
         );
         Self { bar: Arc::new(bar) }
     }
