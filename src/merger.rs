@@ -100,6 +100,7 @@ pub fn merge_pair(
     progress: Option<&MergeProgress>,
     dry_run: bool,
     verbose: bool,
+    max_retries: usize,
 ) -> MergeResult {
     let output_path = output_dir.join(format!("{}.{}", pair.stem, format.extension()));
 
@@ -131,61 +132,90 @@ pub fn merge_pair(
 
     let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, format);
 
-    if verbose {
-        println!("Running: ffmpeg -i {} -i {} -> {}",
-            pair.video.display(),
-            pair.audio.display(),
-            output_path.display());
+    // Retry loop for transient failures
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            if let Some(p) = progress {
+                p.set_message(&format!("retry {} {}", attempt, pair.stem));
+            } else if verbose {
+                println!("{} Retrying {} (attempt {})", "↻".yellow(), pair.stem, attempt);
+            }
+            // Brief pause before retry
+            std::thread::sleep(Duration::from_secs(1));
+        }
+
+        if verbose && attempt == 0 {
+            println!("Running: ffmpeg -i {} -i {} -> {}",
+                pair.video.display(),
+                pair.audio.display(),
+                output_path.display());
+        }
+
+        match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT) {
+            Ok(status) if status.success() => {
+                if progress.is_none() {
+                    println!("{} {}", "✓".green(), pair.stem);
+                }
+                if let Some(p) = progress {
+                    p.inc();
+                }
+                return MergeResult {
+                    pair_index,
+                    pair_name: pair.stem.clone(),
+                    success: true,
+                    error: None,
+                };
+            }
+            Ok(status) => {
+                if attempt == max_retries {
+                    if progress.is_none() {
+                        println!(
+                            "{} {}: ffmpeg exited with code {:?}",
+                            "✗".red(),
+                            pair.stem,
+                            status.code()
+                        );
+                    }
+                    if let Some(p) = progress {
+                        p.inc();
+                    }
+                    return MergeResult {
+                        pair_index,
+                        pair_name: pair.stem.clone(),
+                        success: false,
+                        error: Some(format!("ffmpeg exited with code {:?} after {} retries", status.code(), max_retries)),
+                    };
+                }
+                // Rebuild command for retry
+                cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, format);
+            }
+            Err(e) => {
+                if attempt == max_retries {
+                    if progress.is_none() {
+                        println!("{} {}: {}", "✗".red(), pair.stem, e);
+                    }
+                    if let Some(p) = progress {
+                        p.inc();
+                    }
+                    return MergeResult {
+                        pair_index,
+                        pair_name: pair.stem.clone(),
+                        success: false,
+                        error: Some(format!("{} after {} retries", e, max_retries)),
+                    };
+                }
+                // Rebuild command for retry
+                cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, format);
+            }
+        }
     }
 
-    match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT) {
-        Ok(status) if status.success() => {
-            if progress.is_none() {
-                println!("{} {}", "✓".green(), pair.stem);
-            }
-            if let Some(p) = progress {
-                p.inc();
-            }
-            MergeResult {
-                pair_index,
-                pair_name: pair.stem.clone(),
-                success: true,
-                error: None,
-            }
-        }
-        Ok(status) => {
-            if progress.is_none() {
-                println!(
-                    "{} {}: ffmpeg exited with code {:?}",
-                    "✗".red(),
-                    pair.stem,
-                    status.code()
-                );
-            }
-            if let Some(p) = progress {
-                p.inc();
-            }
-            MergeResult {
-                pair_index,
-                pair_name: pair.stem.clone(),
-                success: false,
-                error: Some(format!("ffmpeg exited with code {:?}", status.code())),
-            }
-        }
-        Err(e) => {
-            if progress.is_none() {
-                println!("{} {}: {}", "✗".red(), pair.stem, e);
-            }
-            if let Some(p) = progress {
-                p.inc();
-            }
-            MergeResult {
-                pair_index,
-                pair_name: pair.stem.clone(),
-                success: false,
-                error: Some(e.to_string()),
-            }
-        }
+    // Should not reach here
+    MergeResult {
+        pair_index,
+        pair_name: pair.stem.clone(),
+        success: false,
+        error: Some("Unexpected retry loop exit".to_string()),
     }
 }
 
@@ -212,6 +242,7 @@ pub fn execute_merges(
     progress: Option<MergeProgress>,
     dry_run: bool,
     verbose: bool,
+    retry: usize,
 ) -> MergeSummary {
     let output_dir = output_dir.to_path_buf();
     let pairs = scan_result.pairs;
@@ -225,7 +256,7 @@ pub fn execute_merges(
     let results: Vec<MergeResult> = pairs
         .par_iter()
         .enumerate()
-        .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format, progress_ref, dry_run, verbose))
+        .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format, progress_ref, dry_run, verbose, retry))
         .collect();
 
     if let Some(p) = &progress {
@@ -358,7 +389,7 @@ mod exec_tests {
             skipped_names: vec![],
         };
 
-        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false, None, false, false);
+        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false, None, false, false, 0);
 
         assert_eq!(summary.success_count, 0);
         assert_eq!(summary.failed_count, 0);
@@ -378,7 +409,7 @@ mod exec_tests {
             skipped_names: vec![],
         };
 
-        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false, None, false, false);
+        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false, None, false, false, 0);
 
         assert_eq!(summary.skipped_count, 5);
         assert_eq!(summary.orphaned_count, 3);

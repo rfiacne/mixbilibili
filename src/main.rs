@@ -151,6 +151,7 @@ fn run() -> Result<()> {
         progress,
         args.dry_run,
         args.verbose,
+        args.retry,
     );
 
     // Update state based on results
