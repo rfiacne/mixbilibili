@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-04-28
+
+### Added
+- `install.sh` script for local build & install to `/usr/local/bin/mix`
+
+### Fixed
+- Progress bar triple-rendering issue with long filenames
+- Removed per-item `set_message` calls that caused excessive redraws
+- Simplified progress bar template (no filename, avoids terminal overflow)
+
 ## [0.4.0] - 2026-04-28
 
 ### Added
