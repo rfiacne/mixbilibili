@@ -108,6 +108,10 @@ pub struct Args {
     /// Show detailed output including ffmpeg commands
     #[arg(short = 'v', long)]
     pub verbose: bool,
+
+    /// Resume interrupted batch from previous state
+    #[arg(short = 'r', long)]
+    pub resume: bool,
 }
 
 fn default_jobs() -> usize {
@@ -150,6 +154,7 @@ mod args_tests {
             progress: true,
             dry_run: false,
             verbose: false,
+            resume: false,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 1);
@@ -166,6 +171,7 @@ mod args_tests {
             progress: true,
             dry_run: false,
             verbose: false,
+            resume: false,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 32);
@@ -182,6 +188,7 @@ mod args_tests {
             progress: true,
             dry_run: false,
             verbose: false,
+            resume: false,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 4);
@@ -210,6 +217,18 @@ mod args_tests {
         let args = Args::try_parse_from(["mixbilibili", "--verbose"]).unwrap();
         assert!(args.verbose);
     }
+
+    #[test]
+    fn test_resume_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.resume);
+    }
+
+    #[test]
+    fn test_resume_flag_enabled() {
+        let args = Args::try_parse_from(["mixbilibili", "--resume"]).unwrap();
+        assert!(args.resume);
+    }
 }
 
 #[cfg(test)]
@@ -233,6 +252,7 @@ mod validation_tests {
             progress: true,
             dry_run: false,
             verbose: false,
+            resume: false,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -254,6 +274,7 @@ mod validation_tests {
             progress: true,
             dry_run: false,
             verbose: false,
+            resume: false,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -273,6 +294,7 @@ mod validation_tests {
             progress: true,
             dry_run: false,
             verbose: false,
+            resume: false,
         };
         let result = args.validate();
         assert!(result.is_ok());
