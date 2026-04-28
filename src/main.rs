@@ -85,15 +85,24 @@ fn init() -> Result<(Args, cli::OutputFormat)> {
     }
 
     if !args.output.exists() {
-        std::fs::create_dir_all(&args.output)
-            .context("Failed to create output directory")?;
+        std::fs::create_dir_all(&args.output).context("Failed to create output directory")?;
     }
 
     Ok((args, format))
 }
 
+/// Result of the scan-and-filter phase.
+struct ScanContext {
+    /// Pairs ready for merging (filtered by resume state).
+    pairs: Vec<scanner::FilePair>,
+    /// Track state for resume capability.
+    merge_state: state::MergeState,
+    /// Original scan statistics (skipped, orphaned, etc.).
+    stats: scanner::ScanStats,
+}
+
 /// Scan source directory and filter pairs based on resume state.
-fn scan_and_filter(args: &Args) -> Result<(Vec<scanner::FilePair>, state::MergeState, usize)> {
+fn scan_and_filter(args: &Args) -> Result<Option<ScanContext>> {
     // Check for resume state
     let existing_state = if args.resume {
         state::MergeState::load(&args.source)?
@@ -101,8 +110,8 @@ fn scan_and_filter(args: &Args) -> Result<(Vec<scanner::FilePair>, state::MergeS
         None
     };
 
-    let scan_result = scanner::scan_directory(&args.source)
-        .map_err(|_e| AppError::UnreadableSource {
+    let scan_result =
+        scanner::scan_directory(&args.source).map_err(|_| AppError::UnreadableSource {
             path: args.source.display().to_string(),
         })?;
 
@@ -127,15 +136,12 @@ fn scan_and_filter(args: &Args) -> Result<(Vec<scanner::FilePair>, state::MergeS
         } else {
             println!("{}", "No file pairs to merge".yellow());
         }
-        // Return empty result with zero total
-        return Ok((vec![], state::MergeState::new(&args.source, &args.output, ""), 0));
+        return Ok(None);
     }
 
-    let total_count = pairs_to_process.len();
-
     // Initialize state for tracking
-    let mut merge_state = existing_state
-        .unwrap_or_else(|| state::MergeState::new(&args.source, &args.output, ""));
+    let mut merge_state =
+        existing_state.unwrap_or_else(|| state::MergeState::new(&args.source, &args.output, ""));
 
     // Add pending items
     for pair in &pairs_to_process {
@@ -147,7 +153,11 @@ fn scan_and_filter(args: &Args) -> Result<(Vec<scanner::FilePair>, state::MergeS
         merge_state.save(&args.source)?;
     }
 
-    Ok((pairs_to_process, merge_state, total_count))
+    Ok(Some(ScanContext {
+        pairs: pairs_to_process,
+        merge_state,
+        stats: scan_result.stats,
+    }))
 }
 
 fn main() {
@@ -162,40 +172,15 @@ fn run() -> Result<()> {
     let (args, format) = init()?;
 
     // Phase 2: Scan and filter
-    let (pairs_to_process, mut merge_state, total_count) = scan_and_filter(&args)?;
-    if total_count == 0 {
+    let Some(ctx) = scan_and_filter(&args)? else {
         return Ok(());
-    }
+    };
 
     // Phase 3: Execute merges
-    println!("Processing {} file pairs...", pairs_to_process.len());
-
-    let progress = if args.progress {
-        Some(progress::MergeProgress::new(pairs_to_process.len()))
-    } else {
-        None
-    };
-
-    let filtered_scan_result = scanner::ScanResult {
-        pairs: pairs_to_process,
-        stats: scanner::ScanStats::default(),
-        skipped_names: vec![],
-    };
-
-    let summary = merger::execute_merges(
-        filtered_scan_result,
-        &args.output,
-        format,
-        args.jobs,
-        args.sdel,
-        progress,
-        args.dry_run,
-        args.verbose,
-        args.retry,
-    );
+    let summary = execute(&args, &ctx, format)?;
 
     // Phase 4: Update state and report
-    finalize(&args, &mut merge_state, &summary)?;
+    finalize(&args, ctx.merge_state, &summary)?;
 
     if args.dry_run {
         println!("{}", "Dry-run complete. No files were modified.".cyan());
@@ -206,26 +191,66 @@ fn run() -> Result<()> {
     if summary.all_success() {
         Ok(())
     } else {
-        Err(AppError::MergeFailed { count: summary.failed_count }.into())
+        Err(AppError::MergeFailed {
+            count: summary.failed_count,
+        }
+        .into())
     }
 }
 
+/// Execute the actual merge operations for all filtered pairs.
+fn execute(
+    args: &Args,
+    ctx: &ScanContext,
+    format: cli::OutputFormat,
+) -> Result<merger::MergeSummary> {
+    println!("Processing {} file pairs...", ctx.pairs.len());
+
+    let progress = if args.progress {
+        Some(progress::MergeProgress::new(ctx.pairs.len()))
+    } else {
+        None
+    };
+
+    let scan_result = scanner::ScanResult {
+        pairs: ctx.pairs.clone(),
+        stats: ctx.stats.clone(),
+        skipped_names: vec![],
+    };
+
+    Ok(merger::execute_merges(
+        scan_result,
+        &args.output,
+        format,
+        args.jobs,
+        args.sdel,
+        progress,
+        args.dry_run,
+        args.verbose,
+        args.retry,
+    ))
+}
+
 /// Update merge state based on results and persist or clear as appropriate.
-fn finalize(args: &Args, merge_state: &mut state::MergeState, summary: &merger::MergeSummary) -> Result<()> {
+fn finalize(
+    args: &Args,
+    mut merge_state: state::MergeState,
+    summary: &merger::MergeSummary,
+) -> Result<()> {
     if !args.dry_run {
+        // Mark failures
         for (name, _) in &summary.failures {
             merge_state.mark_failed(name);
         }
-        // Failures already marked above
 
-        // Mark all non-failed pairs as completed
-        for pair in &merge_state.pending.clone() {
-            if !summary.failures.iter().any(|(name, _)| name == pair) {
-                merge_state.mark_completed(pair);
+        // Mark all pending (non-failed) items as completed
+        for pair in merge_state.pending.clone() {
+            if !summary.failures.iter().any(|(name, _)| name == &pair) {
+                merge_state.mark_completed(&pair);
             }
         }
 
-        // Clear state if all successful
+        // Clear state if all successful, otherwise save
         if summary.all_success() {
             state::MergeState::clear(&args.source)?;
         } else {
