@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use cli::Args;
 use colored::Colorize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
 mod exit_codes {
@@ -160,6 +161,9 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
     Ok(Some((ctx, merge_state)))
 }
 
+/// Shared flag set by the Ctrl+C handler.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("{} {}", "Error:".red(), e);
@@ -168,6 +172,12 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    // Set up Ctrl+C handler for graceful shutdown
+    ctrlc::set_handler(|| {
+        INTERRUPTED.store(true, Ordering::SeqCst);
+    })
+    .context("Failed to set signal handler")?;
+
     // Phase 1: Initialize
     let (args, format) = init()?;
 
@@ -179,6 +189,11 @@ fn run() -> Result<()> {
     // Phase 3: Execute merges (with incremental state saves)
     let summary = execute(&args, &ctx, &mut merge_state, format)?;
 
+    // Check if interrupted during execution
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        println!("{}", "\nInterrupted. State saved for resume.".yellow());
+    }
+
     // Phase 4: Update state and report
     finalize(&args, merge_state, &summary)?;
 
@@ -188,7 +203,10 @@ fn run() -> Result<()> {
 
     summary.print_report();
 
-    if summary.all_success() {
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        // User requested shutdown - exit gracefully without error
+        Ok(())
+    } else if summary.all_success() {
         Ok(())
     } else {
         Err(AppError::MergeFailed {
@@ -224,6 +242,11 @@ fn execute(
 
     // Process in batches, saving state between batches
     for chunk in ctx.pairs.chunks(STATE_SAVE_INTERVAL) {
+        // Check for interrupt before starting each batch
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            break;
+        }
+
         let scan_result = scanner::ScanResult {
             pairs: chunk.to_vec(),
             stats: scanner::ScanStats::default(),
@@ -316,6 +339,18 @@ mod integration_tests {
     fn test_state_save_interval_constant() {
         // Ensure reasonable batch size for incremental saves
         assert!(STATE_SAVE_INTERVAL >= 1 && STATE_SAVE_INTERVAL <= 20);
+    }
+
+    #[test]
+    fn test_interrupted_flag_default() {
+        assert!(!INTERRUPTED.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_interrupted_flag_can_be_set() {
+        INTERRUPTED.store(true, Ordering::SeqCst);
+        assert!(INTERRUPTED.load(Ordering::SeqCst));
+        INTERRUPTED.store(false, Ordering::SeqCst); // Reset
     }
 
     #[test]
