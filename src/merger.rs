@@ -24,6 +24,7 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
+/// Extension trait for waiting on a child process with a timeout.
 trait ChildExt {
     fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>>;
 }
@@ -31,7 +32,6 @@ trait ChildExt {
 impl ChildExt for Child {
     fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>> {
         let start = std::time::Instant::now();
-
         loop {
             match self.try_wait() {
                 Ok(Some(status)) => return Ok(Some(status)),
@@ -177,50 +177,71 @@ pub fn merge_pair(
         p.set_message(&pair.stem);
     }
 
-    // In dry-run mode, just report success without actual merge
     if dry_run {
-        let start = std::time::Instant::now();
-        if verbose {
-            println!(
-                "[dry-run] ffmpeg -i {} -i {} -> {}",
-                pair.video.display(),
-                pair.audio.display(),
-                output_path.display()
-            );
-        }
-        if progress.is_none() {
-            println!("{} {} [dry-run]", "○".cyan(), pair.stem);
-        }
-        if let Some(p) = progress {
-            p.inc();
-        }
-        return MergeResult {
-            pair_index,
-            pair_name: pair.stem.clone(),
-            success: true,
-            error: None,
-            duration: start.elapsed(),
-        };
+        return do_dry_run(pair, &output_path, pair_index, progress, verbose);
     }
 
-    let start = std::time::Instant::now();
-    let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, format);
+    do_merge(
+        pair,
+        &output_path,
+        pair_index,
+        format,
+        progress,
+        verbose,
+        max_retries,
+    )
+}
 
-    // Retry loop for transient failures
+fn do_dry_run(
+    pair: &FilePair,
+    output_path: &Path,
+    pair_index: usize,
+    progress: Option<&MergeProgress>,
+    verbose: bool,
+) -> MergeResult {
+    let start = std::time::Instant::now();
+    if verbose {
+        println!(
+            "[dry-run] ffmpeg -i {} -i {} -> {}",
+            pair.video.display(),
+            pair.audio.display(),
+            output_path.display()
+        );
+    }
+    if progress.is_none() {
+        println!("{} {} [dry-run]", "○".cyan(), pair.stem);
+    }
+    if let Some(p) = progress {
+        p.inc();
+    }
+    MergeResult {
+        pair_index,
+        pair_name: pair.stem.clone(),
+        success: true,
+        error: None,
+        duration: start.elapsed(),
+    }
+}
+
+fn do_merge(
+    pair: &FilePair,
+    output_path: &Path,
+    pair_index: usize,
+    format: OutputFormat,
+    progress: Option<&MergeProgress>,
+    verbose: bool,
+    max_retries: usize,
+) -> MergeResult {
+    let start = std::time::Instant::now();
+
     for attempt in 0..=max_retries {
         if attempt > 0 {
-            if let Some(p) = progress {
-                p.set_message(&format!("retry {} {}", attempt, pair.stem));
-            } else if verbose {
-                println!(
-                    "{} Retrying {} (attempt {})",
-                    "↻".yellow(),
-                    pair.stem,
-                    attempt
-                );
-            }
-            // Brief pause before retry
             std::thread::sleep(Duration::from_secs(1));
+            if let Some(p) = progress {
+                p.set_message(&format!("retry {attempt} {}", pair.stem));
+            } else if verbose {
+                println!("{} Retrying {} (attempt {attempt})", "↻".yellow(), pair.stem);
+            }
         }
 
         if verbose && attempt == 0 {
@@ -232,6 +253,7 @@ pub fn merge_pair(
             );
         }
 
+        let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, output_path, format);
         match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT) {
             Ok(status) if status.success() => {
                 if progress.is_none() {
@@ -248,64 +270,50 @@ pub fn merge_pair(
                     duration: start.elapsed(),
                 };
             }
-            Ok(status) => {
-                if attempt == max_retries {
-                    if progress.is_none() {
-                        println!(
-                            "{} {}: ffmpeg exited with code {:?}",
-                            "✗".red(),
-                            pair.stem,
-                            status.code()
-                        );
-                    }
-                    if let Some(p) = progress {
-                        p.inc();
-                    }
-                    return MergeResult {
-                        pair_index,
-                        pair_name: pair.stem.clone(),
-                        success: false,
-                        error: Some(format!(
-                            "ffmpeg exited with code {:?} after {} retries",
-                            status.code(),
-                            max_retries
-                        )),
-                        duration: start.elapsed(),
-                    };
+            Ok(status) if attempt == max_retries => {
+                if progress.is_none() {
+                    println!(
+                        "{} {}: ffmpeg exited with code {:?}",
+                        "✗".red(),
+                        pair.stem,
+                        status.code()
+                    );
                 }
-                // Rebuild command for retry
-                cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, format);
-            }
-            Err(e) => {
-                if attempt == max_retries {
-                    if progress.is_none() {
-                        println!("{} {}: {}", "✗".red(), pair.stem, e);
-                    }
-                    if let Some(p) = progress {
-                        p.inc();
-                    }
-                    return MergeResult {
-                        pair_index,
-                        pair_name: pair.stem.clone(),
-                        success: false,
-                        error: Some(format!("{} after {} retries", e, max_retries)),
-                        duration: start.elapsed(),
-                    };
+                if let Some(p) = progress {
+                    p.inc();
                 }
-                // Rebuild command for retry
-                cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, format);
+                return MergeResult {
+                    pair_index,
+                    pair_name: pair.stem.clone(),
+                    success: false,
+                    error: Some(format!(
+                        "ffmpeg exited with code {:?} after {} retries",
+                        status.code(),
+                        max_retries,
+                    )),
+                    duration: start.elapsed(),
+                };
             }
+            Err(e) if attempt == max_retries => {
+                if progress.is_none() {
+                    println!("{} {}: {}", "✗".red(), pair.stem, e);
+                }
+                if let Some(p) = progress {
+                    p.inc();
+                }
+                return MergeResult {
+                    pair_index,
+                    pair_name: pair.stem.clone(),
+                    success: false,
+                    error: Some(format!("{e} after {max_retries} retries")),
+                    duration: start.elapsed(),
+                };
+            }
+            _ => {}
         }
     }
 
-    // Should not reach here
-    MergeResult {
-        pair_index,
-        pair_name: pair.stem.clone(),
-        success: false,
-        error: Some("Unexpected retry loop exit".to_string()),
-        duration: start.elapsed(),
-    }
+    unreachable!("retry loop should always return")
 }
 
 fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus> {
@@ -402,25 +410,18 @@ fn delete_source_files(pair: &FilePair) -> Result<()> {
     let video_result = std::fs::remove_file(&pair.video);
     let audio_result = std::fs::remove_file(&pair.audio);
 
-    match (video_result, audio_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(e), Ok(())) => Err(anyhow::anyhow!(
-            "Failed to delete video '{}': {}",
-            pair.video.display(),
-            e
-        )),
-        (Ok(()), Err(e)) => Err(anyhow::anyhow!(
-            "Failed to delete audio '{}': {}",
-            pair.audio.display(),
-            e
-        )),
-        (Err(ve), Err(ae)) => Err(anyhow::anyhow!(
-            "Failed to delete both files: video '{}' ({}), audio '{}' ({})",
-            pair.video.display(),
-            ve,
-            pair.audio.display(),
-            ae
-        )),
+    let mut errors = Vec::new();
+    if let Err(e) = video_result {
+        errors.push(format!("video '{}' ({})", pair.video.display(), e));
+    }
+    if let Err(e) = audio_result {
+        errors.push(format!("audio '{}' ({})", pair.audio.display(), e));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("Failed to delete {}", errors.join(", ")))
     }
 }
 
@@ -659,18 +660,14 @@ mod delete_tests {
 
         let result = delete_source_files(&pair);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to delete both"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to delete"));
+        assert!(err.contains("video"));
+        assert!(err.contains("audio"));
     }
 
     #[test]
     fn test_deletion_failures_tracking() {
-        // Bug: deletion_failures should count actual deletion failures
-        // Currently: deletion_failures = deleted_count - success_count = 0 always
-        // Expected: deletion_failures should track files that couldn't be deleted
-
         let dir = tempdir().unwrap();
         let video_path = dir.path().join("video.mp4");
         let audio_path = dir.path().join("video.m4a");

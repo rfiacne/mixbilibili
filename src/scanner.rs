@@ -1,7 +1,5 @@
-// src/scanner.rs
 use anyhow::{Context, Result};
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -47,19 +45,20 @@ pub fn scan_directory(source_dir: &Path) -> Result<ScanResult> {
             None => continue,
         };
 
-        if filename.ends_with(".aria2") {
-            let base = filename.strip_suffix(".aria2").unwrap();
-            aria2_files.insert(base.to_string());
-            continue;
-        }
-
-        if filename.ends_with(".mp4") {
-            let stem = filename.strip_suffix(".mp4").unwrap();
+        if let Some(stem) = filename.strip_suffix(".aria2") {
+            aria2_files.insert(stem.to_string());
+        } else if let Some(stem) = filename.strip_suffix(".mp4") {
             mp4_files.insert(stem.to_string(), path);
-        } else if filename.ends_with(".m4a") {
-            let stem = filename.strip_suffix(".m4a").unwrap();
+        } else if let Some(stem) = filename.strip_suffix(".m4a") {
             m4a_files.insert(stem.to_string(), path);
         }
+    }
+
+    /// Check if any aria2 control file exists for this stem.
+    fn is_downloading(stem: &str, aria2_files: &HashSet<String>) -> bool {
+        aria2_files.contains(stem)
+            || aria2_files.contains(&format!("{stem}.mp4"))
+            || aria2_files.contains(&format!("{stem}.m4a"))
     }
 
     let mut pairs = Vec::new();
@@ -68,33 +67,25 @@ pub fn scan_directory(source_dir: &Path) -> Result<ScanResult> {
     let mut processed_stems: HashSet<String> = HashSet::new();
 
     for stem in mp4_files.keys().chain(m4a_files.keys()) {
-        if processed_stems.contains(stem) {
+        if !processed_stems.insert(stem.clone()) {
             continue;
         }
-        processed_stems.insert(stem.clone());
 
-        let has_aria2 = aria2_files.contains(stem)
-            || aria2_files.contains(&format!("{}.mp4", stem))
-            || aria2_files.contains(&format!("{}.m4a", stem));
-
-        if has_aria2 {
+        if is_downloading(stem, &aria2_files) {
             stats.skipped += 1;
             skipped_names.push(stem.clone());
             continue;
         }
 
-        match (mp4_files.get(stem), m4a_files.get(stem)) {
-            (Some(video), Some(audio)) => {
-                pairs.push(FilePair {
-                    video: video.clone(),
-                    audio: audio.clone(),
-                    stem: stem.clone(),
-                });
-                stats.pairs += 1;
-            }
-            _ => {
-                stats.orphaned += 1;
-            }
+        if let (Some(video), Some(audio)) = (mp4_files.get(stem), m4a_files.get(stem)) {
+            pairs.push(FilePair {
+                video: video.clone(),
+                audio: audio.clone(),
+                stem: stem.clone(),
+            });
+            stats.pairs += 1;
+        } else {
+            stats.orphaned += 1;
         }
     }
 

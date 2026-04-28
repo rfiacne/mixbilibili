@@ -1,4 +1,3 @@
-// src/progress.rs
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
 

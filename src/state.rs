@@ -1,4 +1,3 @@
-// src/state.rs
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -61,7 +60,7 @@ impl MergeState {
     /// Mark a file stem as completed
     pub fn mark_completed(&mut self, stem: &str) {
         self.pending.retain(|s| s != stem);
-        if !self.completed.contains(&stem.to_string()) {
+        if !self.completed.iter().any(|s| s == stem) {
             self.completed.push(stem.to_string());
         }
     }
@@ -69,21 +68,21 @@ impl MergeState {
     /// Mark a file stem as failed
     pub fn mark_failed(&mut self, stem: &str) {
         self.pending.retain(|s| s != stem);
-        if !self.failed.contains(&stem.to_string()) {
+        if !self.failed.iter().any(|s| s == stem) {
             self.failed.push(stem.to_string());
         }
     }
 
     /// Check if a file stem is already completed
     pub fn is_completed(&self, stem: &str) -> bool {
-        self.completed.contains(&stem.to_string())
+        self.completed.iter().any(|s| s == stem)
     }
 
     /// Add a pending file stem
     pub fn add_pending(&mut self, stem: &str) {
-        if !self.pending.contains(&stem.to_string())
-            && !self.completed.contains(&stem.to_string())
-            && !self.failed.contains(&stem.to_string())
+        if !self.pending.iter().any(|s| s == stem)
+            && !self.completed.iter().any(|s| s == stem)
+            && !self.failed.iter().any(|s| s == stem)
         {
             self.pending.push(stem.to_string());
         }

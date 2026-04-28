@@ -1,4 +1,3 @@
-// src/main.rs
 mod cli;
 mod ffmpeg;
 mod merger;
@@ -216,14 +215,10 @@ fn run() -> Result<()> {
     }
 }
 
-/// How many merges between incremental state saves.
-/// Prevents losing all progress if interrupted mid-batch.
+/// Merges between incremental state saves to limit progress loss on interrupt.
 const STATE_SAVE_INTERVAL: usize = 5;
 
 /// Execute the actual merge operations for all filtered pairs.
-///
-/// Splits pairs into batches of STATE_SAVE_INTERVAL. After each batch,
-/// saves merge state so resume can recover from interruption.
 fn execute(
     args: &Args,
     ctx: &ScanContext,
@@ -240,9 +235,7 @@ fn execute(
 
     let mut final_summary = merger::MergeSummary::default();
 
-    // Process in batches, saving state between batches
     for chunk in ctx.pairs.chunks(STATE_SAVE_INTERVAL) {
-        // Check for interrupt before starting each batch
         if INTERRUPTED.load(Ordering::SeqCst) {
             break;
         }
@@ -265,62 +258,67 @@ fn execute(
             args.retry,
         );
 
-        // Accumulate results
-        final_summary.success_count += batch_summary.success_count;
-        final_summary.failed_count += batch_summary.failed_count;
-        final_summary.durations.extend(batch_summary.durations);
+        accumulate_summary(&mut final_summary, &batch_summary);
 
-        // Incremental state save after each batch
         if !args.dry_run {
-            for (name, _) in &batch_summary.failures {
-                merge_state.mark_failed(name);
-            }
-            for pair in chunk {
-                if !batch_summary.failures.iter().any(|(n, _)| n == &pair.stem) {
-                    merge_state.mark_completed(&pair.stem);
-                }
-            }
+            update_state_from_batch(merge_state, chunk, &batch_summary);
             if let Err(e) = merge_state.save(&args.source) {
-                eprintln!("Warning: failed to save incremental state: {}", e);
+                eprintln!("Warning: failed to save incremental state: {e}");
             }
         }
-
-        // Move failures after state save
-        final_summary.failures.extend(batch_summary.failures);
     }
 
-    // Merge in scan stats
     final_summary.skipped_count = ctx.stats.skipped;
     final_summary.orphaned_count = ctx.stats.orphaned;
 
     Ok(final_summary)
 }
 
-/// Update merge state based on results and persist or clear as appropriate.
+fn accumulate_summary(final_summary: &mut merger::MergeSummary, batch: &merger::MergeSummary) {
+    final_summary.success_count += batch.success_count;
+    final_summary.failed_count += batch.failed_count;
+    final_summary.durations.extend(batch.durations.iter().copied());
+    final_summary.failures.extend(batch.failures.iter().cloned());
+}
+
+fn update_state_from_batch(
+    state: &mut state::MergeState,
+    chunk: &[scanner::FilePair],
+    batch: &merger::MergeSummary,
+) {
+    for (name, _) in &batch.failures {
+        state.mark_failed(name);
+    }
+    for pair in chunk {
+        if !batch.failures.iter().any(|(n, _)| n == &pair.stem) {
+            state.mark_completed(&pair.stem);
+        }
+    }
+}
+
+/// Finalize: update state based on results, clear on full success or save otherwise.
 fn finalize(
     args: &Args,
     mut merge_state: state::MergeState,
     summary: &merger::MergeSummary,
 ) -> Result<()> {
-    if !args.dry_run {
-        // Mark failures
-        for (name, _) in &summary.failures {
-            merge_state.mark_failed(name);
-        }
+    if args.dry_run {
+        return Ok(());
+    }
 
-        // Mark all pending (non-failed) items as completed
-        for pair in merge_state.pending.clone() {
-            if !summary.failures.iter().any(|(name, _)| name == &pair) {
-                merge_state.mark_completed(&pair);
-            }
+    for (name, _) in &summary.failures {
+        merge_state.mark_failed(name);
+    }
+    for pair in merge_state.pending.clone() {
+        if !summary.failures.iter().any(|(name, _)| name == &pair) {
+            merge_state.mark_completed(&pair);
         }
+    }
 
-        // Clear state if all successful, otherwise save
-        if summary.all_success() {
-            state::MergeState::clear(&args.source)?;
-        } else {
-            merge_state.save(&args.source)?;
-        }
+    if summary.all_success() {
+        state::MergeState::clear(&args.source)?;
+    } else {
+        merge_state.save(&args.source)?;
     }
     Ok(())
 }

@@ -144,59 +144,44 @@ impl Args {
 }
 
 #[cfg(test)]
+fn make_args() -> Args {
+    Args {
+        source: PathBuf::from("."),
+        output: PathBuf::from("."),
+        sdel: true,
+        format: OutputFormat::Mkv,
+        jobs: 4,
+        progress: true,
+        dry_run: false,
+        verbose: false,
+        resume: false,
+        retry: 0,
+    }
+}
+
+#[cfg(test)]
 mod args_tests {
     use super::*;
 
     #[test]
     fn test_validate_jobs_clamp_to_min() {
-        let mut args = Args {
-            source: PathBuf::from("."),
-            output: PathBuf::from("."),
-            sdel: true,
-            format: OutputFormat::Mkv,
-            jobs: 0,
-            progress: true,
-            dry_run: false,
-            verbose: false,
-            resume: false,
-            retry: 0,
-        };
+        let mut args = make_args();
+        args.jobs = 0;
         args.validate().unwrap();
         assert_eq!(args.jobs, 1);
     }
 
     #[test]
     fn test_validate_jobs_clamp_to_max() {
-        let mut args = Args {
-            source: PathBuf::from("."),
-            output: PathBuf::from("."),
-            sdel: true,
-            format: OutputFormat::Mkv,
-            jobs: 100,
-            progress: true,
-            dry_run: false,
-            verbose: false,
-            resume: false,
-            retry: 0,
-        };
+        let mut args = make_args();
+        args.jobs = 100;
         args.validate().unwrap();
         assert_eq!(args.jobs, 32);
     }
 
     #[test]
     fn test_validate_jobs_in_range() {
-        let mut args = Args {
-            source: PathBuf::from("."),
-            output: PathBuf::from("."),
-            sdel: true,
-            format: OutputFormat::Mkv,
-            jobs: 4,
-            progress: true,
-            dry_run: false,
-            verbose: false,
-            resume: false,
-            retry: 0,
-        };
+        let mut args = make_args();
         args.validate().unwrap();
         assert_eq!(args.jobs, 4);
     }
@@ -262,21 +247,9 @@ mod validation_tests {
         let file = dir.path().join("file.txt");
         fs::File::create(&file).unwrap();
 
-        let mut args = Args {
-            source: file,
-            output: PathBuf::from("."),
-            sdel: true,
-            format: OutputFormat::Mkv,
-            jobs: 4,
-            progress: true,
-            dry_run: false,
-            verbose: false,
-            resume: false,
-            retry: 0,
-        };
-        let result = args.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not a directory"));
+        let mut args = make_args();
+        args.source = file;
+        assert!(args.validate().unwrap_err().to_string().contains("not a directory"));
     }
 
     #[test]
@@ -285,40 +258,18 @@ mod validation_tests {
         let file = dir.path().join("output.txt");
         fs::File::create(&file).unwrap();
 
-        let mut args = Args {
-            source: dir.path().to_path_buf(),
-            output: file,
-            sdel: true,
-            format: OutputFormat::Mkv,
-            jobs: 4,
-            progress: true,
-            dry_run: false,
-            verbose: false,
-            resume: false,
-            retry: 0,
-        };
-        let result = args.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not a directory"));
+        let mut args = make_args();
+        args.source = dir.path().to_path_buf();
+        args.output = file;
+        assert!(args.validate().unwrap_err().to_string().contains("not a directory"));
     }
 
     #[test]
     fn test_validate_success() {
         let dir = tempdir().unwrap();
-
-        let mut args = Args {
-            source: dir.path().to_path_buf(),
-            output: dir.path().to_path_buf(),
-            sdel: true,
-            format: OutputFormat::Mkv,
-            jobs: 4,
-            progress: true,
-            dry_run: false,
-            verbose: false,
-            resume: false,
-            retry: 0,
-        };
-        let result = args.validate();
-        assert!(result.is_ok());
+        let mut args = make_args();
+        args.source = dir.path().to_path_buf();
+        args.output = dir.path().to_path_buf();
+        assert!(args.validate().is_ok());
     }
 }

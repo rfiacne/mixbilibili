@@ -1,5 +1,3 @@
-// src/ffmpeg.rs
-
 use crate::cli::OutputFormat;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -44,36 +42,42 @@ pub fn detect_os() -> Os {
     }
 }
 
-pub fn get_install_command(os: Os) -> Option<(String, String)> {
+/// Package manager candidates per OS: (name, install_command, availability_check).
+fn package_managers(os: Os) -> Vec<(&'static str, &'static str)> {
     match os {
         Os::Windows => {
+            let mut pms = Vec::new();
             if which::which("winget").is_ok() {
-                Some(("winget".to_string(), "winget install ffmpeg".to_string()))
-            } else if which::which("choco").is_ok() {
-                Some(("choco".to_string(), "choco install ffmpeg -y".to_string()))
-            } else {
-                None
+                pms.push(("winget", "winget install ffmpeg"));
             }
+            if which::which("choco").is_ok() {
+                pms.push(("choco", "choco install ffmpeg -y"));
+            }
+            pms
         }
         Os::MacOS => {
             if which::which("brew").is_ok() {
-                Some(("brew".to_string(), "brew install ffmpeg".to_string()))
+                vec![("brew", "brew install ffmpeg")]
             } else {
-                None
+                vec![]
             }
         }
         Os::Linux => {
             if which::which("apt").is_ok() {
-                Some((
-                    "apt".to_string(),
-                    "sudo apt update && sudo apt install -y ffmpeg".to_string(),
-                ))
+                vec![("apt", "sudo apt update && sudo apt install -y ffmpeg")]
             } else {
-                None
+                vec![]
             }
         }
-        Os::Unknown => None,
+        Os::Unknown => vec![],
     }
+}
+
+#[allow(dead_code)]
+pub fn get_install_command(os: Os) -> Option<(String, String)> {
+    package_managers(os)
+        .first()
+        .map(|(name, cmd)| (name.to_string(), cmd.to_string()))
 }
 
 pub fn get_manual_instructions(os: Os) -> &'static str {
@@ -102,54 +106,59 @@ pub fn get_manual_instructions(os: Os) -> &'static str {
 }
 
 pub fn prompt_and_install(os: Os) -> anyhow::Result<bool> {
-    if let Some((pm_name, _)) = get_install_command(os) {
-        print!("ffmpeg not found. Install via {}? [y/N]: ", pm_name);
-        io::stdout().flush()?;
+    let pms = package_managers(os);
+    if pms.is_empty() {
+        println!("{}", get_manual_instructions(os));
+        return Ok(false);
+    }
 
-        let mut input = String::new();
-        if io::stdin().lock().read_line(&mut input).is_ok() {
-            let input = input.trim().to_lowercase();
-            if input == "y" || input == "yes" {
-                return Ok(run_install(os));
-            }
+    let (pm_name, _) = pms[0];
+    print!("ffmpeg not found. Install via {pm_name}? [y/N]: ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    if io::stdin().lock().read_line(&mut input).is_ok() {
+        let input = input.trim().to_lowercase();
+        if input == "y" || input == "yes" {
+            return Ok(run_install(&pms));
         }
     }
 
-    // Print manual instructions and exit
     println!("{}", get_manual_instructions(os));
     Ok(false)
 }
 
-fn run_install(os: Os) -> bool {
-    if let Some((_, cmd)) = get_install_command(os) {
-        println!("Running: {}", cmd);
+fn run_install(pms: &[(&str, &str)]) -> bool {
+    if pms.is_empty() {
+        return false;
+    }
 
-        let result = if cfg!(target_os = "windows") {
-            Command::new("cmd").args(["/C", &cmd]).status()
-        } else {
-            Command::new("sh").args(["-c", &cmd]).status()
-        };
+    let (_, cmd) = pms[0];
+    println!("Running: {cmd}");
 
-        match result {
-            Ok(status) if status.success() => {
-                if is_ffmpeg_available() {
-                    println!("ffmpeg installed successfully!");
-                    return true;
-                } else {
-                    println!("Installation completed but ffmpeg not found in PATH.");
-                    println!("You may need to restart your terminal.");
-                }
+    let result = if cfg!(target_os = "windows") {
+        Command::new("cmd").args(["/C", cmd]).status()
+    } else {
+        Command::new("sh").args(["-c", cmd]).status()
+    };
+
+    match result {
+        Ok(status) if status.success() => {
+            if is_ffmpeg_available() {
+                println!("ffmpeg installed successfully!");
+                return true;
             }
-            Ok(status) => {
-                println!("Installation failed with exit code: {:?}", status.code());
-            }
-            Err(e) => {
-                println!("Failed to run installation: {}", e);
-            }
+            println!("Installation completed but ffmpeg not found in PATH.");
+            println!("You may need to restart your terminal.");
+        }
+        Ok(status) => {
+            println!("Installation failed with exit code: {:?}", status.code());
+        }
+        Err(e) => {
+            println!("Failed to run installation: {e}");
         }
     }
 
-    println!("{}", get_manual_instructions(os));
     false
 }
 

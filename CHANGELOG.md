@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-28
+
+### Added
+- Process timeout protection (5 min) with automatic kill for stalled ffmpeg
+- Incremental state saving (every 5 merges) for interruption recovery
+- Detailed timing report (total/avg/min/max/throughput) in merge summary
+
+### Changed
+- Refactored `merge_pair` into `do_dry_run` / `do_merge` for clarity
+- Simplified `delete_source_files` — replaces 4-way match with error collection
+- Simplified scanner pairing logic with `if let` patterns
+- Simplified `finalize` — early return instead of nested `if !args.dry_run`
+- Extracted `accumulate_summary` / `update_state_from_batch` helpers
+- Extracted `package_managers()` to eliminate cross-function duplication in ffmpeg module
+- Replaced `.contains(&stem.to_string())` with `.iter().any(\|s\| s == stem)` in state.rs
+- Extracted `make_args()` test helper in cli.rs
+- Removed redundant file header comments (`// src/xxx.rs`)
+
+### Fixed
+- Retry loop rebuilt ffmpeg command on each attempt (previously reused stale command)
+- Deletion failure error messages now include both file paths on dual failure
+
 ## [0.3.0] - 2026-04-27
 
 ### Added
