@@ -89,7 +89,7 @@ fn run() -> Result<()> {
     }
 
     println!("Processing {} file pairs...", scan_result.pairs.len());
-    let summary = merger::execute_merges(scan_result, &args.output, format, args.jobs, args.sdel);
+    let summary = merger::execute_merges(scan_result, &args.output, format, args.jobs, args.sdel, None);
 
     summary.print_report();
 

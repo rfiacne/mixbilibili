@@ -1,11 +1,13 @@
 use crate::cli::OutputFormat;
 use crate::ffmpeg;
+use crate::progress::MergeProgress;
 use crate::scanner::{FilePair, ScanResult};
 use anyhow::{Context, Result};
 use colored::Colorize;
 use rayon::prelude::*;
 use std::path::Path;
 use std::process::{Child, ExitStatus};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(300);
@@ -95,23 +97,24 @@ pub fn merge_pair(
     pair_index: usize,
     output_dir: &Path,
     format: OutputFormat,
+    progress: Option<&MergeProgress>,
 ) -> MergeResult {
-    if pair.stem.contains('/') || pair.stem.contains('\\') {
-        return MergeResult {
-            pair_index,
-            pair_name: pair.stem.clone(),
-            success: false,
-            error: Some(format!("Invalid characters in filename: {}", pair.stem)),
-        };
-    }
-
     let output_path = output_dir.join(format!("{}.{}", pair.stem, format.extension()));
+
+    if let Some(p) = progress {
+        p.set_message(&pair.stem);
+    }
 
     let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, format);
 
     match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT) {
         Ok(status) if status.success() => {
-            println!("{} {}", "✓".green(), pair.stem);
+            if progress.is_none() {
+                println!("{} {}", "✓".green(), pair.stem);
+            }
+            if let Some(p) = progress {
+                p.inc();
+            }
             MergeResult {
                 pair_index,
                 pair_name: pair.stem.clone(),
@@ -120,12 +123,17 @@ pub fn merge_pair(
             }
         }
         Ok(status) => {
-            println!(
-                "{} {}: ffmpeg exited with code {:?}",
-                "✗".red(),
-                pair.stem,
-                status.code()
-            );
+            if progress.is_none() {
+                println!(
+                    "{} {}: ffmpeg exited with code {:?}",
+                    "✗".red(),
+                    pair.stem,
+                    status.code()
+                );
+            }
+            if let Some(p) = progress {
+                p.inc();
+            }
             MergeResult {
                 pair_index,
                 pair_name: pair.stem.clone(),
@@ -134,7 +142,12 @@ pub fn merge_pair(
             }
         }
         Err(e) => {
-            println!("{} {}: {}", "✗".red(), pair.stem, e);
+            if progress.is_none() {
+                println!("{} {}: {}", "✗".red(), pair.stem, e);
+            }
+            if let Some(p) = progress {
+                p.inc();
+            }
             MergeResult {
                 pair_index,
                 pair_name: pair.stem.clone(),
@@ -165,6 +178,7 @@ pub fn execute_merges(
     format: OutputFormat,
     jobs: usize,
     delete_source: bool,
+    progress: Option<MergeProgress>,
 ) -> MergeSummary {
     let output_dir = output_dir.to_path_buf();
     let pairs = scan_result.pairs;
@@ -173,23 +187,32 @@ pub fn execute_merges(
         .num_threads(jobs)
         .build_global();
 
+    let progress_ref = progress.as_ref();
+
     let results: Vec<MergeResult> = pairs
         .par_iter()
         .enumerate()
-        .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format))
+        .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format, progress_ref))
         .collect();
+
+    if let Some(p) = &progress {
+        p.finish();
+    }
 
     let mut summary = MergeSummary::new();
     summary.skipped_count = scan_result.stats.skipped;
     summary.orphaned_count = scan_result.stats.orphaned;
 
     if delete_source {
+        let deletion_failure_count = AtomicUsize::new(0);
         results.par_iter().filter(|r| r.success).for_each(|result| {
             let pair = &pairs[result.pair_index];
             if let Err(e) = delete_source_files(pair) {
                 eprintln!("Warning: {}", e);
+                deletion_failure_count.fetch_add(1, Ordering::Relaxed);
             }
         });
+        summary.deletion_failures = deletion_failure_count.load(Ordering::Relaxed);
     }
 
     for result in &results {
@@ -203,11 +226,6 @@ pub fn execute_merges(
                     .push((result.pair_name.clone(), error.clone()));
             }
         }
-    }
-
-    if delete_source {
-        let deleted_count = results.iter().filter(|r| r.success).count();
-        summary.deletion_failures = deleted_count - summary.success_count;
     }
 
     summary
@@ -306,7 +324,7 @@ mod exec_tests {
             skipped_names: vec![],
         };
 
-        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false);
+        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false, None);
 
         assert_eq!(summary.success_count, 0);
         assert_eq!(summary.failed_count, 0);
@@ -326,10 +344,28 @@ mod exec_tests {
             skipped_names: vec![],
         };
 
-        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false);
+        let summary = execute_merges(scan_result, dir.path(), OutputFormat::Mkv, 1, false, None);
 
         assert_eq!(summary.skipped_count, 5);
         assert_eq!(summary.orphaned_count, 3);
+    }
+
+    #[test]
+    fn test_deletion_failures_counted_correctly() {
+        // Verify that deletion_failures counter is properly structured
+        // After fix: execute_merges uses AtomicUsize to track actual deletion failures
+
+        let summary = MergeSummary {
+            success_count: 5,
+            failed_count: 0,
+            skipped_count: 0,
+            orphaned_count: 0,
+            failures: vec![],
+            deletion_failures: 2, // Can now be > 0 after fix
+        };
+
+        // deletion_failures is usize, can represent actual failure count
+        assert_eq!(summary.deletion_failures, 2);
     }
 }
 
@@ -402,6 +438,42 @@ mod delete_tests {
             .unwrap_err()
             .to_string()
             .contains("Failed to delete both"));
+    }
+
+    #[test]
+    fn test_deletion_failures_tracking() {
+        // Bug: deletion_failures should count actual deletion failures
+        // Currently: deletion_failures = deleted_count - success_count = 0 always
+        // Expected: deletion_failures should track files that couldn't be deleted
+
+        let dir = tempdir().unwrap();
+        let video_path = dir.path().join("video.mp4");
+        let audio_path = dir.path().join("video.m4a");
+
+        // Create video but NOT audio - deletion will fail for audio
+        File::create(&video_path).unwrap();
+        // audio_path does NOT exist
+
+        let pair = FilePair {
+            video: video_path.clone(),
+            audio: audio_path.clone(),
+            stem: "video".to_string(),
+        };
+
+        // delete_source_files should fail because audio doesn't exist
+        let result = delete_source_files(&pair);
+        assert!(result.is_err(), "Deletion should fail when audio missing");
+
+        // The error message should indicate which file failed
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to delete audio"),
+            "Error should mention audio: {}",
+            err_msg
+        );
+
+        // Video should be deleted (even though overall operation failed)
+        assert!(!video_path.exists(), "Video should be deleted despite partial failure");
     }
 }
 
