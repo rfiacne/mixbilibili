@@ -95,9 +95,13 @@ jobs:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
         with:
-          files: binary-*/mixbilibili*
+          files: |
+            mixbilibili
+            mixbilibili.exe
           generate_release_notes: true
