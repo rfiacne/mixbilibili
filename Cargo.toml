@@ -6,23 +6,23 @@ description = "A CLI tool for batch merging Bilibili video and audio files"
 license = "MIT"
 
 [dependencies]
-clap = { version = "4.5.0", features = ["derive"] }
+clap = { version = "4.5.0", features = ["derive", "std"] }
 which = "6.0.0"
 rayon = "1.10.0"
-colored = "2.1.0"
-anyhow = "1.0.82"
-indicatif = "0.17.8"
+colored = { version = "2.1.0", default-features = false }
+anyhow = { version = "1.0.82", default-features = false }
+indicatif = { version = "0.17.8", default-features = false }
 thiserror = "1.0.63"
-serde = { version = "1.0.200", features = ["derive"] }
-serde_json = "1.0.116"
+serde = { version = "1.0.200", features = ["derive", "std"] }
+serde_json = { version = "1.0.116", features = ["std"] }
 ctrlc = "3.4.4"
 
 [dev-dependencies]
 tempfile = "3.10.0"
 
 [profile.release]
-opt-level = 3
-lto = "thin"
+opt-level = "z"      # Optimize for size over speed
+lto = "fat"       # Full LTO for better size reduction
 codegen-units = 1
 strip = true
 panic = "abort"
