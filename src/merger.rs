@@ -371,9 +371,11 @@ pub fn execute_merges(
         p.finish();
     }
 
-    let mut summary = MergeSummary::default();
-    summary.skipped_count = scan_result.stats.skipped;
-    summary.orphaned_count = scan_result.stats.orphaned;
+    let mut summary = MergeSummary {
+        skipped_count: scan_result.stats.skipped,
+        orphaned_count: scan_result.stats.orphaned,
+        ..Default::default()
+    };
 
     if delete_source && !dry_run {
         let deletion_failures: usize = results
