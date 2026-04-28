@@ -4,6 +4,7 @@ mod ffmpeg;
 mod merger;
 mod progress;
 mod scanner;
+mod state;
 
 use anyhow::Result;
 use clap::Parser;
