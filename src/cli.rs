@@ -112,6 +112,10 @@ pub struct Args {
     /// Resume interrupted batch from previous state
     #[arg(short = 'r', long)]
     pub resume: bool,
+
+    /// Number of retries for failed merges (0 = no retry)
+    #[arg(long, default_value_t = 0)]
+    pub retry: usize,
 }
 
 fn default_jobs() -> usize {
@@ -155,6 +159,7 @@ mod args_tests {
             dry_run: false,
             verbose: false,
             resume: false,
+            retry: 0,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 1);
@@ -172,6 +177,7 @@ mod args_tests {
             dry_run: false,
             verbose: false,
             resume: false,
+            retry: 0,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 32);
@@ -189,6 +195,7 @@ mod args_tests {
             dry_run: false,
             verbose: false,
             resume: false,
+            retry: 0,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 4);
@@ -229,6 +236,18 @@ mod args_tests {
         let args = Args::try_parse_from(["mixbilibili", "--resume"]).unwrap();
         assert!(args.resume);
     }
+
+    #[test]
+    fn test_retry_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert_eq!(args.retry, 0);
+    }
+
+    #[test]
+    fn test_retry_custom() {
+        let args = Args::try_parse_from(["mixbilibili", "--retry", "3"]).unwrap();
+        assert_eq!(args.retry, 3);
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +272,7 @@ mod validation_tests {
             dry_run: false,
             verbose: false,
             resume: false,
+            retry: 0,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -275,6 +295,7 @@ mod validation_tests {
             dry_run: false,
             verbose: false,
             resume: false,
+            retry: 0,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -295,6 +316,7 @@ mod validation_tests {
             dry_run: false,
             verbose: false,
             resume: false,
+            retry: 0,
         };
         let result = args.validate();
         assert!(result.is_ok());
