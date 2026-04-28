@@ -77,10 +77,33 @@ fn run() -> Result<()> {
         return Err(AppError::FfmpegNotFound.into());
     }
 
+    // Check for resume state
+    let existing_state = if args.resume {
+        state::MergeState::load(&args.source)?
+    } else {
+        None
+    };
+
     let scan_result = scanner::scan_directory(&args.source)?;
 
-    if scan_result.pairs.is_empty() {
-        println!("{}", "No file pairs to merge".yellow());
+    // Filter out already completed if resuming
+    let pairs_to_process: Vec<_> = if let Some(ref state) = existing_state {
+        scan_result
+            .pairs
+            .iter()
+            .filter(|p| !state.is_completed(&p.stem))
+            .cloned()
+            .collect()
+    } else {
+        scan_result.pairs.clone()
+    };
+
+    if pairs_to_process.is_empty() {
+        if existing_state.is_some() {
+            println!("{}", "All files already merged from previous session".green());
+        } else {
+            println!("{}", "No file pairs to merge".yellow());
+        }
         return Ok(());
     }
 
@@ -89,15 +112,68 @@ fn run() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to create output directory: {}", e))?;
     }
 
-    println!("Processing {} file pairs...", scan_result.pairs.len());
+    // Initialize state for tracking
+    let mut merge_state = existing_state.unwrap_or_else(|| {
+        state::MergeState::new(&args.source, &args.output, &format.to_string())
+    });
+
+    // Add pending items
+    for pair in &pairs_to_process {
+        merge_state.add_pending(&pair.stem);
+    }
+
+    // Save state before starting (in case of interruption)
+    if !args.dry_run {
+        merge_state.save(&args.source)?;
+    }
+
+    println!("Processing {} file pairs...", pairs_to_process.len());
 
     let progress = if args.progress {
-        Some(progress::MergeProgress::new(scan_result.pairs.len()))
+        Some(progress::MergeProgress::new(pairs_to_process.len()))
     } else {
         None
     };
 
-    let summary = merger::execute_merges(scan_result, &args.output, format, args.jobs, args.sdel, progress, args.dry_run, args.verbose);
+    // Create a modified ScanResult with filtered pairs
+    let filtered_scan_result = scanner::ScanResult {
+        pairs: pairs_to_process,
+        stats: scan_result.stats.clone(),
+        skipped_names: scan_result.skipped_names.clone(),
+    };
+
+    let summary = merger::execute_merges(
+        filtered_scan_result,
+        &args.output,
+        format,
+        args.jobs,
+        args.sdel,
+        progress,
+        args.dry_run,
+        args.verbose,
+    );
+
+    // Update state based on results
+    if !args.dry_run {
+        for result in &summary.failures {
+            merge_state.mark_failed(&result.0);
+        }
+        // Mark completed based on success count
+        for pair in &scan_result.pairs {
+            if summary.failures.iter().any(|(name, _)| name == &pair.stem) {
+                // Already marked as failed above
+            } else if summary.success_count > 0 {
+                merge_state.mark_completed(&pair.stem);
+            }
+        }
+        
+        // Clear state if all successful
+        if summary.all_success() {
+            state::MergeState::clear(&args.source)?;
+        } else {
+            merge_state.save(&args.source)?;
+        }
+    }
 
     if args.dry_run {
         println!("{}", "Dry-run complete. No files were modified.".cyan());
