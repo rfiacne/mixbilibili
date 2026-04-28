@@ -14,6 +14,8 @@ pub fn ffmpeg_path() -> Option<std::path::PathBuf> {
     which::which("ffmpeg").ok()
 }
 
+// Os variants are matched in get_install_command/get_manual_instructions
+// but only one variant is constructed at compile time via detect_os()
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Os {
@@ -99,23 +101,23 @@ pub fn get_manual_instructions(os: Os) -> &'static str {
     }
 }
 
-pub fn prompt_and_install(os: Os) -> bool {
+pub fn prompt_and_install(os: Os) -> anyhow::Result<bool> {
     if let Some((pm_name, _)) = get_install_command(os) {
         print!("ffmpeg not found. Install via {}? [y/N]: ", pm_name);
-        io::stdout().flush().ok();
+        io::stdout().flush()?;
 
         let mut input = String::new();
         if io::stdin().lock().read_line(&mut input).is_ok() {
             let input = input.trim().to_lowercase();
             if input == "y" || input == "yes" {
-                return run_install(os);
+                return Ok(run_install(os));
             }
         }
     }
 
     // Print manual instructions and exit
     println!("{}", get_manual_instructions(os));
-    false
+    Ok(false)
 }
 
 fn run_install(os: Os) -> bool {
@@ -151,9 +153,9 @@ fn run_install(os: Os) -> bool {
     false
 }
 
-pub fn ensure_ffmpeg() -> bool {
+pub fn ensure_ffmpeg() -> anyhow::Result<bool> {
     if is_ffmpeg_available() {
-        return true;
+        return Ok(true);
     }
 
     let os = detect_os();
@@ -274,10 +276,10 @@ mod install_tests {
 
     #[test]
     fn test_ensure_ffmpeg_returns_true_if_available() {
-        // If ffmpeg is installed, ensure_ffmpeg should return true immediately
+        // If ffmpeg is installed, ensure_ffmpeg should return Ok(true) immediately
         // We can't easily test the prompt flow without mocking stdin
         if is_ffmpeg_available() {
-            assert!(ensure_ffmpeg());
+            assert!(ensure_ffmpeg().unwrap());
         }
     }
 }
