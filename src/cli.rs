@@ -100,6 +100,10 @@ pub struct Args {
     /// Show progress bar during batch operations
     #[arg(short = 'p', long, default_value_t = true)]
     pub progress: bool,
+
+    /// Preview operations without executing (no files created/deleted)
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
 }
 
 fn default_jobs() -> usize {
@@ -140,6 +144,7 @@ mod args_tests {
             format: OutputFormat::Mkv,
             jobs: 0,
             progress: true,
+            dry_run: false,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 1);
@@ -154,6 +159,7 @@ mod args_tests {
             format: OutputFormat::Mkv,
             jobs: 100,
             progress: true,
+            dry_run: false,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 32);
@@ -168,9 +174,22 @@ mod args_tests {
             format: OutputFormat::Mkv,
             jobs: 4,
             progress: true,
+            dry_run: false,
         };
         args.validate().unwrap();
         assert_eq!(args.jobs, 4);
+    }
+
+    #[test]
+    fn test_dry_run_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.dry_run);
+    }
+
+    #[test]
+    fn test_dry_run_flag_enabled() {
+        let args = Args::try_parse_from(["mixbilibili", "--dry-run"]).unwrap();
+        assert!(args.dry_run);
     }
 }
 
@@ -193,6 +212,7 @@ mod validation_tests {
             format: OutputFormat::Mkv,
             jobs: 4,
             progress: true,
+            dry_run: false,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -212,6 +232,7 @@ mod validation_tests {
             format: OutputFormat::Mkv,
             jobs: 4,
             progress: true,
+            dry_run: false,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -229,6 +250,7 @@ mod validation_tests {
             format: OutputFormat::Mkv,
             jobs: 4,
             progress: true,
+            dry_run: false,
         };
         let result = args.validate();
         assert!(result.is_ok());
