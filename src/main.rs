@@ -268,6 +268,7 @@ fn execute(
         // Accumulate results
         final_summary.success_count += batch_summary.success_count;
         final_summary.failed_count += batch_summary.failed_count;
+        final_summary.durations.extend(batch_summary.durations);
 
         // Incremental state save after each batch
         if !args.dry_run {

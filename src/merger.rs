@@ -13,6 +13,17 @@ use std::time::Duration;
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Format a Duration in a human-readable way (ms, s, or m).
+fn format_duration(d: Duration) -> String {
+    if d < Duration::from_secs(1) {
+        format!("{}ms", d.as_millis())
+    } else if d < Duration::from_secs(60) {
+        format!("{:.2}s", d.as_secs_f64())
+    } else {
+        format!("{}m {:.0}s", d.as_secs() / 60, d.as_secs() % 60)
+    }
+}
+
 trait ChildExt {
     fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>>;
 }
@@ -42,6 +53,8 @@ pub struct MergeResult {
     pub pair_name: String,
     pub success: bool,
     pub error: Option<String>,
+    /// Duration of the ffmpeg merge operation.
+    pub duration: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -52,11 +65,45 @@ pub struct MergeSummary {
     pub orphaned_count: usize,
     pub failures: Vec<(String, String)>,
     pub deletion_failures: usize,
+    /// Durations of all merge operations (success and failed).
+    pub durations: Vec<Duration>,
 }
 
 impl MergeSummary {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Total time spent across all merge operations.
+    pub fn total_duration(&self) -> Duration {
+        self.durations.iter().sum()
+    }
+
+    /// Average duration per merge operation.
+    pub fn avg_duration(&self) -> Option<Duration> {
+        if self.durations.is_empty() {
+            return None;
+        }
+        Some(self.total_duration() / self.durations.len() as u32)
+    }
+
+    /// Fastest merge duration.
+    pub fn min_duration(&self) -> Option<Duration> {
+        self.durations.iter().min().copied()
+    }
+
+    /// Slowest merge duration.
+    pub fn max_duration(&self) -> Option<Duration> {
+        self.durations.iter().max().copied()
+    }
+
+    /// Files processed per second.
+    pub fn throughput(&self) -> Option<f64> {
+        let total = self.total_duration();
+        if total.is_zero() {
+            return None;
+        }
+        Some(self.durations.len() as f64 / total.as_secs_f64())
     }
 
     pub fn all_success(&self) -> bool {
@@ -81,6 +128,27 @@ impl MergeSummary {
         if self.deletion_failures > 0 {
             println!("{}: {}", "Deletion failures".red(), self.deletion_failures);
         }
+
+        // Timing metrics
+        if !self.durations.is_empty() {
+            let total = self.total_duration();
+            println!("{}", "".bright_black());
+            println!("{}", "Timing".cyan().bold());
+            println!("{}: {}", "Total".bright_black(), format_duration(total));
+            if let Some(avg) = self.avg_duration() {
+                println!("{}: {}", "Avg".bright_black(), format_duration(avg));
+            }
+            if let Some(min) = self.min_duration() {
+                println!("{}: {}", "Min".bright_black(), format_duration(min));
+            }
+            if let Some(max) = self.max_duration() {
+                println!("{}: {}", "Max".bright_black(), format_duration(max));
+            }
+            if let Some(tp) = self.throughput() {
+                println!("{}: {:.1} files/sec", "Throughput".bright_black(), tp);
+            }
+        }
+
         println!("{}", "================================".bright_black());
 
         if !self.failures.is_empty() {
@@ -111,6 +179,7 @@ pub fn merge_pair(
 
     // In dry-run mode, just report success without actual merge
     if dry_run {
+        let start = std::time::Instant::now();
         if verbose {
             println!(
                 "[dry-run] ffmpeg -i {} -i {} -> {}",
@@ -130,9 +199,11 @@ pub fn merge_pair(
             pair_name: pair.stem.clone(),
             success: true,
             error: None,
+            duration: start.elapsed(),
         };
     }
 
+    let start = std::time::Instant::now();
     let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, format);
 
     // Retry loop for transient failures
@@ -174,6 +245,7 @@ pub fn merge_pair(
                     pair_name: pair.stem.clone(),
                     success: true,
                     error: None,
+                    duration: start.elapsed(),
                 };
             }
             Ok(status) => {
@@ -198,6 +270,7 @@ pub fn merge_pair(
                             status.code(),
                             max_retries
                         )),
+                        duration: start.elapsed(),
                     };
                 }
                 // Rebuild command for retry
@@ -216,6 +289,7 @@ pub fn merge_pair(
                         pair_name: pair.stem.clone(),
                         success: false,
                         error: Some(format!("{} after {} retries", e, max_retries)),
+                        duration: start.elapsed(),
                     };
                 }
                 // Rebuild command for retry
@@ -230,6 +304,7 @@ pub fn merge_pair(
         pair_name: pair.stem.clone(),
         success: false,
         error: Some("Unexpected retry loop exit".to_string()),
+        duration: start.elapsed(),
     }
 }
 
@@ -307,6 +382,7 @@ pub fn execute_merges(
     }
 
     for result in &results {
+        summary.durations.push(result.duration);
         if result.success {
             summary.success_count += 1;
         } else {
@@ -357,6 +433,7 @@ mod tests {
         let summary = MergeSummary::default();
         assert_eq!(summary.success_count, 0);
         assert_eq!(summary.failed_count, 0);
+        assert!(summary.durations.is_empty());
         assert!(summary.all_success());
     }
 
@@ -365,6 +442,40 @@ mod tests {
         let mut summary = MergeSummary::default();
         summary.failed_count = 1;
         assert!(!summary.all_success());
+    }
+
+    #[test]
+    fn test_timing_methods() {
+        let mut summary = MergeSummary::default();
+        summary.durations.push(Duration::from_millis(100));
+        summary.durations.push(Duration::from_millis(300));
+        summary.durations.push(Duration::from_millis(200));
+
+        assert_eq!(summary.total_duration(), Duration::from_millis(600));
+        assert_eq!(summary.avg_duration(), Some(Duration::from_millis(200)));
+        assert_eq!(summary.min_duration(), Some(Duration::from_millis(100)));
+        assert_eq!(summary.max_duration(), Some(Duration::from_millis(300)));
+        assert!(summary.throughput().is_some());
+        assert!(summary.throughput().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn test_timing_empty_summary() {
+        let summary = MergeSummary::default();
+        assert!(summary.total_duration().is_zero());
+        assert!(summary.avg_duration().is_none());
+        assert!(summary.min_duration().is_none());
+        assert!(summary.max_duration().is_none());
+        assert!(summary.throughput().is_none());
+    }
+
+    #[test]
+    fn test_format_duration() {
+        assert!(format_duration(Duration::from_millis(50)).contains("ms"));
+        assert!(format_duration(Duration::from_millis(500)).contains("ms"));
+        assert!(format_duration(Duration::from_secs(5)).contains("s"));
+        assert!(!format_duration(Duration::from_secs(5)).contains("ms"));
+        assert!(format_duration(Duration::from_secs(90)).contains("m"));
     }
 }
 
@@ -382,6 +493,7 @@ mod merge_tests {
             pair_name: "video".to_string(),
             success: true,
             error: None,
+            duration: Duration::from_millis(123),
         };
         let debug_str = format!("{:?}", result);
         assert!(debug_str.contains("video"));
@@ -394,6 +506,7 @@ mod merge_tests {
             pair_name: "video".to_string(),
             success: false,
             error: Some("test error".to_string()),
+            duration: Duration::from_secs(1),
         };
         assert!(!result.success);
         assert!(result.error.is_some());
@@ -472,7 +585,8 @@ mod exec_tests {
             skipped_count: 0,
             orphaned_count: 0,
             failures: vec![],
-            deletion_failures: 2, // Can now be > 0 after fix
+            deletion_failures: 2,
+            durations: vec![],
         };
 
         // deletion_failures is usize, can represent actual failure count
