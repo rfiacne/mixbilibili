@@ -4,8 +4,6 @@ on:
   push:
     branches: [master]
     tags: ['v*']
-  pull_request:
-    branches: [master]
 
 env:
   CARGO_TERM_COLOR: always
@@ -105,6 +103,16 @@ jobs:
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Binary size report
+        shell: bash
+        run: |
+          SIZE=$(du -h target/${{ matrix.target }}/release/${{ matrix.bin }} | cut -f1)
+          echo "Binary: ${{ matrix.bin }} — Size: $SIZE"
+          echo "## Binary Size Report" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | Binary | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|----------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ${{ matrix.target }} | ${{ matrix.bin }} | $SIZE |" >> $GITHUB_STEP_SUMMARY
+
       - name: Package binary
         shell: bash
         run: |
@@ -148,8 +156,26 @@ jobs:
         with:
           merge-multiple: true
 
+      - name: Extract changelog
+        id: changelog
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -f CHANGELOG.md ]; then
+            NOTES=$(awk "/^## \\[${VERSION}\\]/{p=1;next}/^## \\[/{p=0}p" CHANGELOG.md)
+            if [ -n "$NOTES" ]; then
+              echo "notes<<NOTES_EOF" >> $GITHUB_OUTPUT
+              echo "$NOTES" >> $GITHUB_OUTPUT
+              echo "NOTES_EOF" >> $GITHUB_OUTPUT
+            else
+              echo "notes=No changelog entries found for version ${VERSION}" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "notes=CHANGELOG.md not found" >> $GITHUB_OUTPUT
+          fi
+
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
         with:
           files: mixbilibili-*
-          generate_release_notes: true
+          body: ${{ steps.changelog.outputs.notes }}
