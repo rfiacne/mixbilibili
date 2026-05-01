@@ -109,6 +109,10 @@ pub struct Args {
     #[arg(short = 'v', long)]
     pub verbose: bool,
 
+    /// Suppress progress output; show only final summary
+    #[arg(short = 'q', long, default_value_t = false)]
+    pub quiet: bool,
+
     /// Resume interrupted batch from previous state
     #[arg(short = 'r', long)]
     pub resume: bool,
@@ -154,6 +158,7 @@ fn make_args() -> Args {
         progress: true,
         dry_run: false,
         verbose: false,
+        quiet: false,
         resume: false,
         retry: 0,
     }
@@ -232,6 +237,24 @@ mod args_tests {
     fn test_retry_custom() {
         let args = Args::try_parse_from(["mixbilibili", "--retry", "3"]).unwrap();
         assert_eq!(args.retry, 3);
+    }
+
+    #[test]
+    fn test_quiet_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.quiet);
+    }
+
+    #[test]
+    fn test_quiet_flag_enabled() {
+        let args = Args::try_parse_from(["mixbilibili", "-q"]).unwrap();
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_quiet_flag_long() {
+        let args = Args::try_parse_from(["mixbilibili", "--quiet"]).unwrap();
+        assert!(args.quiet);
     }
 }
 

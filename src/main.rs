@@ -45,18 +45,10 @@ impl AppError {
 }
 
 /// Extract the exit code from an anyhow error.
-/// Tries downcasting to AppError first, then falls back to string matching.
+/// Tries downcasting to AppError first, then returns GENERAL_ERROR.
 fn get_exit_code(e: &anyhow::Error) -> i32 {
     if let Some(app_err) = e.downcast_ref::<AppError>() {
         return app_err.exit_code();
-    }
-
-    let msg = e.to_string();
-    if msg.contains("ffmpeg") || msg.contains("FFmpeg") {
-        return exit_codes::FFMPEG_NOT_FOUND;
-    }
-    if msg.contains("merge") || msg.contains("Merge") {
-        return exit_codes::MERGE_FAILED;
     }
 
     exit_codes::GENERAL_ERROR
@@ -174,7 +166,43 @@ fn run() -> Result<()> {
         return Ok(());
     };
 
-    // Phase 3: Execute merges (with incremental state saves)
+    // Phase 3: Dry-run preview or execute merges
+    if args.dry_run {
+        println!(
+            "{}",
+            "Dry-run mode -- the following pairs would be merged:"
+                .cyan()
+                .bold()
+        );
+        for pair in &ctx.pairs {
+            println!(
+                "  {} + {} -> {}.{}",
+                pair.video.display(),
+                pair.audio.display(),
+                pair.stem,
+                format.extension()
+            );
+        }
+        if args.sdel {
+            println!(
+                "\n{}",
+                "The following source files would be deleted:"
+                    .yellow()
+                    .bold()
+            );
+            for pair in &ctx.pairs {
+                println!(
+                    "  {} (video)\n  {} (audio)",
+                    pair.video.display(),
+                    pair.audio.display()
+                );
+            }
+        }
+        println!("\nWould merge {} pair(s).", ctx.pairs.len());
+        println!("{}", "Dry-run complete. No files were modified.".cyan());
+        return Ok(());
+    }
+
     let summary = execute(&args, &ctx, &mut merge_state, format)?;
 
     // Check if interrupted during execution
@@ -185,11 +213,7 @@ fn run() -> Result<()> {
     // Phase 4: Update state and report
     finalize(&args, merge_state, &summary)?;
 
-    if args.dry_run {
-        println!("{}", "Dry-run complete. No files were modified.".cyan());
-    }
-
-    summary.print_report();
+    summary.print_report(args.quiet);
 
     if INTERRUPTED.load(Ordering::SeqCst) {
         // User requested shutdown - exit gracefully without error
@@ -216,7 +240,7 @@ fn execute(
 ) -> Result<merger::MergeSummary> {
     println!("Processing {} file pairs...", ctx.pairs.len());
 
-    let progress = if args.progress {
+    let progress = if args.progress && !args.quiet {
         Some(progress::MergeProgress::new(ctx.pairs.len()))
     } else {
         None
@@ -245,7 +269,7 @@ fn execute(
             args.dry_run,
             args.verbose,
             args.retry,
-        );
+        )?;
 
         accumulate_summary(&mut final_summary, &batch_summary);
 
@@ -330,7 +354,7 @@ mod integration_tests {
     #[test]
     fn test_state_save_interval_constant() {
         // Ensure reasonable batch size for incremental saves
-        assert!(STATE_SAVE_INTERVAL >= 1 && STATE_SAVE_INTERVAL <= 20);
+        const _: () = assert!(STATE_SAVE_INTERVAL >= 1 && STATE_SAVE_INTERVAL <= 20);
     }
 
     #[test]
@@ -402,18 +426,8 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_get_exit_code_generic() {
+    fn test_get_exit_code_non_app_error() {
         let err = anyhow::anyhow!("Something went wrong");
         assert_eq!(get_exit_code(&err), exit_codes::GENERAL_ERROR);
-    }
-
-    #[test]
-    fn test_get_exit_code_fallback_string_match() {
-        // Fallback: anyhow errors containing "ffmpeg" get FFMPEG_NOT_FOUND
-        let err = anyhow::anyhow!("ffmpeg not found in PATH");
-        assert_eq!(get_exit_code(&err), exit_codes::FFMPEG_NOT_FOUND);
-
-        let err2 = anyhow::anyhow!("Some merges failed to complete");
-        assert_eq!(get_exit_code(&err2), exit_codes::MERGE_FAILED);
     }
 }

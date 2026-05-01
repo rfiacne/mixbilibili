@@ -5,6 +5,7 @@ use crate::scanner::{FilePair, ScanResult};
 use anyhow::{Context, Result};
 use colored::Colorize;
 use rayon::prelude::*;
+use std::io;
 use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::time::Duration;
@@ -23,13 +24,21 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
-/// Extension trait for waiting on a child process with a timeout.
+/// Extension trait for `std::process::Child` that adds timeout-aware waiting.
 trait ChildExt {
-    fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>>;
+    fn wait_with_timeout(
+        &mut self,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> io::Result<Option<ExitStatus>>;
 }
 
 impl ChildExt for Child {
-    fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>> {
+    fn wait_with_timeout(
+        &mut self,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> io::Result<Option<ExitStatus>> {
         let start = std::time::Instant::now();
         loop {
             match self.try_wait() {
@@ -38,9 +47,9 @@ impl ChildExt for Child {
                     if start.elapsed() >= timeout {
                         return Ok(None);
                     }
-                    std::thread::sleep(POLL_INTERVAL);
+                    std::thread::sleep(poll_interval);
                 }
-                Err(e) => return Err(e).context("Failed to check process status"),
+                Err(e) => return Err(e),
             }
         }
     }
@@ -84,11 +93,13 @@ impl MergeSummary {
     }
 
     /// Fastest merge duration.
+    #[allow(dead_code)]
     pub fn min_duration(&self) -> Option<Duration> {
         self.durations.iter().min().copied()
     }
 
     /// Slowest merge duration.
+    #[allow(dead_code)]
     pub fn max_duration(&self) -> Option<Duration> {
         self.durations.iter().max().copied()
     }
@@ -106,52 +117,78 @@ impl MergeSummary {
         self.failed_count == 0
     }
 
-    pub fn print_report(&self) {
-        println!("{}", "================================".bright_black());
-        println!("{}", "Merge complete".green().bold());
-        println!("{}: {}", "Success".green(), self.success_count);
-        println!("{}: {}", "Failed".red(), self.failed_count);
-        println!(
-            "{}: {} (aria2 files present)",
-            "Skipped".yellow(),
-            self.skipped_count
-        );
-        println!(
-            "{}: {} (missing pair)",
-            "Orphaned".bright_black(),
-            self.orphaned_count
-        );
-        if self.deletion_failures > 0 {
-            println!("{}: {}", "Deletion failures".red(), self.deletion_failures);
+    pub fn print_report(&self, quiet: bool) {
+        if quiet {
+            let total = self.success_count + self.failed_count;
+            if self.failed_count > 0 {
+                println!(
+                    "{}/{} merged, {} failed",
+                    self.success_count, total, self.failed_count
+                );
+            } else {
+                println!("{}/{} merged", self.success_count, total);
+            }
+            return;
         }
 
-        // Timing metrics
+        println!("{}", "================================".bright_black());
+        println!("{}", "Merge Report".cyan().bold());
+        println!("{}", "================================".bright_black());
+
+        let success_str = format!("{} {} succeeded", "✓".green(), self.success_count);
+        let fail_str = if self.failed_count > 0 {
+            format!("✗ {} failed", self.failed_count).red().to_string()
+        } else {
+            format!("✗ {} failed", self.failed_count)
+        };
+        println!("  {}    {}", success_str, fail_str);
+
+        if self.skipped_count > 0 {
+            println!(
+                "  {} {} skipped (aria2 downloads)",
+                self.skipped_count,
+                "(aria2)".bright_black()
+            );
+        }
+        if self.orphaned_count > 0 {
+            println!(
+                "  {} {} orphaned (no matching pair)",
+                self.orphaned_count,
+                "(orphan)".bright_black()
+            );
+        }
+
         if !self.durations.is_empty() {
             let total = self.total_duration();
-            println!("{}", "".bright_black());
-            println!("{}", "Timing".cyan().bold());
-            println!("{}: {}", "Total".bright_black(), format_duration(total));
+            println!(
+                "  {}: {}",
+                "Duration".bright_black(),
+                format_duration(total)
+            );
             if let Some(avg) = self.avg_duration() {
-                println!("{}: {}", "Avg".bright_black(), format_duration(avg));
-            }
-            if let Some(min) = self.min_duration() {
-                println!("{}: {}", "Min".bright_black(), format_duration(min));
-            }
-            if let Some(max) = self.max_duration() {
-                println!("{}: {}", "Max".bright_black(), format_duration(max));
+                println!("  {}: {}", "Avg".bright_black(), format_duration(avg));
             }
             if let Some(tp) = self.throughput() {
-                println!("{}: {:.1} files/sec", "Throughput".bright_black(), tp);
+                println!("  {}: {:.2} pairs/sec", "Throughput".bright_black(), tp);
             }
+        }
+
+        if self.deletion_failures > 0 {
+            println!(
+                "  {} {} source file deletion failures",
+                self.deletion_failures,
+                "(warn)".yellow()
+            );
         }
 
         println!("{}", "================================".bright_black());
 
         if !self.failures.is_empty() {
-            println!("\n{}", "Failed files:".red());
+            println!("\n{}", "Failed files:".red().bold());
             for (name, error) in &self.failures {
-                println!("  - {}: {}", name, error);
+                println!("  {} {}: {}", "✗".red(), name, error);
             }
+            println!();
         }
     }
 }
@@ -315,7 +352,7 @@ fn do_merge(
 fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus> {
     let mut child = cmd.spawn().context("Failed to spawn ffmpeg process")?;
 
-    match child.wait_timeout(timeout) {
+    match child.wait_with_timeout(timeout, POLL_INTERVAL) {
         Ok(Some(status)) => Ok(status),
         Ok(None) => {
             let _ = child.kill();
@@ -337,7 +374,7 @@ pub fn execute_merges(
     dry_run: bool,
     verbose: bool,
     retry: usize,
-) -> MergeSummary {
+) -> Result<MergeSummary> {
     let output_dir = output_dir.to_path_buf();
     let pairs = scan_result.pairs;
 
@@ -346,7 +383,7 @@ pub fn execute_merges(
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs)
         .build()
-        .expect("Failed to build thread pool");
+        .context("Failed to build thread pool")?;
 
     let results: Vec<MergeResult> = pool.install(|| {
         pairs
@@ -408,7 +445,7 @@ pub fn execute_merges(
         }
     }
 
-    summary
+    Ok(summary)
 }
 
 fn delete_source_files(pair: &FilePair) -> Result<()> {
@@ -445,8 +482,10 @@ mod tests {
 
     #[test]
     fn test_merge_summary_all_success_false_with_failures() {
-        let mut summary = MergeSummary::default();
-        summary.failed_count = 1;
+        let summary = MergeSummary {
+            failed_count: 1,
+            ..Default::default()
+        };
         assert!(!summary.all_success());
     }
 
@@ -544,7 +583,8 @@ mod exec_tests {
             false,
             false,
             0,
-        );
+        )
+        .unwrap();
 
         assert_eq!(summary.success_count, 0);
         assert_eq!(summary.failed_count, 0);
@@ -574,7 +614,8 @@ mod exec_tests {
             false,
             false,
             0,
-        );
+        )
+        .unwrap();
 
         assert_eq!(summary.skipped_count, 5);
         assert_eq!(summary.orphaned_count, 3);
@@ -723,7 +764,7 @@ mod timeout_tests {
             .spawn()
             .expect("timeout command should be available");
 
-        let result = child.wait_timeout(Duration::from_secs(5));
+        let result = child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL);
         assert!(result.is_ok());
         let status = result.unwrap();
         assert!(status.is_some());
@@ -745,7 +786,7 @@ mod timeout_tests {
             .spawn()
             .expect("timeout command should be available");
 
-        let result = child.wait_timeout(Duration::from_millis(50));
+        let result = child.wait_with_timeout(Duration::from_millis(50), POLL_INTERVAL);
         assert!(result.is_ok());
         // Should return None indicating timeout
         let status = result.unwrap();
@@ -772,7 +813,7 @@ mod timeout_tests {
         // Wait a bit for it to finish
         std::thread::sleep(Duration::from_millis(150));
 
-        let result = child.wait_timeout(Duration::from_secs(5));
+        let result = child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }
