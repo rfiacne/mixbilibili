@@ -1,12 +1,13 @@
 mod cli;
 mod ffmpeg;
+mod i18n;
+use crate::i18n::t;
 mod merger;
 mod progress;
 mod scanner;
 mod state;
 
 use anyhow::{Context, Result};
-use clap::Parser;
 use cli::Args;
 use colored::Colorize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,26 +46,33 @@ impl AppError {
 }
 
 /// Extract the exit code from an anyhow error.
-/// Tries downcasting to AppError first, then falls back to string matching.
+/// Tries downcasting to AppError first, then returns GENERAL_ERROR.
 fn get_exit_code(e: &anyhow::Error) -> i32 {
     if let Some(app_err) = e.downcast_ref::<AppError>() {
         return app_err.exit_code();
     }
 
-    let msg = e.to_string();
-    if msg.contains("ffmpeg") || msg.contains("FFmpeg") {
-        return exit_codes::FFMPEG_NOT_FOUND;
-    }
-    if msg.contains("merge") || msg.contains("Merge") {
-        return exit_codes::MERGE_FAILED;
-    }
-
     exit_codes::GENERAL_ERROR
+}
+
+/// Translate AppError messages for user-facing output.
+/// Returns the original error string for non-AppError types.
+fn translate_error(e: &anyhow::Error) -> String {
+    if let Some(app_err) = e.downcast_ref::<AppError>() {
+        match app_err {
+            AppError::FfmpegNotFound => t("ffmpeg_not_found").to_string(),
+            AppError::MergeFailed { count } => t("merge_failed").replace("{}", &count.to_string()),
+            AppError::UnreadableSource { path } => t("unreadable_source").replace("{}", path),
+        }
+    } else {
+        e.to_string()
+    }
 }
 
 /// Initialize the application: parse args, verify ffmpeg, ensure directories.
 fn init() -> Result<(Args, cli::OutputFormat)> {
-    let mut args = Args::parse();
+    let matches = cli::build_cli().get_matches();
+    let mut args = cli::parse_args(&matches);
     args.validate()?;
 
     let format = args.format;
@@ -74,7 +82,7 @@ fn init() -> Result<(Args, cli::OutputFormat)> {
     }
 
     if !args.output.exists() {
-        std::fs::create_dir_all(&args.output).context("Failed to create output directory")?;
+        std::fs::create_dir_all(&args.output).context(t("failed_create_output").into_owned())?;
     }
 
     Ok((args, format))
@@ -117,12 +125,9 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
 
     if pairs_to_process.is_empty() {
         if existing_state.is_some() {
-            println!(
-                "{}",
-                "All files already merged from previous session".green()
-            );
+            println!("{}", t("all_merged").green());
         } else {
-            println!("{}", "No file pairs to merge".yellow());
+            println!("{}", t("no_pairs").yellow());
         }
         return Ok(None);
     }
@@ -154,7 +159,7 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("{} {}", "Error:".red(), e);
+        eprintln!("{} {}", t("error_prefix").red(), translate_error(&e));
         std::process::exit(get_exit_code(&e));
     }
 }
@@ -164,7 +169,7 @@ fn run() -> Result<()> {
     ctrlc::set_handler(|| {
         INTERRUPTED.store(true, Ordering::SeqCst);
     })
-    .context("Failed to set signal handler")?;
+    .context(t("failed_set_signal").into_owned())?;
 
     // Phase 1: Initialize
     let (args, format) = init()?;
@@ -174,22 +179,47 @@ fn run() -> Result<()> {
         return Ok(());
     };
 
-    // Phase 3: Execute merges (with incremental state saves)
+    // Phase 3: Dry-run preview or execute merges
+    if args.dry_run {
+        println!("{}", t("dry_run_header").cyan().bold());
+        for pair in &ctx.pairs {
+            println!(
+                "  {} + {} -> {}.{}",
+                pair.video.display(),
+                pair.audio.display(),
+                pair.stem,
+                format.extension()
+            );
+        }
+        if args.sdel {
+            println!("\n{}", t("dry_run_sdel_header").yellow().bold());
+            for pair in &ctx.pairs {
+                println!(
+                    "  {} (video)\n  {} (audio)",
+                    pair.video.display(),
+                    pair.audio.display()
+                );
+            }
+        }
+        println!(
+            "\n{}",
+            t("dry_run_summary").replace("{}", &ctx.pairs.len().to_string())
+        );
+        println!("{}", t("dry_run_complete").cyan());
+        return Ok(());
+    }
+
     let summary = execute(&args, &ctx, &mut merge_state, format)?;
 
     // Check if interrupted during execution
     if INTERRUPTED.load(Ordering::SeqCst) {
-        println!("{}", "\nInterrupted. State saved for resume.".yellow());
+        println!("{}", t("interrupted").yellow());
     }
 
     // Phase 4: Update state and report
     finalize(&args, merge_state, &summary)?;
 
-    if args.dry_run {
-        println!("{}", "Dry-run complete. No files were modified.".cyan());
-    }
-
-    summary.print_report();
+    summary.print_report(args.quiet);
 
     if INTERRUPTED.load(Ordering::SeqCst) {
         // User requested shutdown - exit gracefully without error
@@ -214,9 +244,12 @@ fn execute(
     merge_state: &mut state::MergeState,
     format: cli::OutputFormat,
 ) -> Result<merger::MergeSummary> {
-    println!("Processing {} file pairs...", ctx.pairs.len());
+    println!(
+        "{}",
+        t("processing").replace("{}", &ctx.pairs.len().to_string())
+    );
 
-    let progress = if args.progress {
+    let progress = if args.progress && !args.quiet {
         Some(progress::MergeProgress::new(ctx.pairs.len()))
     } else {
         None
@@ -245,14 +278,14 @@ fn execute(
             args.dry_run,
             args.verbose,
             args.retry,
-        );
+        )?;
 
         accumulate_summary(&mut final_summary, &batch_summary);
 
         if !args.dry_run {
             update_state_from_batch(merge_state, chunk, &batch_summary);
             if let Err(e) = merge_state.save(&args.source) {
-                eprintln!("Warning: failed to save incremental state: {e}");
+                eprintln!("{}", t("failed_save_state").replace("{0}", &e.to_string()));
             }
         }
     }
@@ -266,9 +299,8 @@ fn execute(
 fn accumulate_summary(final_summary: &mut merger::MergeSummary, batch: &merger::MergeSummary) {
     final_summary.success_count += batch.success_count;
     final_summary.failed_count += batch.failed_count;
-    final_summary
-        .durations
-        .extend(batch.durations.iter().copied());
+    final_summary.total_duration += batch.total_duration();
+    final_summary.merge_count += batch.merge_count;
     final_summary
         .failures
         .extend(batch.failures.iter().cloned());
@@ -330,7 +362,7 @@ mod integration_tests {
     #[test]
     fn test_state_save_interval_constant() {
         // Ensure reasonable batch size for incremental saves
-        assert!(STATE_SAVE_INTERVAL >= 1 && STATE_SAVE_INTERVAL <= 20);
+        const _: () = assert!(STATE_SAVE_INTERVAL >= 1 && STATE_SAVE_INTERVAL <= 20);
     }
 
     #[test]
@@ -402,18 +434,8 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_get_exit_code_generic() {
+    fn test_get_exit_code_non_app_error() {
         let err = anyhow::anyhow!("Something went wrong");
         assert_eq!(get_exit_code(&err), exit_codes::GENERAL_ERROR);
-    }
-
-    #[test]
-    fn test_get_exit_code_fallback_string_match() {
-        // Fallback: anyhow errors containing "ffmpeg" get FFMPEG_NOT_FOUND
-        let err = anyhow::anyhow!("ffmpeg not found in PATH");
-        assert_eq!(get_exit_code(&err), exit_codes::FFMPEG_NOT_FOUND);
-
-        let err2 = anyhow::anyhow!("Some merges failed to complete");
-        assert_eq!(get_exit_code(&err2), exit_codes::MERGE_FAILED);
     }
 }

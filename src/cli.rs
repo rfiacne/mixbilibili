@@ -1,8 +1,10 @@
 use anyhow::{bail, Result};
-use clap::{Parser, ValueEnum};
+use clap::{Arg, ArgAction, Command};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+use crate::i18n::t;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     Mkv,
     Mp4,
@@ -79,42 +81,18 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Parser)]
-#[command(version, about, long_about = None)]
+#[derive(Debug, Clone)]
 pub struct Args {
-    #[arg(short, long, default_value = ".")]
     pub source: PathBuf,
-
-    #[arg(short, long, default_value = ".")]
     pub output: PathBuf,
-
-    #[arg(short = 'd', long, default_value_t = true)]
     pub sdel: bool,
-
-    #[arg(short, long, default_value_t = OutputFormat::Mkv, value_name = "FORMAT")]
     pub format: OutputFormat,
-
-    #[arg(short = 'j', long, default_value_t = default_jobs())]
     pub jobs: usize,
-
-    /// Show progress bar during batch operations
-    #[arg(short = 'p', long, default_value_t = true)]
     pub progress: bool,
-
-    /// Preview operations without executing (no files created/deleted)
-    #[arg(short = 'n', long)]
     pub dry_run: bool,
-
-    /// Show detailed output including ffmpeg commands
-    #[arg(short = 'v', long)]
     pub verbose: bool,
-
-    /// Resume interrupted batch from previous state
-    #[arg(short = 'r', long)]
+    pub quiet: bool,
     pub resume: bool,
-
-    /// Number of retries for failed merges (0 = no retry)
-    #[arg(long, default_value_t = 0)]
     pub retry: usize,
 }
 
@@ -124,18 +102,157 @@ fn default_jobs() -> usize {
         .unwrap_or(1)
 }
 
+/// Build the CLI command with translated help text.
+pub fn build_cli() -> Command {
+    Command::new("mixbilibili")
+        .version(env!("CARGO_PKG_VERSION"))
+        .about(t("cli_about"))
+        .arg(
+            Arg::new("source")
+                .short('s')
+                .long("source")
+                .help(t("cli_source"))
+                .default_value("."),
+        )
+        .arg(
+            Arg::new("output")
+                .short('o')
+                .long("output")
+                .help(t("cli_output"))
+                .default_value("."),
+        )
+        .arg(
+            Arg::new("sdel")
+                .short('d')
+                .long("sdel")
+                .help(t("cli_sdel"))
+                .default_value("true")
+                .action(ArgAction::Set)
+                .num_args(0..=1)
+                .default_missing_value("true"),
+        )
+        .arg(
+            Arg::new("format")
+                .short('f')
+                .long("format")
+                .help(t("cli_format"))
+                .default_value("mkv")
+                .value_parser(["mkv", "mp4", "mov"]),
+        )
+        .arg(
+            Arg::new("jobs")
+                .short('j')
+                .long("jobs")
+                .help(t("cli_jobs"))
+                .value_parser(clap::value_parser!(usize)),
+        )
+        .arg(
+            Arg::new("progress")
+                .short('p')
+                .long("progress")
+                .help(t("cli_progress"))
+                .default_value("true")
+                .action(ArgAction::Set)
+                .num_args(0..=1)
+                .default_missing_value("true"),
+        )
+        .arg(
+            Arg::new("dry_run")
+                .short('n')
+                .long("dry-run")
+                .help(t("cli_dry_run"))
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .help(t("cli_verbose"))
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("quiet")
+                .short('q')
+                .long("quiet")
+                .help(t("cli_quiet"))
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("resume")
+                .short('r')
+                .long("resume")
+                .help(t("cli_resume"))
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("retry")
+                .long("retry")
+                .help(t("cli_retry"))
+                .default_value("0")
+                .value_parser(clap::value_parser!(usize)),
+        )
+}
+
+/// Parse ArgMatches into Args struct.
+pub fn parse_args(matches: &clap::ArgMatches) -> Args {
+    let jobs = matches
+        .get_one::<usize>("jobs")
+        .copied()
+        .unwrap_or_else(default_jobs);
+    let retry = matches.get_one::<usize>("retry").copied().unwrap_or(0);
+
+    let format_str = matches
+        .get_one::<String>("format")
+        .map(|s| s.as_str())
+        .unwrap_or("mkv");
+    let format = match format_str {
+        "mp4" => OutputFormat::Mp4,
+        "mov" => OutputFormat::Mov,
+        _ => OutputFormat::Mkv,
+    };
+
+    Args {
+        source: matches
+            .get_one::<String>("source")
+            .map(|s| s.into())
+            .unwrap_or_else(|| PathBuf::from(".")),
+        output: matches
+            .get_one::<String>("output")
+            .map(|s| s.into())
+            .unwrap_or_else(|| PathBuf::from(".")),
+        sdel: matches
+            .get_one::<String>("sdel")
+            .map(|s| s != "false")
+            .unwrap_or(true),
+        format,
+        jobs,
+        progress: matches
+            .get_one::<String>("progress")
+            .map(|s| s != "false")
+            .unwrap_or(true),
+        dry_run: matches.get_flag("dry_run"),
+        verbose: matches.get_flag("verbose"),
+        quiet: matches.get_flag("quiet"),
+        resume: matches.get_flag("resume"),
+        retry,
+    }
+}
+
 impl Args {
     pub fn validate(&mut self) -> Result<()> {
         self.jobs = self.jobs.clamp(1, 32);
 
         if !self.source.is_dir() {
-            bail!("Source path is not a directory: {}", self.source.display());
+            bail!(
+                "{}",
+                t("not_dir_source").replace("{0}", &self.source.display().to_string())
+            );
         }
 
         if self.output.exists() && !self.output.is_dir() {
             bail!(
-                "Output path exists but is not a directory: {}",
-                self.output.display()
+                "{}",
+                t("not_dir_output").replace("{0}", &self.output.display().to_string())
             );
         }
 
@@ -154,6 +271,7 @@ fn make_args() -> Args {
         progress: true,
         dry_run: false,
         verbose: false,
+        quiet: false,
         resume: false,
         retry: 0,
     }
@@ -188,50 +306,207 @@ mod args_tests {
 
     #[test]
     fn test_dry_run_flag_default() {
-        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
+        let args = parse_args(&matches);
         assert!(!args.dry_run);
     }
 
     #[test]
     fn test_dry_run_flag_enabled() {
-        let args = Args::try_parse_from(["mixbilibili", "--dry-run"]).unwrap();
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "--dry-run"])
+            .unwrap();
+        let args = parse_args(&matches);
         assert!(args.dry_run);
     }
 
     #[test]
     fn test_verbose_flag_default() {
-        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
+        let args = parse_args(&matches);
         assert!(!args.verbose);
     }
 
     #[test]
     fn test_verbose_flag_enabled() {
-        let args = Args::try_parse_from(["mixbilibili", "--verbose"]).unwrap();
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "--verbose"])
+            .unwrap();
+        let args = parse_args(&matches);
         assert!(args.verbose);
     }
 
     #[test]
     fn test_resume_flag_default() {
-        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
+        let args = parse_args(&matches);
         assert!(!args.resume);
     }
 
     #[test]
     fn test_resume_flag_enabled() {
-        let args = Args::try_parse_from(["mixbilibili", "--resume"]).unwrap();
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "--resume"])
+            .unwrap();
+        let args = parse_args(&matches);
         assert!(args.resume);
     }
 
     #[test]
     fn test_retry_default() {
-        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
+        let args = parse_args(&matches);
         assert_eq!(args.retry, 0);
     }
 
     #[test]
     fn test_retry_custom() {
-        let args = Args::try_parse_from(["mixbilibili", "--retry", "3"]).unwrap();
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "--retry", "3"])
+            .unwrap();
+        let args = parse_args(&matches);
         assert_eq!(args.retry, 3);
+    }
+
+    #[test]
+    fn test_quiet_flag_default() {
+        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
+        let args = parse_args(&matches);
+        assert!(!args.quiet);
+    }
+
+    #[test]
+    fn test_quiet_flag_enabled() {
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "-q"])
+            .unwrap();
+        let args = parse_args(&matches);
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_quiet_flag_long() {
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "--quiet"])
+            .unwrap();
+        let args = parse_args(&matches);
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_sdel_bare() {
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "--sdel"])
+            .unwrap();
+        let args = parse_args(&matches);
+        assert!(args.sdel);
+    }
+
+    #[test]
+    fn test_sdel_bare_short() {
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "-d"])
+            .unwrap();
+        let args = parse_args(&matches);
+        assert!(args.sdel);
+    }
+
+    #[test]
+    fn test_progress_bare() {
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "--progress"])
+            .unwrap();
+        let args = parse_args(&matches);
+        assert!(args.progress);
+    }
+
+    #[test]
+    fn test_progress_bare_short() {
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "-p"])
+            .unwrap();
+        let args = parse_args(&matches);
+        assert!(args.progress);
+    }
+}
+
+#[cfg(test)]
+mod builder_tests {
+    use super::*;
+
+    #[test]
+    fn test_build_cli_defaults() {
+        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
+        let args = parse_args(&matches);
+        assert_eq!(args.source, PathBuf::from("."));
+        assert_eq!(args.output, PathBuf::from("."));
+        assert!(args.sdel);
+        assert!(!args.dry_run);
+        assert!(!args.quiet);
+        assert!(!args.verbose);
+        assert!(!args.resume);
+        assert_eq!(args.retry, 0);
+    }
+
+    #[test]
+    fn test_build_cli_short_flags() {
+        let matches = build_cli()
+            .try_get_matches_from([
+                "mixbilibili",
+                "-s",
+                "/tmp",
+                "-o",
+                "/out",
+                "-j",
+                "4",
+                "-f",
+                "mp4",
+            ])
+            .unwrap();
+        let args = parse_args(&matches);
+        assert_eq!(args.source, PathBuf::from("/tmp"));
+        assert_eq!(args.output, PathBuf::from("/out"));
+        assert_eq!(args.jobs, 4);
+        assert_eq!(args.format, OutputFormat::Mp4);
+    }
+
+    #[test]
+    fn test_build_cli_long_flags() {
+        let matches = build_cli()
+            .try_get_matches_from([
+                "mixbilibili",
+                "--dry-run",
+                "--quiet",
+                "--verbose",
+                "--resume",
+                "--retry",
+                "3",
+                "--sdel",
+                "false",
+                "--progress",
+                "false",
+            ])
+            .unwrap();
+        let args = parse_args(&matches);
+        assert!(args.dry_run);
+        assert!(args.quiet);
+        assert!(args.verbose);
+        assert!(args.resume);
+        assert_eq!(args.retry, 3);
+        assert!(!args.sdel);
+        assert!(!args.progress);
+    }
+
+    #[test]
+    fn test_help_contains_translated_text() {
+        let l = crate::i18n::lang();
+        let mut cmd = build_cli();
+        let help = cmd.render_help().to_string();
+        if matches!(l, crate::i18n::Lang::Cn) {
+            assert!(help.contains("批量合并"));
+        } else {
+            assert!(help.contains("Batch merge"));
+        }
     }
 }
 

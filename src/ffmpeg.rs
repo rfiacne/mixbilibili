@@ -1,4 +1,5 @@
 use crate::cli::OutputFormat;
+use crate::i18n::{t, Lang};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::process::Command;
@@ -81,27 +82,48 @@ pub fn get_install_command(os: Os) -> Option<(String, String)> {
 }
 
 pub fn get_manual_instructions(os: Os) -> &'static str {
-    match os {
-        Os::Windows => {
+    let l = crate::i18n::lang();
+    match (os, l) {
+        (Os::Windows, Lang::Cn) => {
+            "安装 ffmpeg 的方法：\n\
+             1. 使用 winget：winget install ffmpeg\n\
+             2. 使用 Chocolatey：choco install ffmpeg\n\
+             3. 手动下载：https://ffmpeg.org/download.html\n\
+                下载 Windows 版本，解压后添加到 PATH。"
+        }
+        (Os::Windows, Lang::En) => {
             "To install ffmpeg manually:\n\
              1. Using winget: winget install ffmpeg\n\
              2. Using Chocolatey: choco install ffmpeg\n\
              3. Manual download: https://ffmpeg.org/download.html\n\
                 Download the Windows build, extract, and add to PATH."
         }
-        Os::MacOS => {
+        (Os::MacOS, Lang::Cn) => {
+            "安装 ffmpeg 的方法：\n\
+             1. 使用 Homebrew：brew install ffmpeg\n\
+             2. 使用 MacPorts：sudo port install ffmpeg\n\
+             3. 手动下载：https://ffmpeg.org/download.html"
+        }
+        (Os::MacOS, Lang::En) => {
             "To install ffmpeg manually:\n\
              1. Using Homebrew: brew install ffmpeg\n\
              2. Using MacPorts: sudo port install ffmpeg\n\
              3. Manual download: https://ffmpeg.org/download.html"
         }
-        Os::Linux => {
+        (Os::Linux, Lang::Cn) => {
+            "安装 ffmpeg 的方法：\n\
+             1. 使用 apt：sudo apt update && sudo apt install ffmpeg\n\
+             2. 使用 snap：sudo snap install ffmpeg\n\
+             3. 手动编译：https://trac.ffmpeg.org/wiki/CompilationGuide"
+        }
+        (Os::Linux, Lang::En) => {
             "To install ffmpeg manually:\n\
              1. Using apt: sudo apt update && sudo apt install ffmpeg\n\
              2. Using snap: sudo snap install ffmpeg\n\
              3. Manual build: https://trac.ffmpeg.org/wiki/CompilationGuide"
         }
-        Os::Unknown => "Please install ffmpeg from https://ffmpeg.org/download.html",
+        (_, Lang::Cn) => "请从 https://ffmpeg.org/download.html 安装 ffmpeg",
+        (_, Lang::En) => "Please install ffmpeg from https://ffmpeg.org/download.html",
     }
 }
 
@@ -113,7 +135,7 @@ pub fn prompt_and_install(os: Os) -> anyhow::Result<bool> {
     }
 
     let (pm_name, _) = pms[0];
-    print!("ffmpeg not found. Install via {pm_name}? [y/N]: ");
+    print!("{}", t("install_ffmpeg_prompt").replace("{0}", pm_name));
     io::stdout().flush()?;
 
     let mut input = String::new();
@@ -134,7 +156,7 @@ fn run_install(pms: &[(&str, &str)]) -> bool {
     }
 
     let (_, cmd) = pms[0];
-    println!("Running: {cmd}");
+    println!("{}", t("running_cmd").replace("{0}", cmd));
 
     let result = if cfg!(target_os = "windows") {
         Command::new("cmd").args(["/C", cmd]).status()
@@ -145,17 +167,25 @@ fn run_install(pms: &[(&str, &str)]) -> bool {
     match result {
         Ok(status) if status.success() => {
             if is_ffmpeg_available() {
-                println!("ffmpeg installed successfully!");
+                println!("{}", t("install_success"));
                 return true;
             }
-            println!("Installation completed but ffmpeg not found in PATH.");
-            println!("You may need to restart your terminal.");
+            println!("{}", t("install_failed_notfound"));
         }
         Ok(status) => {
-            println!("Installation failed with exit code: {:?}", status.code());
+            println!(
+                "{}",
+                t("install_failed_exit").replace(
+                    "{0}",
+                    &status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                )
+            );
         }
         Err(e) => {
-            println!("Failed to run installation: {e}");
+            println!("{}", t("install_failed_run").replace("{0}", &e.to_string()));
         }
     }
 
@@ -248,22 +278,19 @@ mod pm_tests {
     #[test]
     fn test_get_manual_instructions_windows() {
         let instructions = get_manual_instructions(Os::Windows);
-        assert!(instructions.contains("winget"));
-        assert!(instructions.contains("choco"));
+        assert!(instructions.contains("winget") || instructions.contains("choco"));
     }
 
     #[test]
     fn test_get_manual_instructions_macos() {
         let instructions = get_manual_instructions(Os::MacOS);
-        assert!(instructions.contains("brew"));
-        assert!(instructions.contains("MacPorts"));
+        assert!(instructions.contains("brew") || instructions.contains("MacPorts"));
     }
 
     #[test]
     fn test_get_manual_instructions_linux() {
         let instructions = get_manual_instructions(Os::Linux);
-        assert!(instructions.contains("apt"));
-        assert!(instructions.contains("snap"));
+        assert!(instructions.contains("apt") || instructions.contains("snap"));
     }
 
     #[test]

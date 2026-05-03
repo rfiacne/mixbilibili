@@ -1,12 +1,12 @@
 [package]
 name = "mixbilibili"
-version = "0.4.1"
+version = "0.6.0"
 edition = "2021"
 description = "A CLI tool for batch merging Bilibili video and audio files"
 license = "MIT"
 
 [dependencies]
-clap = { version = "4.5.0", features = ["derive", "std"] }
+clap = { version = "4.5.0", features = ["std"] }
 which = "6.0.0"
 rayon = "1.10.0"
 colored = { version = "2.1.0", default-features = false }

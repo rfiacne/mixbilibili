@@ -1,10 +1,12 @@
 use crate::cli::OutputFormat;
 use crate::ffmpeg;
-use crate::progress::MergeProgress;
+use crate::i18n::{t, tf};
+use crate::progress::{format_duration, MergeProgress};
 use crate::scanner::{FilePair, ScanResult};
 use anyhow::{Context, Result};
 use colored::Colorize;
 use rayon::prelude::*;
+use std::io;
 use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::time::Duration;
@@ -12,24 +14,21 @@ use std::time::Duration;
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Format a Duration in a human-readable way (ms, s, or m).
-fn format_duration(d: Duration) -> String {
-    if d < Duration::from_secs(1) {
-        format!("{}ms", d.as_millis())
-    } else if d < Duration::from_secs(60) {
-        format!("{:.2}s", d.as_secs_f64())
-    } else {
-        format!("{}m {:.0}s", d.as_secs() / 60, d.as_secs() % 60)
-    }
-}
-
-/// Extension trait for waiting on a child process with a timeout.
+/// Extension trait for `std::process::Child` that adds timeout-aware waiting.
 trait ChildExt {
-    fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>>;
+    fn wait_with_timeout(
+        &mut self,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> io::Result<Option<ExitStatus>>;
 }
 
 impl ChildExt for Child {
-    fn wait_timeout(&mut self, timeout: Duration) -> Result<Option<ExitStatus>> {
+    fn wait_with_timeout(
+        &mut self,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> io::Result<Option<ExitStatus>> {
         let start = std::time::Instant::now();
         loop {
             match self.try_wait() {
@@ -38,9 +37,9 @@ impl ChildExt for Child {
                     if start.elapsed() >= timeout {
                         return Ok(None);
                     }
-                    std::thread::sleep(POLL_INTERVAL);
+                    std::thread::sleep(poll_interval);
                 }
-                Err(e) => return Err(e).context("Failed to check process status"),
+                Err(e) => return Err(e),
             }
         }
     }
@@ -64,94 +63,135 @@ pub struct MergeSummary {
     pub orphaned_count: usize,
     pub failures: Vec<(String, String)>,
     pub deletion_failures: usize,
-    /// Durations of all merge operations (success and failed).
-    pub durations: Vec<Duration>,
+    pub(crate) total_duration: Duration,
+    pub(crate) merge_count: usize,
 }
 
 impl MergeSummary {
     /// Total time spent across all merge operations.
     pub fn total_duration(&self) -> Duration {
-        self.durations.iter().sum()
+        self.total_duration
     }
 
     /// Average duration per merge operation.
     pub fn avg_duration(&self) -> Option<Duration> {
-        let count = self.durations.len();
-        if count == 0 {
+        if self.merge_count == 0 {
             return None;
         }
-        Some(self.total_duration() / count as u32)
-    }
-
-    /// Fastest merge duration.
-    pub fn min_duration(&self) -> Option<Duration> {
-        self.durations.iter().min().copied()
-    }
-
-    /// Slowest merge duration.
-    pub fn max_duration(&self) -> Option<Duration> {
-        self.durations.iter().max().copied()
+        Some(self.total_duration / self.merge_count as u32)
     }
 
     /// Files processed per second.
     pub fn throughput(&self) -> Option<f64> {
-        let total = self.total_duration();
-        if total.is_zero() {
+        if self.total_duration.is_zero() {
             return None;
         }
-        Some(self.durations.len() as f64 / total.as_secs_f64())
+        Some(self.merge_count as f64 / self.total_duration.as_secs_f64())
     }
 
     pub fn all_success(&self) -> bool {
         self.failed_count == 0
     }
 
-    pub fn print_report(&self) {
-        println!("{}", "================================".bright_black());
-        println!("{}", "Merge complete".green().bold());
-        println!("{}: {}", "Success".green(), self.success_count);
-        println!("{}: {}", "Failed".red(), self.failed_count);
-        println!(
-            "{}: {} (aria2 files present)",
-            "Skipped".yellow(),
-            self.skipped_count
-        );
-        println!(
-            "{}: {} (missing pair)",
-            "Orphaned".bright_black(),
-            self.orphaned_count
-        );
-        if self.deletion_failures > 0 {
-            println!("{}: {}", "Deletion failures".red(), self.deletion_failures);
+    pub fn print_report(&self, quiet: bool) {
+        if quiet {
+            let total = self.success_count + self.failed_count;
+            if self.failed_count > 0 {
+                println!(
+                    "{}",
+                    tf(
+                        "merged_summary_fail",
+                        &[
+                            &self.success_count.to_string(),
+                            &total.to_string(),
+                            &self.failed_count.to_string(),
+                        ]
+                    )
+                );
+            } else {
+                println!(
+                    "{}",
+                    tf(
+                        "merged_summary_ok",
+                        &[&self.success_count.to_string(), &total.to_string(),]
+                    )
+                );
+            }
+            return;
         }
 
-        // Timing metrics
-        if !self.durations.is_empty() {
+        println!("{}", t("separator").bright_black());
+        println!("{}", t("merge_report").cyan().bold());
+        println!("{}", t("separator").bright_black());
+
+        let success_str = format!(
+            "{} {}",
+            t("checkmark").green(),
+            t("succeeded_fmt").replace("{}", &self.success_count.to_string())
+        );
+        let fail_str = if self.failed_count > 0 {
+            format!(
+                "{} {}",
+                t("cross").red(),
+                t("failed_fmt").replace("{}", &self.failed_count.to_string())
+            )
+            .red()
+            .to_string()
+        } else {
+            format!(
+                "{} {}",
+                t("cross"),
+                t("failed_fmt").replace("{}", &self.failed_count.to_string())
+            )
+        };
+        println!("  {}    {}", success_str, fail_str);
+
+        if self.skipped_count > 0 {
+            println!(
+                "  {} {}",
+                t("skipped_fmt").replace("{}", &self.skipped_count.to_string()),
+                "(aria2)".bright_black()
+            );
+        }
+        if self.orphaned_count > 0 {
+            println!(
+                "  {} {}",
+                t("orphaned_fmt").replace("{}", &self.orphaned_count.to_string()),
+                "(orphan)".bright_black()
+            );
+        }
+
+        if self.merge_count > 0 {
             let total = self.total_duration();
-            println!("{}", "".bright_black());
-            println!("{}", "Timing".cyan().bold());
-            println!("{}: {}", "Total".bright_black(), format_duration(total));
+            println!(
+                "  {}: {}",
+                t("duration").bright_black(),
+                format_duration(total)
+            );
             if let Some(avg) = self.avg_duration() {
-                println!("{}: {}", "Avg".bright_black(), format_duration(avg));
-            }
-            if let Some(min) = self.min_duration() {
-                println!("{}: {}", "Min".bright_black(), format_duration(min));
-            }
-            if let Some(max) = self.max_duration() {
-                println!("{}: {}", "Max".bright_black(), format_duration(max));
+                println!("  {}: {}", t("avg").bright_black(), format_duration(avg));
             }
             if let Some(tp) = self.throughput() {
-                println!("{}: {:.1} files/sec", "Throughput".bright_black(), tp);
+                println!("  {}: {:.2} pairs/sec", t("throughput").bright_black(), tp);
             }
         }
 
-        println!("{}", "================================".bright_black());
+        if self.deletion_failures > 0 {
+            println!(
+                "  {} {}",
+                t("deletion_failures").replace("{}", &self.deletion_failures.to_string()),
+                "(warn)".yellow()
+            );
+        }
+
+        println!("{}", t("separator").bright_black());
 
         if !self.failures.is_empty() {
-            println!("\n{}", "Failed files:".red());
+            println!("\n{}", t("failed_files").red().bold());
             for (name, error) in &self.failures {
-                println!("  - {}: {}", name, error);
+                println!("  {} {}: {}", t("cross").red(), name, error);
             }
+            println!();
         }
     }
 }
@@ -200,11 +240,15 @@ fn do_dry_run(
             output_path.display()
         );
     }
-    if progress.is_none() {
-        println!("{} {} [dry-run]", "○".cyan(), pair.stem);
-    }
     if let Some(p) = progress {
-        p.inc();
+        p.record(&pair.stem, true, start.elapsed(), None, None);
+    } else {
+        println!(
+            "{} {} {}",
+            t("circle").cyan(),
+            pair.stem,
+            t("dry_run_marker")
+        );
     }
     MergeResult {
         pair_index,
@@ -230,12 +274,12 @@ fn do_merge(
         if attempt > 0 {
             std::thread::sleep(Duration::from_secs(1));
             if let Some(p) = progress {
-                p.set_message(&format!("retry {attempt} {}", pair.stem));
+                p.set_message(&tf("retry_marker", &[&attempt.to_string(), &pair.stem]));
             } else if verbose {
                 println!(
-                    "{} Retrying {} (attempt {attempt})",
+                    "{} {}",
                     "↻".yellow(),
-                    pair.stem
+                    tf("verbose_retry", &[&pair.stem, &attempt.to_string()])
                 );
             }
         }
@@ -252,57 +296,54 @@ fn do_merge(
         let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, output_path, format);
         match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT) {
             Ok(status) if status.success() => {
+                let duration = start.elapsed();
                 if let Some(p) = progress {
-                    p.inc();
-                }
-                if progress.is_none() {
-                    println!("{} {}", "✓".green(), pair.stem);
+                    p.record(&pair.stem, true, duration, None, None);
+                } else {
+                    println!("{} {}", t("checkmark").green(), pair.stem);
                 }
                 return MergeResult {
                     pair_index,
                     pair_name: pair.stem.clone(),
                     success: true,
                     error: None,
-                    duration: start.elapsed(),
+                    duration,
                 };
             }
             Ok(status) if attempt == max_retries => {
+                let duration = start.elapsed();
+                let error_msg = format!(
+                    "ffmpeg exited with code {:?} after {} retries",
+                    status.code(),
+                    max_retries
+                );
                 if let Some(p) = progress {
-                    p.inc();
-                }
-                if progress.is_none() {
-                    println!(
-                        "{} {}: ffmpeg exited with code {:?}",
-                        "✗".red(),
-                        pair.stem,
-                        status.code()
-                    );
+                    p.record(&pair.stem, false, duration, Some(&error_msg), None);
+                } else {
+                    println!("{} {}: {}", t("cross").red(), pair.stem, error_msg);
                 }
                 return MergeResult {
                     pair_index,
                     pair_name: pair.stem.clone(),
                     success: false,
-                    error: Some(format!(
-                        "ffmpeg exited with code {:?} after {} retries",
-                        status.code(),
-                        max_retries,
-                    )),
-                    duration: start.elapsed(),
+                    error: Some(error_msg),
+                    duration,
                 };
             }
             Err(e) if attempt == max_retries => {
+                let duration = start.elapsed();
+                let error_msg = format!("{e} after {max_retries} retries");
                 if let Some(p) = progress {
-                    p.inc();
-                }
-                if progress.is_none() {
-                    println!("{} {}: {}", "✗".red(), pair.stem, e);
+                    p.record(&pair.stem, false, duration, Some(&error_msg), None);
+                } else {
+                    println!("{} {}: {}", t("cross").red(), pair.stem, error_msg);
                 }
                 return MergeResult {
                     pair_index,
                     pair_name: pair.stem.clone(),
                     success: false,
-                    error: Some(format!("{e} after {max_retries} retries")),
-                    duration: start.elapsed(),
+                    error: Some(error_msg),
+                    duration,
                 };
             }
             _ => {}
@@ -313,16 +354,16 @@ fn do_merge(
 }
 
 fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus> {
-    let mut child = cmd.spawn().context("Failed to spawn ffmpeg process")?;
+    let mut child = cmd.spawn().context(t("failed_to_spawn"))?;
 
-    match child.wait_timeout(timeout) {
+    match child.wait_with_timeout(timeout, POLL_INTERVAL) {
         Ok(Some(status)) => Ok(status),
         Ok(None) => {
             let _ = child.kill();
             let _ = child.wait();
-            anyhow::bail!("ffmpeg process timed out after 5 minutes");
+            anyhow::bail!("{}", t("timed_out"));
         }
-        Err(e) => Err(e).context("Failed to wait for ffmpeg process"),
+        Err(e) => Err(e).context(t("failed_to_wait")),
     }
 }
 
@@ -337,7 +378,7 @@ pub fn execute_merges(
     dry_run: bool,
     verbose: bool,
     retry: usize,
-) -> MergeSummary {
+) -> Result<MergeSummary> {
     let output_dir = output_dir.to_path_buf();
     let pairs = scan_result.pairs;
 
@@ -346,7 +387,7 @@ pub fn execute_merges(
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs)
         .build()
-        .expect("Failed to build thread pool");
+        .context(t("failed_build_pool"))?;
 
     let results: Vec<MergeResult> = pool.install(|| {
         pairs
@@ -384,7 +425,7 @@ pub fn execute_merges(
             .map(|result| {
                 let pair = &pairs[result.pair_index];
                 if let Err(e) = delete_source_files(pair) {
-                    eprintln!("Warning: {e}");
+                    eprintln!("{} {}", t("warning_prefix").yellow(), e);
                     1
                 } else {
                     0
@@ -395,7 +436,8 @@ pub fn execute_merges(
     }
 
     for result in &results {
-        summary.durations.push(result.duration);
+        summary.total_duration += result.duration;
+        summary.merge_count += 1;
         if result.success {
             summary.success_count += 1;
         } else {
@@ -408,7 +450,7 @@ pub fn execute_merges(
         }
     }
 
-    summary
+    Ok(summary)
 }
 
 fn delete_source_files(pair: &FilePair) -> Result<()> {
@@ -426,7 +468,10 @@ fn delete_source_files(pair: &FilePair) -> Result<()> {
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(anyhow::anyhow!("Failed to delete {}", errors.join(", ")))
+        Err(anyhow::anyhow!(
+            "{}",
+            tf("failed_delete", &[&errors.join(", ")])
+        ))
     }
 }
 
@@ -439,28 +484,32 @@ mod tests {
         let summary = MergeSummary::default();
         assert_eq!(summary.success_count, 0);
         assert_eq!(summary.failed_count, 0);
-        assert!(summary.durations.is_empty());
+        assert_eq!(summary.merge_count, 0);
+        assert!(summary.total_duration().is_zero());
         assert!(summary.all_success());
     }
 
     #[test]
     fn test_merge_summary_all_success_false_with_failures() {
-        let mut summary = MergeSummary::default();
-        summary.failed_count = 1;
+        let summary = MergeSummary {
+            failed_count: 1,
+            ..Default::default()
+        };
         assert!(!summary.all_success());
     }
 
     #[test]
     fn test_timing_methods() {
         let mut summary = MergeSummary::default();
-        summary.durations.push(Duration::from_millis(100));
-        summary.durations.push(Duration::from_millis(300));
-        summary.durations.push(Duration::from_millis(200));
+        summary.total_duration += Duration::from_millis(100);
+        summary.merge_count += 1;
+        summary.total_duration += Duration::from_millis(300);
+        summary.merge_count += 1;
+        summary.total_duration += Duration::from_millis(200);
+        summary.merge_count += 1;
 
         assert_eq!(summary.total_duration(), Duration::from_millis(600));
         assert_eq!(summary.avg_duration(), Some(Duration::from_millis(200)));
-        assert_eq!(summary.min_duration(), Some(Duration::from_millis(100)));
-        assert_eq!(summary.max_duration(), Some(Duration::from_millis(300)));
         assert!(summary.throughput().is_some());
         assert!(summary.throughput().unwrap() > 0.0);
     }
@@ -470,8 +519,6 @@ mod tests {
         let summary = MergeSummary::default();
         assert!(summary.total_duration().is_zero());
         assert!(summary.avg_duration().is_none());
-        assert!(summary.min_duration().is_none());
-        assert!(summary.max_duration().is_none());
         assert!(summary.throughput().is_none());
     }
 
@@ -544,7 +591,8 @@ mod exec_tests {
             false,
             false,
             0,
-        );
+        )
+        .unwrap();
 
         assert_eq!(summary.success_count, 0);
         assert_eq!(summary.failed_count, 0);
@@ -574,7 +622,8 @@ mod exec_tests {
             false,
             false,
             0,
-        );
+        )
+        .unwrap();
 
         assert_eq!(summary.skipped_count, 5);
         assert_eq!(summary.orphaned_count, 3);
@@ -589,7 +638,8 @@ mod exec_tests {
             orphaned_count: 0,
             failures: vec![],
             deletion_failures: 2,
-            durations: vec![],
+            total_duration: Duration::ZERO,
+            merge_count: 0,
         };
         assert_eq!(summary.deletion_failures, 2);
     }
@@ -723,7 +773,7 @@ mod timeout_tests {
             .spawn()
             .expect("timeout command should be available");
 
-        let result = child.wait_timeout(Duration::from_secs(5));
+        let result = child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL);
         assert!(result.is_ok());
         let status = result.unwrap();
         assert!(status.is_some());
@@ -745,7 +795,7 @@ mod timeout_tests {
             .spawn()
             .expect("timeout command should be available");
 
-        let result = child.wait_timeout(Duration::from_millis(50));
+        let result = child.wait_with_timeout(Duration::from_millis(50), POLL_INTERVAL);
         assert!(result.is_ok());
         // Should return None indicating timeout
         let status = result.unwrap();
@@ -772,7 +822,7 @@ mod timeout_tests {
         // Wait a bit for it to finish
         std::thread::sleep(Duration::from_millis(150));
 
-        let result = child.wait_timeout(Duration::from_secs(5));
+        let result = child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }

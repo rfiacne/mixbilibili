@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-05-02
+
+### Added
+- Automatic language detection: outputs Simplified Chinese when system `LANG` starts with `zh`
+- Full translation of all user-facing strings including `--help` text
+- Zero external dependencies — lightweight `i18n` module with match-based translation table
+
+## [0.5.0] - 2026-05-01
+
+### Added
+- `--quiet/-q` flag to suppress progress output, show compact summary
+- Enhanced `--dry-run` output: lists pairs and source files that would be modified
+- Structured merge report with timing stats, throughput, and failure details
+- PR CI check workflow (fmt + clippy + test gate)
+- Binary size report in release build output
+- Automatic changelog extraction for GitHub release notes
+
+### Changed
+- Extracted `ChildExt::wait_with_timeout` trait from inline polling logic
+- Structured final report with quiet mode support
+
+### Fixed
+- Thread pool build error now returns `Result` instead of panicking (`expect()`)
+- Removed fragile string-matching exit code fallback — pure type-driven now
+- Fixed clippy warnings for test profile
+
 ## [0.4.1] - 2026-04-28
 
 ### Added
