@@ -52,7 +52,11 @@ fn test_nonexistent_source() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("does not exist") || stderr.contains("Error"));
+    assert!(
+        stderr.contains("does not exist") || stderr.contains("Error") || stderr.contains("错误"),
+        "Expected error message not found in: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -67,5 +71,9 @@ fn test_empty_directory() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("No file pairs to merge"));
+    assert!(
+        stdout.contains("No file pairs to merge") || stdout.contains("没有找到可合并的文件对"),
+        "Expected output not found in: {}",
+        stdout
+    );
 }

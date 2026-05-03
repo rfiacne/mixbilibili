@@ -689,10 +689,8 @@ mod delete_tests {
 
         let result = delete_source_files(&pair);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to delete video"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("video"), "Error should mention video: {}", err);
     }
 
     #[test]
@@ -711,9 +709,8 @@ mod delete_tests {
         let result = delete_source_files(&pair);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to delete"));
-        assert!(err.contains("video"));
-        assert!(err.contains("audio"));
+        assert!(err.contains("video"), "Error should mention video: {}", err);
+        assert!(err.contains("audio"), "Error should mention audio: {}", err);
     }
 
     #[test]
@@ -739,7 +736,7 @@ mod delete_tests {
         // The error message should indicate which file failed
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("Failed to delete audio"),
+            err_msg.contains("audio"),
             "Error should mention audio: {}",
             err_msg
         );
