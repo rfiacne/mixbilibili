@@ -290,6 +290,11 @@ fn execute(
         }
     }
 
+    // Finish progress bar once after all chunks are processed
+    if let Some(p) = &progress {
+        p.finish();
+    }
+
     final_summary.skipped_count = ctx.stats.skipped;
     final_summary.orphaned_count = ctx.stats.orphaned;
 

@@ -408,9 +408,10 @@ pub fn execute_merges(
             .collect()
     });
 
-    if let Some(p) = &progress {
-        p.finish();
-    }
+    // Note: progress.finish() is NOT called here because execute_merges may be
+    // called multiple times for different chunks (see STATE_SAVE_INTERVAL in main.rs).
+    // The caller (main.rs:execute) is responsible for calling finish() once after
+    // all chunks are processed.
 
     let mut summary = MergeSummary {
         skipped_count: scan_result.stats.skipped,

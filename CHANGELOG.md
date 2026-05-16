@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-05-16
+
+### Fixed
+- Progress bar counter now correctly displays completion count when processing multiple chunks
+  - Previously showed incorrect values like 10/9, 11/9 when `STATE_SAVE_INTERVAL` split batches
+  - `finish()` is now called once at the end of all processing, not after each chunk
+
 ## [0.6.1] - 2026-05-03
 
 ### Changed
