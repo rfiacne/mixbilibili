@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use clap::{Arg, ArgAction, Command};
 use std::path::PathBuf;
 
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -245,14 +245,14 @@ impl Args {
         if !self.source.is_dir() {
             bail!(
                 "{}",
-                t("not_dir_source").replace("{0}", &self.source.display().to_string())
+                tf("not_dir_source", &[&self.source.display().to_string()])
             );
         }
 
         if self.output.exists() && !self.output.is_dir() {
             bail!(
                 "{}",
-                t("not_dir_output").replace("{0}", &self.output.display().to_string())
+                tf("not_dir_output", &[&self.output.display().to_string()])
             );
         }
 

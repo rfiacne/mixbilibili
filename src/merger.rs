@@ -127,13 +127,13 @@ impl MergeSummary {
         let success_str = format!(
             "{} {}",
             t("checkmark").green(),
-            t("succeeded_fmt").replace("{}", &self.success_count.to_string())
+            tf("succeeded_fmt", &[&self.success_count.to_string()])
         );
         let fail_str = if self.failed_count > 0 {
             format!(
                 "{} {}",
                 t("cross").red(),
-                t("failed_fmt").replace("{}", &self.failed_count.to_string())
+                tf("failed_fmt", &[&self.failed_count.to_string()])
             )
             .red()
             .to_string()
@@ -141,7 +141,7 @@ impl MergeSummary {
             format!(
                 "{} {}",
                 t("cross"),
-                t("failed_fmt").replace("{}", &self.failed_count.to_string())
+                tf("failed_fmt", &[&self.failed_count.to_string()])
             )
         };
         println!("  {}    {}", success_str, fail_str);
@@ -149,14 +149,14 @@ impl MergeSummary {
         if self.skipped_count > 0 {
             println!(
                 "  {} {}",
-                t("skipped_fmt").replace("{}", &self.skipped_count.to_string()),
+                tf("skipped_fmt", &[&self.skipped_count.to_string()]),
                 "(aria2)".bright_black()
             );
         }
         if self.orphaned_count > 0 {
             println!(
                 "  {} {}",
-                t("orphaned_fmt").replace("{}", &self.orphaned_count.to_string()),
+                tf("orphaned_fmt", &[&self.orphaned_count.to_string()]),
                 "(orphan)".bright_black()
             );
         }
@@ -179,7 +179,7 @@ impl MergeSummary {
         if self.deletion_failures > 0 {
             println!(
                 "  {} {}",
-                t("deletion_failures").replace("{}", &self.deletion_failures.to_string()),
+                tf("deletion_failures", &[&self.deletion_failures.to_string()]),
                 "(warn)".yellow()
             );
         }
@@ -310,12 +310,18 @@ fn do_merge(
                     duration,
                 };
             }
-            Ok(status) if attempt == max_retries => {
+            Ok(_) if attempt < max_retries => continue,
+            Ok(status) => {
                 let duration = start.elapsed();
-                let error_msg = format!(
-                    "ffmpeg exited with code {:?} after {} retries",
-                    status.code(),
-                    max_retries
+                let error_msg = tf(
+                    "merge_failed_exit",
+                    &[
+                        &status
+                            .code()
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        &max_retries.to_string(),
+                    ],
                 );
                 if let Some(p) = progress {
                     p.record(&pair.stem, false, duration, Some(&error_msg), None);
@@ -330,9 +336,13 @@ fn do_merge(
                     duration,
                 };
             }
-            Err(e) if attempt == max_retries => {
+            Err(_) if attempt < max_retries => continue,
+            Err(e) => {
                 let duration = start.elapsed();
-                let error_msg = format!("{e} after {max_retries} retries");
+                let error_msg = tf(
+                    "merge_failed_io",
+                    &[&e.to_string(), &max_retries.to_string()],
+                );
                 if let Some(p) = progress {
                     p.record(&pair.stem, false, duration, Some(&error_msg), None);
                 } else {
@@ -346,7 +356,6 @@ fn do_merge(
                     duration,
                 };
             }
-            _ => {}
         }
     }
 

@@ -10,7 +10,7 @@ pub struct FilePair {
     pub stem: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ScanStats {
     pub pairs: usize,
     pub skipped: usize,

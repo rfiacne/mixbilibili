@@ -17,7 +17,6 @@ enum Renderer {
 
 impl Renderer {
     /// Create a text-mode renderer.
-    #[allow(dead_code)]
     fn new_text(total: usize) -> Self {
         Self::Text {
             total,
@@ -25,7 +24,6 @@ impl Renderer {
         }
     }
 
-    #[allow(dead_code)]
     fn record(
         &self,
         stem: &str,
@@ -162,7 +160,6 @@ impl MergeProgress {
     }
 
     /// Record a completed file with timing and status.
-    #[allow(dead_code)]
     pub fn record(
         &self,
         stem: &str,

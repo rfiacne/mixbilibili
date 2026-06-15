@@ -1,7 +1,7 @@
 mod cli;
 mod ffmpeg;
 mod i18n;
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 mod merger;
 mod progress;
 mod scanner;
@@ -61,8 +61,8 @@ fn translate_error(e: &anyhow::Error) -> String {
     if let Some(app_err) = e.downcast_ref::<AppError>() {
         match app_err {
             AppError::FfmpegNotFound => t("ffmpeg_not_found").to_string(),
-            AppError::MergeFailed { count } => t("merge_failed").replace("{}", &count.to_string()),
-            AppError::UnreadableSource { path } => t("unreadable_source").replace("{}", path),
+            AppError::MergeFailed { count } => tf("merge_failed", &[&count.to_string()]),
+            AppError::UnreadableSource { path } => tf("unreadable_source", &[path]),
         }
     } else {
         e.to_string()
@@ -115,12 +115,11 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
     let pairs_to_process: Vec<_> = if let Some(ref state) = existing_state {
         scan_result
             .pairs
-            .iter()
+            .into_iter()
             .filter(|p| !state.is_completed(&p.stem))
-            .cloned()
             .collect()
     } else {
-        scan_result.pairs.clone()
+        scan_result.pairs
     };
 
     if pairs_to_process.is_empty() {
@@ -148,7 +147,7 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
 
     let ctx = ScanContext {
         pairs: pairs_to_process,
-        stats: scan_result.stats,
+        stats: scan_result.stats.clone(),
     };
 
     Ok(Some((ctx, merge_state)))
@@ -209,12 +208,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let summary = execute(&args, &ctx, &mut merge_state, format)?;
-
-    // Check if interrupted during execution
-    if INTERRUPTED.load(Ordering::SeqCst) {
-        println!("{}", t("interrupted").yellow());
-    }
+    let summary = execute(&args, ctx, &mut merge_state, format)?;
 
     // Phase 4: Update state and report
     finalize(&args, merge_state, &summary)?;
@@ -222,7 +216,7 @@ fn run() -> Result<()> {
     summary.print_report(args.quiet);
 
     if INTERRUPTED.load(Ordering::SeqCst) {
-        // User requested shutdown - exit gracefully without error
+        println!("{}", t("interrupted").yellow());
         Ok(())
     } else if summary.all_success() {
         Ok(())
@@ -240,14 +234,11 @@ const STATE_SAVE_INTERVAL: usize = 5;
 /// Execute the actual merge operations for all filtered pairs.
 fn execute(
     args: &Args,
-    ctx: &ScanContext,
+    ctx: ScanContext,
     merge_state: &mut state::MergeState,
     format: cli::OutputFormat,
 ) -> Result<merger::MergeSummary> {
-    println!(
-        "{}",
-        t("processing").replace("{}", &ctx.pairs.len().to_string())
-    );
+    println!("{}", tf("processing", &[&ctx.pairs.len().to_string()]));
 
     let progress = if args.progress && !args.quiet {
         Some(progress::MergeProgress::new(ctx.pairs.len()))
@@ -257,13 +248,17 @@ fn execute(
 
     let mut final_summary = merger::MergeSummary::default();
 
-    for chunk in ctx.pairs.chunks(STATE_SAVE_INTERVAL) {
+    let mut pairs = ctx.pairs;
+    while !pairs.is_empty() {
         if INTERRUPTED.load(Ordering::SeqCst) {
             break;
         }
 
+        let chunk_end = STATE_SAVE_INTERVAL.min(pairs.len());
+        let chunk_pairs: Vec<_> = pairs.drain(..chunk_end).collect();
+
         let scan_result = scanner::ScanResult {
-            pairs: chunk.to_vec(),
+            pairs: chunk_pairs.clone(),
             stats: scanner::ScanStats::default(),
             skipped_names: vec![],
         };
@@ -283,9 +278,9 @@ fn execute(
         accumulate_summary(&mut final_summary, &batch_summary);
 
         if !args.dry_run {
-            update_state_from_batch(merge_state, chunk, &batch_summary);
+            update_state_from_batch(merge_state, &chunk_pairs, &batch_summary);
             if let Err(e) = merge_state.save(&args.source) {
-                eprintln!("{}", t("failed_save_state").replace("{0}", &e.to_string()));
+                eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
             }
         }
     }
@@ -311,19 +306,29 @@ fn accumulate_summary(final_summary: &mut merger::MergeSummary, batch: &merger::
         .extend(batch.failures.iter().cloned());
 }
 
+fn apply_results(
+    state: &mut state::MergeState,
+    pairs: &[scanner::FilePair],
+    failures: &[(String, String)],
+) {
+    let failure_names: std::collections::HashSet<&str> =
+        failures.iter().map(|(n, _)| n.as_str()).collect();
+    for (name, _) in failures {
+        state.mark_failed(name);
+    }
+    for pair in pairs {
+        if !failure_names.contains(pair.stem.as_str()) {
+            state.mark_completed(&pair.stem);
+        }
+    }
+}
+
 fn update_state_from_batch(
     state: &mut state::MergeState,
     chunk: &[scanner::FilePair],
     batch: &merger::MergeSummary,
 ) {
-    for (name, _) in &batch.failures {
-        state.mark_failed(name);
-    }
-    for pair in chunk {
-        if !batch.failures.iter().any(|(n, _)| n == &pair.stem) {
-            state.mark_completed(&pair.stem);
-        }
-    }
+    apply_results(state, chunk, &batch.failures);
 }
 
 /// Finalize: update state based on results, clear on full success or save otherwise.
@@ -336,14 +341,16 @@ fn finalize(
         return Ok(());
     }
 
-    for (name, _) in &summary.failures {
-        merge_state.mark_failed(name);
-    }
-    for pair in merge_state.pending.clone() {
-        if !summary.failures.iter().any(|(name, _)| name == &pair) {
-            merge_state.mark_completed(&pair);
-        }
-    }
+    let pending_pairs: Vec<scanner::FilePair> = merge_state
+        .pending
+        .iter()
+        .map(|stem| scanner::FilePair {
+            video: std::path::PathBuf::new(),
+            audio: std::path::PathBuf::new(),
+            stem: stem.clone(),
+        })
+        .collect();
+    apply_results(&mut merge_state, &pending_pairs, &summary.failures);
 
     if summary.all_success() {
         state::MergeState::clear(&args.source)?;

@@ -1,16 +1,26 @@
 //! Internationalization module — Lang enum, lang detection, t() translation table.
 
+use std::sync::OnceLock;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     Cn,
     En,
 }
 
+static LANG_CACHE: OnceLock<Lang> = OnceLock::new();
+
 /// Detect the user's preferred language from OS-level settings.
 /// - **macOS**: `defaults read -g AppleLanguages` (system preferences)
 /// - **Windows**: `GetUserDefaultUILanguage` (registry-backed)
 /// - **Linux**: `LANG` / `LC_ALL` environment variables (standard)
+///
+/// Result is cached on first call to avoid repeated subprocess spawns (macOS).
 pub fn lang() -> Lang {
+    *LANG_CACHE.get_or_init(detect_lang)
+}
+
+fn detect_lang() -> Lang {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
@@ -67,16 +77,16 @@ fn translate(lang: Lang, key: &str) -> std::borrow::Cow<'static, str> {
         ("all_merged", Lang::En) => "All files already merged from previous session",
 
         // --- Processing ---
-        ("processing", Lang::Cn) => "正在处理 {} 个文件对...",
-        ("processing", Lang::En) => "Processing {} file pairs...",
+        ("processing", Lang::Cn) => "正在处理 {0} 个文件对...",
+        ("processing", Lang::En) => "Processing {0} file pairs...",
 
         // --- Dry-run ---
         ("dry_run_header", Lang::Cn) => "预览模式 — 将合并以下文件对：",
         ("dry_run_header", Lang::En) => "Dry-run mode — the following pairs would be merged:",
         ("dry_run_sdel_header", Lang::Cn) => "将删除以下源文件：",
         ("dry_run_sdel_header", Lang::En) => "The following source files would be deleted:",
-        ("dry_run_summary", Lang::Cn) => "将合并 {} 个文件对。",
-        ("dry_run_summary", Lang::En) => "Would merge {} pair(s).",
+        ("dry_run_summary", Lang::Cn) => "将合并 {0} 个文件对。",
+        ("dry_run_summary", Lang::En) => "Would merge {0} pair(s).",
         ("dry_run_complete", Lang::Cn) => "预览完成。未修改任何文件。",
         ("dry_run_complete", Lang::En) => "Dry-run complete. No files were modified.",
         ("dry_run_marker", Lang::Cn) => "[预览]",
@@ -89,26 +99,26 @@ fn translate(lang: Lang, key: &str) -> std::borrow::Cow<'static, str> {
         // --- Report ---
         ("merge_report", Lang::Cn) => "合并报告",
         ("merge_report", Lang::En) => "Merge Report",
-        ("succeeded_fmt", Lang::Cn) => "成功 {} 个",
-        ("succeeded_fmt", Lang::En) => "{} succeeded",
-        ("failed_fmt", Lang::Cn) => "失败 {} 个",
-        ("failed_fmt", Lang::En) => "{} failed",
+        ("succeeded_fmt", Lang::Cn) => "成功 {0} 个",
+        ("succeeded_fmt", Lang::En) => "{0} succeeded",
+        ("failed_fmt", Lang::Cn) => "失败 {0} 个",
+        ("failed_fmt", Lang::En) => "{0} failed",
         ("merged_summary_fail", Lang::Cn) => "已合并 {0}/{1}，失败 {2} 个",
         ("merged_summary_fail", Lang::En) => "{0}/{1} merged, {2} failed",
         ("merged_summary_ok", Lang::Cn) => "已合并 {0}/{1}",
         ("merged_summary_ok", Lang::En) => "{0}/{1} merged",
-        ("skipped_fmt", Lang::Cn) => "{} 个跳过（aria2 下载中）",
-        ("skipped_fmt", Lang::En) => "{} skipped (aria2 downloads)",
-        ("orphaned_fmt", Lang::Cn) => "{} 个孤立（无匹配文件对）",
-        ("orphaned_fmt", Lang::En) => "{} orphaned (no matching pair)",
+        ("skipped_fmt", Lang::Cn) => "{0} 个跳过（aria2 下载中）",
+        ("skipped_fmt", Lang::En) => "{0} skipped (aria2 downloads)",
+        ("orphaned_fmt", Lang::Cn) => "{0} 个孤立（无匹配文件对）",
+        ("orphaned_fmt", Lang::En) => "{0} orphaned (no matching pair)",
         ("duration", Lang::Cn) => "耗时",
         ("duration", Lang::En) => "Duration",
         ("avg", Lang::Cn) => "平均",
         ("avg", Lang::En) => "Avg",
         ("throughput", Lang::Cn) => "吞吐",
         ("throughput", Lang::En) => "Throughput",
-        ("deletion_failures", Lang::Cn) => "{} 个源文件删除失败",
-        ("deletion_failures", Lang::En) => "{} source file deletion failures",
+        ("deletion_failures", Lang::Cn) => "{0} 个源文件删除失败",
+        ("deletion_failures", Lang::En) => "{0} source file deletion failures",
         ("failed_files", Lang::Cn) => "失败的文件：",
         ("failed_files", Lang::En) => "Failed files:",
 
@@ -137,8 +147,34 @@ fn translate(lang: Lang, key: &str) -> std::borrow::Cow<'static, str> {
         ("install_failed_exit", Lang::En) => "Installation failed with exit code: {0}",
         ("install_failed_run", Lang::Cn) => "无法运行安装程序：{0}",
         ("install_failed_run", Lang::En) => "Failed to run installation: {0}",
-        ("manual_instructions", Lang::Cn) => "请手动安装 ffmpeg。",
-        ("manual_instructions", Lang::En) => "Please install ffmpeg manually.",
+        ("manual_instructions", Lang::Cn) => "请从 https://ffmpeg.org/download.html 手动安装 ffmpeg",
+        ("manual_instructions", Lang::En) => "Please install ffmpeg manually from https://ffmpeg.org/download.html",
+        ("manual_instructions_windows", Lang::Cn) => "安装 ffmpeg 的方法：\n\
+             1. 使用 winget：winget install ffmpeg\n\
+             2. 使用 Chocolatey：choco install ffmpeg\n\
+             3. 手动下载：https://ffmpeg.org/download.html\n\
+                下载 Windows 版本，解压后添加到 PATH。",
+        ("manual_instructions_windows", Lang::En) => "To install ffmpeg manually:\n\
+             1. Using winget: winget install ffmpeg\n\
+             2. Using Chocolatey: choco install ffmpeg\n\
+             3. Manual download: https://ffmpeg.org/download.html\n\
+                Download the Windows build, extract, and add to PATH.",
+        ("manual_instructions_macos", Lang::Cn) => "安装 ffmpeg 的方法：\n\
+             1. 使用 Homebrew：brew install ffmpeg\n\
+             2. 使用 MacPorts：sudo port install ffmpeg\n\
+             3. 手动下载：https://ffmpeg.org/download.html",
+        ("manual_instructions_macos", Lang::En) => "To install ffmpeg manually:\n\
+             1. Using Homebrew: brew install ffmpeg\n\
+             2. Using MacPorts: sudo port install ffmpeg\n\
+             3. Manual download: https://ffmpeg.org/download.html",
+        ("manual_instructions_linux", Lang::Cn) => "安装 ffmpeg 的方法：\n\
+             1. 使用 apt：sudo apt update && sudo apt install ffmpeg\n\
+             2. 使用 snap：sudo snap install ffmpeg\n\
+             3. 手动编译：https://trac.ffmpeg.org/wiki/CompilationGuide",
+        ("manual_instructions_linux", Lang::En) => "To install ffmpeg manually:\n\
+             1. Using apt: sudo apt update && sudo apt install ffmpeg\n\
+             2. Using snap: sudo snap install ffmpeg\n\
+             3. Manual build: https://trac.ffmpeg.org/wiki/CompilationGuide",
         ("running_cmd", Lang::Cn) => "执行：{0}",
         ("running_cmd", Lang::En) => "Running: {0}",
         ("install_ffmpeg_prompt", Lang::Cn) => "未找到 ffmpeg。是否通过 {0} 安装？[y/N]：",
@@ -173,6 +209,10 @@ fn translate(lang: Lang, key: &str) -> std::borrow::Cow<'static, str> {
         ("failed_save_state", Lang::En) => "Warning: failed to save incremental state: {0}",
         ("failed_build_pool", Lang::Cn) => "无法创建线程池",
         ("failed_build_pool", Lang::En) => "Failed to build thread pool",
+        ("merge_failed_exit", Lang::Cn) => "ffmpeg 退出码 {0}，已重试 {1} 次",
+        ("merge_failed_exit", Lang::En) => "ffmpeg exited with code {0} after {1} retries",
+        ("merge_failed_io", Lang::Cn) => "{0}，已重试 {1} 次",
+        ("merge_failed_io", Lang::En) => "{0} after {1} retries",
 
         // --- Clap help text ---
         ("cli_about", Lang::Cn) => "批量合并 Bilibili 下载的音视频文件",
@@ -212,13 +252,12 @@ pub fn t(key: &str) -> std::borrow::Cow<'static, str> {
 }
 
 /// Translate a key for a specific language, bypassing auto-detection.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn t_for(for_lang: Lang, key: &str) -> std::borrow::Cow<'static, str> {
     translate(for_lang, key)
 }
 
 /// Format a translation with positional arguments: `tf("key", &["a", "b"])` replaces `{0}`, `{1}`, etc.
-/// For single-`{}` strings, use `t("key").replace("{}", &value)` instead.
 pub fn tf(key: &str, args: &[&str]) -> String {
     let mut result = t(key).into_owned();
     for (i, arg) in args.iter().enumerate() {
@@ -255,9 +294,22 @@ mod tests {
     }
 
     #[test]
-    fn test_tf_no_single_arg_fallback() {
-        // tf() only replaces {0}, {1}, etc. It does NOT replace {}.
-        assert_eq!(t_for(Lang::En, "processing"), "Processing {} file pairs...");
+    fn test_tf_positional_args() {
+        // tf() replaces {0}, {1}, etc.
+        assert_eq!(
+            t_for(Lang::En, "processing"),
+            "Processing {0} file pairs..."
+        );
+        assert_eq!(t_for(Lang::Cn, "processing"), "正在处理 {0} 个文件对...");
+        // Verify substitution works for both languages
+        let en_result = translate(Lang::En, "processing")
+            .into_owned()
+            .replace("{0}", "5");
+        assert_eq!(en_result, "Processing 5 file pairs...");
+        let cn_result = translate(Lang::Cn, "processing")
+            .into_owned()
+            .replace("{0}", "5");
+        assert_eq!(cn_result, "正在处理 5 个文件对...");
     }
 
     #[test]
