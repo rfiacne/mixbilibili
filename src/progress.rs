@@ -6,12 +6,10 @@ use std::time::Duration;
 
 /// Internal rendering strategy.
 enum Renderer {
-    /// Full progress bar with speed/ETA (TTY mode).
     Bar(Arc<ProgressBar>),
-    /// One-line-per-file text output (no TTY / CI mode).
     Text {
         total: usize,
-        completed: std::sync::atomic::AtomicUsize,
+        completed: Arc<std::sync::atomic::AtomicUsize>,
     },
 }
 
@@ -20,7 +18,7 @@ impl Renderer {
     fn new_text(total: usize) -> Self {
         Self::Text {
             total,
-            completed: std::sync::atomic::AtomicUsize::new(0),
+            completed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -123,9 +121,10 @@ impl MergeProgress {
     pub fn new(total: usize) -> Self {
         if std::io::stderr().is_terminal() {
             let bar = ProgressBar::new(total as u64);
+            bar.enable_steady_tick(Duration::from_millis(100));
             bar.set_style(
                 ProgressStyle::with_template(
-                    "[{elapsed_precise}] {bar:30.cyan/blue} {pos}/{len} ({per_sec}) {msg}",
+                    "[{elapsed_precise}] {bar:30.cyan/blue} {pos}/{len} ({per_sec})",
                 )
                 .unwrap()
                 .progress_chars("=>-")
@@ -195,9 +194,7 @@ impl Clone for MergeProgress {
                 Renderer::Bar(bar) => Renderer::Bar(bar.clone()),
                 Renderer::Text { total, completed } => Renderer::Text {
                     total: *total,
-                    completed: std::sync::atomic::AtomicUsize::new(
-                        completed.load(std::sync::atomic::Ordering::Relaxed),
-                    ),
+                    completed: Arc::clone(completed),
                 },
             },
         }
