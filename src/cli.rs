@@ -79,6 +79,23 @@ mod tests {
         assert!(OutputFormat::Mp4.needs_faststart());
         assert!(OutputFormat::Mov.needs_faststart());
     }
+
+    #[test]
+    fn test_output_format_display() {
+        assert_eq!(format!("{}", OutputFormat::Mkv), "mkv");
+        assert_eq!(format!("{}", OutputFormat::Mp4), "mp4");
+        assert_eq!(format!("{}", OutputFormat::Mov), "mov");
+    }
+
+    #[test]
+    fn test_output_format_all_variants_have_extension() {
+        let formats = [OutputFormat::Mkv, OutputFormat::Mp4, OutputFormat::Mov];
+        for fmt in &formats {
+            let ext = fmt.extension();
+            assert!(!ext.is_empty(), "{:?} has empty extension", fmt);
+            assert_eq!(ext, format!("{}", fmt));
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +111,7 @@ pub struct Args {
     pub quiet: bool,
     pub resume: bool,
     pub retry: usize,
+    pub recursive: bool,
 }
 
 fn default_jobs() -> usize {
@@ -191,6 +209,13 @@ pub fn build_cli() -> Command {
                 .default_value("0")
                 .value_parser(clap::value_parser!(usize)),
         )
+        .arg(
+            Arg::new("recursive")
+                .short('R')
+                .long("recursive")
+                .help(t("cli_recursive"))
+                .action(ArgAction::SetTrue),
+        )
 }
 
 /// Parse ArgMatches into Args struct.
@@ -235,6 +260,7 @@ pub fn parse_args(matches: &clap::ArgMatches) -> Args {
         quiet: matches.get_flag("quiet"),
         resume: matches.get_flag("resume"),
         retry,
+        recursive: matches.get_flag("recursive"),
     }
 }
 
@@ -274,6 +300,7 @@ fn make_args() -> Args {
         quiet: false,
         resume: false,
         retry: 0,
+        recursive: false,
     }
 }
 
@@ -546,5 +573,13 @@ mod validation_tests {
         args.source = dir.path().to_path_buf();
         args.output = dir.path().to_path_buf();
         assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_args_validate_rejects_nonexistent_source() {
+        let mut args = make_args();
+        args.source = PathBuf::from("/nonexistent/path/that/does/not/exist");
+        let result = args.validate();
+        assert!(result.is_err(), "validate should reject nonexistent source");
     }
 }

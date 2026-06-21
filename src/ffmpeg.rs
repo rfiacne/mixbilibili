@@ -64,11 +64,23 @@ fn package_managers(os: Os) -> Vec<(&'static str, &'static str)> {
             }
         }
         Os::Linux => {
+            let mut pms = Vec::new();
             if which::which("apt").is_ok() {
-                vec![("apt", "sudo apt update && sudo apt install -y ffmpeg")]
-            } else {
-                vec![]
+                pms.push(("apt", "sudo apt update && sudo apt install -y ffmpeg"));
             }
+            if which::which("dnf").is_ok() {
+                pms.push(("dnf", "sudo dnf install -y ffmpeg"));
+            }
+            if which::which("yum").is_ok() {
+                pms.push(("yum", "sudo yum install -y ffmpeg"));
+            }
+            if which::which("pacman").is_ok() {
+                pms.push(("pacman", "sudo pacman -S --noconfirm ffmpeg"));
+            }
+            if which::which("zypper").is_ok() {
+                pms.push(("zypper", "sudo zypper install -y ffmpeg"));
+            }
+            pms
         }
         Os::Unknown => vec![],
     }
