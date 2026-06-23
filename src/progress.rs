@@ -145,7 +145,7 @@ impl MergeProgress {
                         let pos = state.pos() as usize;
                         let total = state.len().unwrap_or(0) as usize;
                         let elapsed = state.elapsed().as_secs_f64();
-                        if pos > 0 && elapsed > 0.0 {
+                        if pos > 0 && elapsed > 0.0 && total > pos {
                             let rate = pos as f64 / elapsed;
                             let remaining = (total - pos) as f64 / rate;
                             let _ = write!(w, "{}", format_duration(Duration::from_secs_f64(remaining)));

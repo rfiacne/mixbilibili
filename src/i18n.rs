@@ -100,8 +100,6 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "interrupted_cleanup"), "\nInterrupted. Partial files cleaned up."),
     ((Lang::Cn, "interrupted_resume_hint"), "使用 --resume 从上次中断处继续。"),
     ((Lang::En, "interrupted_resume_hint"), "Use --resume to continue from where you left off."),
-    ((Lang::Cn, "cleanup_partial"), "清理部分文件：{}"),
-    ((Lang::En, "cleanup_partial"), "Cleaning up partial file: {}"),
     ((Lang::Cn, "cleanup_partial"), "清理部分文件：{0}"),
     ((Lang::En, "cleanup_partial"), "Cleaned up partial file: {0}"),
     // Report

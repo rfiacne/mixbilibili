@@ -55,6 +55,8 @@ pub struct MergeResult {
     pub error: Option<String>,
     /// Duration of the ffmpeg merge operation.
     pub duration: Duration,
+    /// Set to true when the merge was skipped due to INTERRUPTED flag.
+    pub was_interrupted: bool,
 }
 
 #[derive(Debug, Default)]
@@ -217,6 +219,7 @@ pub fn merge_pair(
             success: false,
             error: Some("Skipped (interrupted)".to_string()),
             duration: Duration::ZERO,
+            was_interrupted: true,
         };
     }
 
@@ -251,6 +254,7 @@ fn record_failure(
         success: false,
         error: Some(error_msg),
         duration,
+        was_interrupted: false,
     }
 }
 
@@ -303,6 +307,7 @@ fn do_merge(
                     success: true,
                     error: None,
                     duration,
+                    was_interrupted: false,
                 };
             }
             Ok(_) if attempt < max_retries => continue,
@@ -619,6 +624,7 @@ mod merge_tests {
             success: true,
             error: None,
             duration: Duration::from_millis(123),
+            was_interrupted: false,
         };
         let debug_str = format!("{:?}", result);
         assert!(debug_str.contains("video"));
@@ -632,6 +638,7 @@ mod merge_tests {
             success: false,
             error: Some("test error".to_string()),
             duration: Duration::from_secs(1),
+            was_interrupted: false,
         };
         assert!(!result.success);
         assert!(result.error.is_some());

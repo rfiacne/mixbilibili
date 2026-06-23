@@ -1,6 +1,7 @@
 use crate::ffmpeg;
 use crate::i18n::t;
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -114,7 +115,7 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
     }
 
     let estimated_duration: std::time::Duration = pairs
-        .iter()
+        .par_iter()
         .map(|p| ffmpeg::estimate_merge_duration(&p.video))
         .sum();
 

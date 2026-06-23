@@ -100,6 +100,19 @@ struct ScanContext {
     estimated_duration: Duration,
 }
 
+impl ScanContext {
+    fn format_time_estimate(&self) -> Option<String> {
+        if self.estimated_duration.is_zero() {
+            None
+        } else {
+            Some(tf(
+                "dry_run_time_estimate",
+                &[&progress::format_duration(self.estimated_duration)],
+            ))
+        }
+    }
+}
+
 /// Scan source directory and filter pairs based on resume state.
 /// Returns the scan context and initialized merge state.
 fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState)>> {
@@ -159,6 +172,23 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
     Ok(Some((ctx, merge_state)))
 }
 
+/// Print preview of pairs to be processed, including header and time estimate.
+fn print_preview_pairs(ctx: &ScanContext, format: &cli::OutputFormat, header: &str) {
+    println!("{}", header.cyan().bold());
+    for pair in &ctx.pairs {
+        println!(
+            "  {} + {} -> {}.{}",
+            pair.video.display(),
+            pair.audio.display(),
+            pair.stem,
+            format.extension()
+        );
+    }
+    if let Some(msg) = ctx.format_time_estimate() {
+        println!("{}", msg);
+    }
+}
+
 /// Shared flag set by the Ctrl+C handler.
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -192,22 +222,7 @@ fn run() -> Result<()> {
 
     // Phase 2.5: Interactive preview + confirmation
     if args.interactive {
-        println!("{}", t("interactive_preview_header").cyan().bold());
-        for pair in &ctx.pairs {
-            println!(
-                "  {} + {} -> {}.{}",
-                pair.video.display(),
-                pair.audio.display(),
-                pair.stem,
-                format.extension()
-            );
-        }
-        if !ctx.estimated_duration.is_zero() {
-            println!(
-                "{}",
-                tf("dry_run_time_estimate", &[&progress::format_duration(ctx.estimated_duration)])
-            );
-        }
+        print_preview_pairs(&ctx, &format, &t("interactive_preview_header"));
         if args.sdel {
             println!("{}", t("dry_run_sdel_header").yellow().bold());
         }
@@ -216,45 +231,34 @@ fn run() -> Result<()> {
         std::io::Write::flush(&mut std::io::stdout())?;
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
+        let response = input.trim().to_lowercase();
+        if response != "y" && response != "yes" {
             println!("{}", t("interactive_cancelled").yellow());
+            state::MergeState::clear(&args.source)?;
             return Ok(());
         }
     }
 
     // Phase 3: Dry-run preview or execute merges
     if args.dry_run {
-        println!("{}", t("dry_run_header").cyan().bold());
-        for pair in &ctx.pairs {
-            println!(
-                "  {} + {} -> {}.{}",
-                pair.video.display(),
-                pair.audio.display(),
-                pair.stem,
-                format.extension()
-            );
-        }
-        if args.sdel {
-            println!("\n{}", t("dry_run_sdel_header").yellow().bold());
-            for pair in &ctx.pairs {
-                println!(
-                    "  {} (video)\n  {} (audio)",
-                    pair.video.display(),
-                    pair.audio.display()
-                );
+        if !args.quiet {
+            print_preview_pairs(&ctx, &format, &t("dry_run_header"));
+            if args.sdel {
+                println!("\n{}", t("dry_run_sdel_header").yellow().bold());
+                for pair in &ctx.pairs {
+                    println!(
+                        "  {} (video)\n  {} (audio)",
+                        pair.video.display(),
+                        pair.audio.display()
+                    );
+                }
             }
-        }
-        println!(
-            "\n{}",
-            tf("dry_run_summary", &[&ctx.pairs.len().to_string()])
-        );
-        if !ctx.estimated_duration.is_zero() {
             println!(
-                "{}",
-                tf("dry_run_time_estimate", &[&progress::format_duration(ctx.estimated_duration)])
+                "\n{}",
+                tf("dry_run_summary", &[&ctx.pairs.len().to_string()])
             );
+            println!("{}", t("dry_run_complete").cyan());
         }
-        println!("{}", t("dry_run_complete").cyan());
         return Ok(());
     }
 
@@ -289,19 +293,12 @@ fn execute(
     merge_state: &mut state::MergeState,
     format: cli::OutputFormat,
 ) -> Result<merger::MergeSummary> {
-    if !ctx.estimated_duration.is_zero() {
-        println!(
-            "{}",
-            tf(
-                "starting_merges",
-                &[
-                    &ctx.pairs.len().to_string(),
-                    &progress::format_duration(ctx.estimated_duration)
-                ]
-            )
-        );
-    } else {
-        println!("{}", tf("processing", &[&ctx.pairs.len().to_string()]));
+    if !args.quiet {
+        if let Some(msg) = ctx.format_time_estimate() {
+            println!("{}", msg);
+        } else {
+            println!("{}", tf("processing", &[&ctx.pairs.len().to_string()]));
+        }
     }
 
     let progress = if args.progress && !args.quiet {
@@ -334,13 +331,9 @@ fn execute(
             );
 
             // Update state and periodically save
-            {
+            let snapshot = {
                 let mut state = state_mutex.lock().unwrap();
-                let is_interrupted = result
-                    .error
-                    .as_ref()
-                    .is_some_and(|e| e.contains("interrupted"));
-                if !is_interrupted {
+                if !result.was_interrupted {
                     if result.success {
                         state.mark_completed(&pair.stem);
                     } else {
@@ -349,9 +342,16 @@ fn execute(
                 }
                 let count = completed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 if count.is_multiple_of(save_interval) {
-                    if let Err(e) = state.save(&source) {
-                        eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
-                    }
+                    Some(state.clone())
+                } else {
+                    None
+                }
+            }; // lock dropped here
+
+            // Save outside the lock so parallel workers aren't blocked by file I/O
+            if let Some(s) = snapshot {
+                if let Err(e) = s.save(&source) {
+                    eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
                 }
             }
 
@@ -375,16 +375,22 @@ fn execute(
     // Cleanup partial output files on interrupt
     if INTERRUPTED.load(Ordering::SeqCst) {
         for result in &results {
-            if result.error.as_ref().is_some_and(|e| e.contains("interrupted")) {
+            if result.was_interrupted {
                 let pair = &ctx.pairs[result.pair_index];
                 let output_path = args.output.join(format!("{}.{}", pair.stem, format.extension()));
                 if output_path.exists() {
                     if let Err(e) = std::fs::remove_file(&output_path) {
-                        if args.verbose {
-                            eprintln!("{} {}", t("warning_prefix").yellow(), e);
-                        }
+                        eprintln!("{} {}", t("warning_prefix").yellow(), e);
                     } else if args.verbose {
-                        eprintln!("{} {}", t("cleanup_partial").yellow(), output_path.display());
+                        eprintln!("{}", tf("cleanup_partial", &[&output_path.display().to_string()]).yellow());
+                    }
+                }
+                // Also clean up source audio file when --sdel is active
+                if args.sdel && pair.audio.exists() {
+                    if let Err(e) = std::fs::remove_file(&pair.audio) {
+                        eprintln!("{} {}", t("warning_prefix").yellow(), e);
+                    } else if args.verbose {
+                        eprintln!("{}", tf("cleanup_partial", &[&pair.audio.display().to_string()]).yellow());
                     }
                 }
             }
@@ -411,7 +417,8 @@ fn execute(
             final_summary.success_count += 1;
             final_summary.merge_count += 1;
             final_summary.total_duration += result.duration;
-        } else {
+        } else if !result.was_interrupted {
+            // Only count non-interrupted failures; interrupted items stay pending for resume
             final_summary.failed_count += 1;
             if let Some(ref err) = result.error {
                 final_summary
@@ -438,11 +445,9 @@ fn finalize(
         return Ok(());
     }
 
-    // Only mark real failures; interrupted items stay pending for resume
-    for (name, error) in &summary.failures {
-        if !error.contains("interrupted") {
-            merge_state.mark_failed(name);
-        }
+    // Mark all failures (interrupted items are already excluded from summary.failures)
+    for (name, _error) in &summary.failures {
+        merge_state.mark_failed(name);
     }
 
     if summary.all_success() {

@@ -277,6 +277,10 @@ impl Args {
     pub fn validate(&mut self) -> Result<()> {
         self.jobs = self.jobs.clamp(1, 32);
 
+        if self.interactive && self.dry_run {
+            bail!("Cannot use --interactive with --dry-run");
+        }
+
         if !self.source.is_dir() {
             bail!(
                 "{}",
@@ -582,6 +586,24 @@ mod validation_tests {
         let mut args = make_args();
         args.source = dir.path().to_path_buf();
         args.output = dir.path().to_path_buf();
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_interactive_with_dry_run() {
+        let mut args = make_args();
+        args.interactive = true;
+        args.dry_run = true;
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("--interactive"));
+    }
+
+    #[test]
+    fn test_validate_accepts_interactive_alone() {
+        let mut args = make_args();
+        args.interactive = true;
+        args.dry_run = false;
         assert!(args.validate().is_ok());
     }
 
