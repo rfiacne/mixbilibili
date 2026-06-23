@@ -206,6 +206,22 @@ pub fn build_merge_command(
     cmd
 }
 
+/// Estimate merge time based on video file size and typical throughput.
+/// Returns ZERO duration on error (file not found, permission denied, etc.).
+pub fn estimate_merge_duration(video_path: &Path) -> std::time::Duration {
+    let metadata = match std::fs::metadata(video_path) {
+        Ok(m) => m,
+        Err(_) => return std::time::Duration::ZERO,
+    };
+
+    let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
+
+    // Estimate: ~10 MB/s throughput (conservative for typical hardware)
+    let estimated_seconds = size_mb / 10.0;
+
+    std::time::Duration::from_secs(estimated_seconds as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +376,50 @@ mod cmd_tests {
 
         let args: Vec<_> = cmd.get_args().collect();
         assert!(args.contains(&std::ffi::OsStr::new("-y")));
+    }
+}
+
+#[cfg(test)]
+mod estimate_tests {
+    use super::*;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::Duration;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_estimate_missing_file_returns_zero() {
+        let path = PathBuf::from("/nonexistent/video.mp4");
+        assert_eq!(estimate_merge_duration(&path), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_estimate_small_file() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        // Write ~1 MB
+        tmp.write_all(&vec![0u8; 1024 * 1024]).unwrap();
+        let dur = estimate_merge_duration(tmp.path());
+        // 1 MB / 10 MB/s = 0.1s → rounds to 0
+        assert_eq!(dur.as_secs(), 0);
+    }
+
+    #[test]
+    fn test_estimate_medium_file() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        // Write ~50 MB
+        tmp.write_all(&vec![0u8; 50 * 1024 * 1024]).unwrap();
+        let dur = estimate_merge_duration(tmp.path());
+        // 50 MB / 10 MB/s = 5s
+        assert_eq!(dur.as_secs(), 5);
+    }
+
+    #[test]
+    fn test_estimate_large_file() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        // Write ~200 MB
+        tmp.write_all(&vec![0u8; 200 * 1024 * 1024]).unwrap();
+        let dur = estimate_merge_duration(tmp.path());
+        // 200 MB / 10 MB/s = 20s
+        assert_eq!(dur.as_secs(), 20);
     }
 }

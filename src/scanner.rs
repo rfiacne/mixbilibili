@@ -1,8 +1,10 @@
+use crate::ffmpeg;
 use crate::i18n::t;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct FilePair {
@@ -22,6 +24,8 @@ pub struct ScanStats {
 pub struct ScanResult {
     pub pairs: Vec<FilePair>,
     pub stats: ScanStats,
+    #[allow(dead_code)]
+    pub estimated_duration: Duration,
 }
 
 fn is_downloading(stem: &str, aria2_files: &HashSet<String>) -> bool {
@@ -109,7 +113,16 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
         }
     }
 
-    Ok(ScanResult { pairs, stats })
+    let estimated_duration: std::time::Duration = pairs
+        .iter()
+        .map(|p| ffmpeg::estimate_merge_duration(&p.video))
+        .sum();
+
+    Ok(ScanResult {
+        pairs,
+        stats,
+        estimated_duration,
+    })
 }
 
 #[cfg(test)]
@@ -420,5 +433,42 @@ mod scan_tests {
             .collect();
         assert!(stems.contains(&"top"));
         assert!(stems.contains(&"deep"));
+    }
+
+    #[test]
+    fn test_scan_includes_estimated_duration() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        File::create(path.join("video1.mp4")).unwrap();
+        File::create(path.join("video1.m4a")).unwrap();
+        File::create(path.join("video2.mp4")).unwrap();
+        File::create(path.join("video2.m4a")).unwrap();
+
+        let result = scan_directory(path, false).unwrap();
+        // Empty files → 0 duration
+        assert_eq!(result.estimated_duration.as_secs(), 0);
+    }
+
+    #[test]
+    fn test_scan_estimated_duration_with_data() {
+        use std::io::Write;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        // Create ~10 MB video file
+        let mut video1 = File::create(path.join("video1.mp4")).unwrap();
+        video1.write_all(&vec![0u8; 10 * 1024 * 1024]).unwrap();
+        File::create(path.join("video1.m4a")).unwrap();
+
+        // Create ~20 MB video file
+        let mut video2 = File::create(path.join("video2.mp4")).unwrap();
+        video2.write_all(&vec![0u8; 20 * 1024 * 1024]).unwrap();
+        File::create(path.join("video2.m4a")).unwrap();
+
+        let result = scan_directory(path, false).unwrap();
+        // 10 MB / 10 MB/s = 1s, 20 MB / 10 MB/s = 2s, total = 3s
+        assert_eq!(result.estimated_duration.as_secs(), 3);
     }
 }

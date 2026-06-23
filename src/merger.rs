@@ -650,6 +650,7 @@ mod exec_tests {
         let scan_result = ScanResult {
             pairs: vec![],
             stats: ScanStats::default(),
+            estimated_duration: std::time::Duration::ZERO,
         };
 
         let summary = execute_merges(
@@ -679,6 +680,7 @@ mod exec_tests {
                 skipped: 5,
                 orphaned: 3,
             },
+            estimated_duration: std::time::Duration::ZERO,
         };
 
         let summary = execute_merges(

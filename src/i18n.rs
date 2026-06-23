@@ -81,6 +81,10 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "dry_run_complete"), "Dry-run complete. No files were modified."),
     ((Lang::Cn, "dry_run_marker"), "[预览]"),
     ((Lang::En, "dry_run_marker"), "[dry-run]"),
+    ((Lang::Cn, "dry_run_time_estimate"), "预计时间：{0}"),
+    ((Lang::En, "dry_run_time_estimate"), "Estimated time: {0}"),
+    ((Lang::Cn, "starting_merges"), "开始合并 {0} 个文件（预计时间：{1}）"),
+    ((Lang::En, "starting_merges"), "Starting {0} merges (estimated time: {1})"),
     // Interrupt / resume
     ((Lang::Cn, "interrupted"), "\n已中断。状态已保存，可恢复。"),
     ((Lang::En, "interrupted"), "\nInterrupted. State saved for resume."),
@@ -379,5 +383,29 @@ mod tests {
     fn test_translate_unknown_key_returns_key_name() {
         let result = t_for(Lang::En, "totally_nonexistent_key_xyz");
         assert_eq!(result.as_ref(), "totally_nonexistent_key_xyz");
+    }
+
+    #[test]
+    fn test_dry_run_time_estimate_en() {
+        let result = t_for(Lang::En, "dry_run_time_estimate");
+        assert_eq!(result.as_ref(), "Estimated time: {0}");
+    }
+
+    #[test]
+    fn test_dry_run_time_estimate_cn() {
+        let result = t_for(Lang::Cn, "dry_run_time_estimate");
+        assert_eq!(result.as_ref(), "预计时间：{0}");
+    }
+
+    #[test]
+    fn test_starting_merges_en() {
+        let result = t_for(Lang::En, "starting_merges");
+        assert_eq!(result.as_ref(), "Starting {0} merges (estimated time: {1})");
+    }
+
+    #[test]
+    fn test_starting_merges_cn() {
+        let result = t_for(Lang::Cn, "starting_merges");
+        assert_eq!(result.as_ref(), "开始合并 {0} 个文件（预计时间：{1}）");
     }
 }
