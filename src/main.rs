@@ -12,6 +12,7 @@ use cli::Args;
 use colored::Colorize;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use thiserror::Error;
 
 mod exit_codes {
@@ -95,6 +96,8 @@ struct ScanContext {
     pairs: Vec<scanner::FilePair>,
     /// Original scan statistics (skipped, orphaned, etc.).
     stats: scanner::ScanStats,
+    /// Estimated total merge duration.
+    estimated_duration: Duration,
 }
 
 /// Scan source directory and filter pairs based on resume state.
@@ -150,6 +153,7 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
     let ctx = ScanContext {
         pairs: pairs_to_process,
         stats: scan_result.stats.clone(),
+        estimated_duration: scan_result.estimated_duration,
     };
 
     Ok(Some((ctx, merge_state)))
@@ -186,6 +190,38 @@ fn run() -> Result<()> {
         return Ok(());
     };
 
+    // Phase 2.5: Interactive preview + confirmation
+    if args.interactive {
+        println!("{}", t("interactive_preview_header").cyan().bold());
+        for pair in &ctx.pairs {
+            println!(
+                "  {} + {} -> {}.{}",
+                pair.video.display(),
+                pair.audio.display(),
+                pair.stem,
+                format.extension()
+            );
+        }
+        if !ctx.estimated_duration.is_zero() {
+            println!(
+                "{}",
+                tf("dry_run_time_estimate", &[&progress::format_duration(ctx.estimated_duration)])
+            );
+        }
+        if args.sdel {
+            println!("{}", t("dry_run_sdel_header").yellow().bold());
+        }
+        println!();
+        print!("{} ", t("interactive_confirm").bold());
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("{}", t("interactive_cancelled").yellow());
+            return Ok(());
+        }
+    }
+
     // Phase 3: Dry-run preview or execute merges
     if args.dry_run {
         println!("{}", t("dry_run_header").cyan().bold());
@@ -212,6 +248,12 @@ fn run() -> Result<()> {
             "\n{}",
             tf("dry_run_summary", &[&ctx.pairs.len().to_string()])
         );
+        if !ctx.estimated_duration.is_zero() {
+            println!(
+                "{}",
+                tf("dry_run_time_estimate", &[&progress::format_duration(ctx.estimated_duration)])
+            );
+        }
         println!("{}", t("dry_run_complete").cyan());
         return Ok(());
     }
@@ -224,7 +266,8 @@ fn run() -> Result<()> {
     summary.print_report(args.quiet);
 
     if INTERRUPTED.load(Ordering::SeqCst) {
-        println!("{}", t("interrupted").yellow());
+        println!("{}", t("interrupted_cleanup").yellow());
+        println!("{}", t("interrupted_resume_hint").cyan());
         Ok(())
     } else if summary.all_success() {
         Ok(())
@@ -246,7 +289,20 @@ fn execute(
     merge_state: &mut state::MergeState,
     format: cli::OutputFormat,
 ) -> Result<merger::MergeSummary> {
-    println!("{}", tf("processing", &[&ctx.pairs.len().to_string()]));
+    if !ctx.estimated_duration.is_zero() {
+        println!(
+            "{}",
+            tf(
+                "starting_merges",
+                &[
+                    &ctx.pairs.len().to_string(),
+                    &progress::format_duration(ctx.estimated_duration)
+                ]
+            )
+        );
+    } else {
+        println!("{}", tf("processing", &[&ctx.pairs.len().to_string()]));
+    }
 
     let progress = if args.progress && !args.quiet {
         Some(progress::MergeProgress::new(ctx.pairs.len()))
@@ -314,6 +370,25 @@ fn execute(
     // Finish progress bar
     if let Some(p) = &progress {
         p.finish();
+    }
+
+    // Cleanup partial output files on interrupt
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        for result in &results {
+            if result.error.as_ref().is_some_and(|e| e.contains("interrupted")) {
+                let pair = &ctx.pairs[result.pair_index];
+                let output_path = args.output.join(format!("{}.{}", pair.stem, format.extension()));
+                if output_path.exists() {
+                    if let Err(e) = std::fs::remove_file(&output_path) {
+                        if args.verbose {
+                            eprintln!("{} {}", t("warning_prefix").yellow(), e);
+                        }
+                    } else if args.verbose {
+                        eprintln!("{} {}", t("cleanup_partial").yellow(), output_path.display());
+                    }
+                }
+            }
+        }
     }
 
     // Handle source file deletion if requested
@@ -496,6 +571,7 @@ mod integration_tests {
             jobs: 1,
             sdel: false,
             dry_run: false,
+            interactive: false,
             resume: false,
             progress: false,
             quiet: true,

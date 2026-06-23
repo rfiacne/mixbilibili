@@ -124,7 +124,7 @@ impl MergeProgress {
             bar.enable_steady_tick(Duration::from_millis(100));
             bar.set_style(
                 ProgressStyle::with_template(
-                    "[{elapsed_precise}] {bar:30.cyan/blue} {pos}/{len} ({per_sec})",
+                    "[{elapsed_precise}] {bar:30.cyan/blue} {pos}/{len} ({per_sec}) ETA: {eta}",
                 )
                 .unwrap()
                 .progress_chars("=>-")
@@ -136,6 +136,21 @@ impl MergeProgress {
                             let _ = write!(w, "{:.1} files/s", state.pos() as f64 / elapsed);
                         } else {
                             let _ = write!(w, "0.0 files/s");
+                        }
+                    },
+                )
+                .with_key(
+                    "eta",
+                    |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
+                        let pos = state.pos() as usize;
+                        let total = state.len().unwrap_or(0) as usize;
+                        let elapsed = state.elapsed().as_secs_f64();
+                        if pos > 0 && elapsed > 0.0 {
+                            let rate = pos as f64 / elapsed;
+                            let remaining = (total - pos) as f64 / rate;
+                            let _ = write!(w, "{}", format_duration(Duration::from_secs_f64(remaining)));
+                        } else {
+                            let _ = write!(w, "--");
                         }
                     },
                 ),

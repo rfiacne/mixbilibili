@@ -107,6 +107,7 @@ pub struct Args {
     pub jobs: usize,
     pub progress: bool,
     pub dry_run: bool,
+    pub interactive: bool,
     pub verbose: bool,
     pub quiet: bool,
     pub resume: bool,
@@ -179,6 +180,13 @@ pub fn build_cli() -> Command {
                 .short('n')
                 .long("dry-run")
                 .help(t("cli_dry_run"))
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("interactive")
+                .short('i')
+                .long("interactive")
+                .help(t("cli_interactive"))
                 .action(ArgAction::SetTrue),
         )
         .arg(
@@ -256,6 +264,7 @@ pub fn parse_args(matches: &clap::ArgMatches) -> Args {
             .map(|s| s != "false")
             .unwrap_or(true),
         dry_run: matches.get_flag("dry_run"),
+        interactive: matches.get_flag("interactive"),
         verbose: matches.get_flag("verbose"),
         quiet: matches.get_flag("quiet"),
         resume: matches.get_flag("resume"),
@@ -296,6 +305,7 @@ fn make_args() -> Args {
         jobs: 4,
         progress: true,
         dry_run: false,
+        interactive: false,
         verbose: false,
         quiet: false,
         resume: false,
