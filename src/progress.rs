@@ -148,7 +148,11 @@ impl MergeProgress {
                         if pos > 0 && elapsed > 0.0 && total > pos {
                             let rate = pos as f64 / elapsed;
                             let remaining = (total - pos) as f64 / rate;
-                            let _ = write!(w, "{}", format_duration(Duration::from_secs_f64(remaining)));
+                            let _ = write!(
+                                w,
+                                "{}",
+                                format_duration(Duration::from_secs_f64(remaining))
+                            );
                         } else {
                             let _ = write!(w, "--");
                         }

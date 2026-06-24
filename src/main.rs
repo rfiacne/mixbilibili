@@ -209,6 +209,11 @@ fn run() -> Result<()> {
     // Phase 1: Initialize
     let (args, format) = init()?;
 
+    // --once mode: merge a single pair by stem, skip scanning
+    if let Some(ref stem) = args.once {
+        return run_once(&args, format, stem);
+    }
+
     // Configure rayon's global thread pool once at startup
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.jobs)
@@ -280,6 +285,53 @@ fn run() -> Result<()> {
             count: summary.failed_count,
         }
         .into())
+    }
+}
+
+/// --once mode: merge a single pair identified by stem.
+/// No scanning, no state file, no progress bar — just merge and exit.
+fn run_once(args: &Args, format: cli::OutputFormat, stem: &str) -> Result<()> {
+    let video_path = args.source.join(format!("{stem}.mp4"));
+    let audio_path = args.source.join(format!("{stem}.m4a"));
+
+    if !video_path.exists() {
+        anyhow::bail!(
+            "{}",
+            tf("once_missing_video", &[&video_path.display().to_string()])
+        );
+    }
+    if !audio_path.exists() {
+        anyhow::bail!(
+            "{}",
+            tf("once_missing_audio", &[&audio_path.display().to_string()])
+        );
+    }
+
+    let pair = scanner::FilePair {
+        video: video_path,
+        audio: audio_path,
+        stem: stem.to_string(),
+    };
+
+    let result = merger::merge_pair(
+        &pair,
+        0,
+        &args.output,
+        format,
+        None,
+        args.verbose,
+        args.retry,
+    );
+
+    if result.success {
+        if args.sdel {
+            if let Err(e) = merger::delete_source_files(&pair) {
+                eprintln!("{} {}", t("warning_prefix").yellow(), e);
+            }
+        }
+        Ok(())
+    } else {
+        Err(AppError::MergeFailed { count: 1 }.into())
     }
 }
 
@@ -377,12 +429,17 @@ fn execute(
         for result in &results {
             if result.was_interrupted {
                 let pair = &ctx.pairs[result.pair_index];
-                let output_path = args.output.join(format!("{}.{}", pair.stem, format.extension()));
+                let output_path = args
+                    .output
+                    .join(format!("{}.{}", pair.stem, format.extension()));
                 if output_path.exists() {
                     if let Err(e) = std::fs::remove_file(&output_path) {
                         eprintln!("{} {}", t("warning_prefix").yellow(), e);
                     } else if args.verbose {
-                        eprintln!("{}", tf("cleanup_partial", &[&output_path.display().to_string()]).yellow());
+                        eprintln!(
+                            "{}",
+                            tf("cleanup_partial", &[&output_path.display().to_string()]).yellow()
+                        );
                     }
                 }
                 // Also clean up source audio file when --sdel is active
@@ -390,7 +447,10 @@ fn execute(
                     if let Err(e) = std::fs::remove_file(&pair.audio) {
                         eprintln!("{} {}", t("warning_prefix").yellow(), e);
                     } else if args.verbose {
-                        eprintln!("{}", tf("cleanup_partial", &[&pair.audio.display().to_string()]).yellow());
+                        eprintln!(
+                            "{}",
+                            tf("cleanup_partial", &[&pair.audio.display().to_string()]).yellow()
+                        );
                     }
                 }
             }
@@ -582,6 +642,7 @@ mod integration_tests {
             quiet: true,
             verbose: false,
             retry: 0,
+            once: None,
         };
 
         // video3 remains pending (never processed, e.g. interrupted)

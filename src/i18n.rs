@@ -265,6 +265,12 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "cli_retry"), "Number of retries for failed merges (0 = no retry)"),
     ((Lang::Cn, "cli_recursive"), "递归扫描子目录"),
     ((Lang::En, "cli_recursive"), "Scan subdirectories recursively"),
+    ((Lang::Cn, "cli_once"), "仅合并指定 stem 的文件对（跳过扫描）"),
+    ((Lang::En, "cli_once"), "Merge only the specified stem (skip scanning)"),
+    ((Lang::Cn, "once_missing_video"), "未找到视频文件：{0}"),
+    ((Lang::En, "once_missing_video"), "Video file not found: {0}"),
+    ((Lang::Cn, "once_missing_audio"), "未找到音频文件：{0}"),
+    ((Lang::En, "once_missing_audio"), "Audio file not found: {0}"),
 ];
 
 static TRANSLATION_MAP: OnceLock<HashMap<TranslationKey, &'static str>> = OnceLock::new();

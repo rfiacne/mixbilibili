@@ -113,6 +113,7 @@ pub struct Args {
     pub resume: bool,
     pub retry: usize,
     pub recursive: bool,
+    pub once: Option<String>,
 }
 
 fn default_jobs() -> usize {
@@ -224,6 +225,12 @@ pub fn build_cli() -> Command {
                 .help(t("cli_recursive"))
                 .action(ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("once")
+                .long("once")
+                .help(t("cli_once"))
+                .value_name("STEM"),
+        )
 }
 
 /// Parse ArgMatches into Args struct.
@@ -270,6 +277,7 @@ pub fn parse_args(matches: &clap::ArgMatches) -> Args {
         resume: matches.get_flag("resume"),
         retry,
         recursive: matches.get_flag("recursive"),
+        once: matches.get_one::<String>("once").map(|s| s.to_string()),
     }
 }
 
@@ -315,6 +323,7 @@ fn make_args() -> Args {
         resume: false,
         retry: 0,
         recursive: false,
+        once: None,
     }
 }
 

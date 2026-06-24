@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-24
+
+### Added
+- `--once <stem>` flag to merge a single file pair without scanning the directory
+- aria2 integration hook script (`scripts/aria2-hook.sh`) for automatic merge on download completion
+- i18n keys for `--once` mode error messages
+
+### Changed
+- README updated with aria2 integration guide and `--once` usage
+
 ## [0.6.2] - 2026-05-16
 
 ### Fixed
