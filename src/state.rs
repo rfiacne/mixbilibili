@@ -48,18 +48,13 @@ impl MergeState {
         if !path.exists() {
             return Ok(None);
         }
-        let content = fs::read_to_string(&path).context("Failed to read state file")?;
+        let content = fs::read_to_string(&path).context(t("failed_read_state").into_owned())?;
 
         // Try to parse with detailed error message
         let state: Self = match serde_json::from_str(&content) {
             Ok(state) => state,
             Err(e) => {
-                anyhow::bail!(
-                        "Failed to parse state file '{}'. The file may be corrupted or from an incompatible version. \
-                         Consider removing it and starting fresh. Error: {}",
-                        path.display(),
-                        e
-                    );
+                anyhow::bail!("{}: {}. {}", t("failed_parse_state"), path.display(), e);
             }
         };
 
@@ -84,7 +79,11 @@ impl MergeState {
         fs::write(&tmp_path, &content).context(t("failed_write_state").into_owned())?;
 
         // Atomic rename (on POSIX systems, this is atomic)
-        fs::rename(&tmp_path, &path).context(t("failed_write_state").into_owned())?;
+        fs::rename(&tmp_path, &path)
+            .context(t("failed_write_state").into_owned())
+            .inspect_err(|_e| {
+                let _ = fs::remove_file(&tmp_path);
+            })?;
 
         Ok(())
     }

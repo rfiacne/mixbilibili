@@ -259,13 +259,27 @@ fn record_failure(
 
 /// Validates that merge output file exists and has non-zero size
 fn validate_output(output_path: &Path) -> Result<()> {
-    if !output_path.exists() {
-        anyhow::bail!("Output file was not created: {}", output_path.display());
-    }
-    let metadata = std::fs::metadata(output_path)?;
+    let metadata = match std::fs::metadata(output_path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!(
+                "{}",
+                tf(
+                    "failed_create_output_file",
+                    &[&output_path.display().to_string()]
+                )
+            );
+        }
+        Err(e) => return Err(e.into()),
+    };
     if metadata.len() == 0 {
-        let _ = std::fs::remove_file(output_path);
-        anyhow::bail!("Output file is empty: {}", output_path.display());
+        if let Err(e) = std::fs::remove_file(output_path) {
+            eprintln!("Warning: Failed to remove empty output file: {}", e);
+        }
+        anyhow::bail!(
+            "{}",
+            tf("output_file_empty", &[&output_path.display().to_string()])
+        );
     }
     Ok(())
 }
@@ -376,41 +390,65 @@ fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Resul
 }
 
 pub(crate) fn delete_source_files(pair: &FilePair) -> Result<()> {
-    // Verify both files exist before deleting either
-    if !pair.video.exists() {
-        anyhow::bail!(
-            "Cannot delete source files: video '{}' is missing",
-            pair.video.display()
-        );
-    }
-
-    if !pair.audio.exists() {
-        anyhow::bail!(
-            "Cannot delete source files: audio '{}' is missing",
-            pair.audio.display()
-        );
-    }
-
     // Delete audio first (less valuable file)
-    if let Err(e) = std::fs::remove_file(&pair.audio) {
-        // Audio deletion failed, preserve video
-        anyhow::bail!(
-            "Failed to delete audio '{}': {}. Video preserved at '{}'",
-            pair.audio.display(),
-            e,
-            pair.video.display()
-        );
+    // Attempt deletion directly and interpret errors to avoid TOCTOU race
+    match std::fs::remove_file(&pair.audio) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!(
+                "{}",
+                tf(
+                    "source_missing",
+                    &["audio", &pair.audio.display().to_string()]
+                )
+            );
+        }
+        Err(e) => {
+            // Audio deletion failed, preserve video
+            anyhow::bail!(
+                "{}",
+                tf(
+                    "failed_delete_audio",
+                    &[
+                        &pair.audio.display().to_string(),
+                        &e.to_string(),
+                        &pair.video.display().to_string()
+                    ]
+                )
+            );
+        }
+        Ok(_) => {}
     }
 
     // Then delete video
-    if let Err(e) = std::fs::remove_file(&pair.video) {
-        // Video deletion failed, but audio already deleted
-        anyhow::bail!(
-            "Failed to delete video '{}': {}. Audio already deleted from '{}'",
-            pair.video.display(),
-            e,
-            pair.audio.display()
-        );
+    match std::fs::remove_file(&pair.video) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Audio already deleted, video missing
+            anyhow::bail!(
+                "{}",
+                tf(
+                    "failed_delete_video_audio_gone",
+                    &[
+                        &pair.video.display().to_string(),
+                        &pair.audio.display().to_string()
+                    ]
+                )
+            );
+        }
+        Err(e) => {
+            // Video deletion failed, but audio already deleted
+            anyhow::bail!(
+                "{}",
+                tf(
+                    "failed_delete_video",
+                    &[
+                        &pair.video.display().to_string(),
+                        &e.to_string(),
+                        &pair.audio.display().to_string()
+                    ]
+                )
+            );
+        }
+        Ok(_) => {}
     }
 
     Ok(())
@@ -582,7 +620,12 @@ mod tests {
         let result = delete_source_files(&pair);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("video"), "Error should mention video: {}", err);
+        // Check for i18n key or translated content mentioning video
+        assert!(
+            err.contains("failed_delete_video") || err.contains("video") || err.contains("视频"),
+            "Error should mention video: {}",
+            err
+        );
     }
 }
 
@@ -663,14 +706,20 @@ mod merge_tests {
         let missing_path = dir.path().join("missing.mkv");
         let result = validate_output(&missing_path);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not created"));
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("未创建") || err.contains("not created"),
+            "Error should mention file was not created: {}",
+            err
+        );
 
         // Test 2: Empty file
         let empty_path = dir.path().join("empty.mkv");
         File::create(&empty_path).unwrap();
         let result = validate_output(&empty_path);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("empty"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("empty") || err.contains("为空"));
         // Empty file should be cleaned up
         assert!(!empty_path.exists(), "Empty file should be cleaned up");
 
@@ -728,7 +777,12 @@ mod delete_tests {
         let result = delete_source_files(&pair);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("video"), "Error should mention video: {}", err);
+        // Check for i18n key or translated content mentioning video
+        assert!(
+            err.contains("failed_delete_video") || err.contains("video") || err.contains("视频"),
+            "Error should mention video: {}",
+            err
+        );
     }
 
     #[test]

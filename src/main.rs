@@ -355,10 +355,14 @@ fn run_once(args: &Args, format: cli::OutputFormat, stem: &str) -> Result<()> {
         Ok(())
     } else {
         // Clean up partial output file if merge failed
-        let output_path = args.output.join(format!("{}{}", stem, format.extension()));
+        let output_path = args.output.join(format!("{}.{}", stem, format.extension()));
         if output_path.exists() {
             if let Err(e) = std::fs::remove_file(&output_path) {
-                eprintln!("{} Failed to clean up partial output: {}", t("warning_prefix").yellow(), e);
+                eprintln!(
+                    "{} Failed to clean up partial output: {}",
+                    t("warning_prefix").yellow(),
+                    e
+                );
             }
         }
         Err(AppError::MergeFailed { count: 1 }.into())
@@ -769,7 +773,7 @@ mod integration_tests {
         if let Err(e) = result {
             let err = e.to_string();
             assert!(
-                !err.contains("invalid") || !err.contains("stem"),
+                !err.contains("invalid stem"),
                 "Valid stem should not be rejected: {}",
                 err
             );
