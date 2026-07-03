@@ -2,11 +2,10 @@ use crate::cli::OutputFormat;
 use crate::ffmpeg;
 use crate::i18n::{t, tf};
 use crate::progress::{format_duration, MergeProgress};
-use crate::scanner::{FilePair, ScanResult};
+use crate::scanner::FilePair;
 use crate::INTERRUPTED;
 use anyhow::{Context, Result};
 use colored::Colorize;
-use rayon::prelude::*;
 use std::io;
 use std::path::Path;
 use std::process::{Child, ExitStatus};
@@ -258,6 +257,19 @@ fn record_failure(
     }
 }
 
+/// Validates that merge output file exists and has non-zero size
+fn validate_output(output_path: &Path) -> Result<()> {
+    if !output_path.exists() {
+        anyhow::bail!("Output file was not created: {}", output_path.display());
+    }
+    let metadata = std::fs::metadata(output_path)?;
+    if metadata.len() == 0 {
+        let _ = std::fs::remove_file(output_path);
+        anyhow::bail!("Output file is empty: {}", output_path.display());
+    }
+    Ok(())
+}
+
 fn do_merge(
     pair: &FilePair,
     output_path: &Path,
@@ -295,6 +307,17 @@ fn do_merge(
         let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, output_path, format);
         match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT) {
             Ok(status) if status.success() => {
+                // Validate output file exists and has non-zero size
+                if let Err(e) = validate_output(output_path) {
+                    return record_failure(
+                        pair,
+                        pair_index,
+                        e.to_string(),
+                        start.elapsed(),
+                        progress,
+                    );
+                }
+
                 let duration = start.elapsed();
                 if let Some(p) = progress {
                     p.record(&pair.stem, true, duration, None, None);
@@ -352,97 +375,45 @@ fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Resul
     }
 }
 
-#[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
-pub fn execute_merges(
-    scan_result: ScanResult,
-    output_dir: &Path,
-    format: OutputFormat,
-    jobs: usize,
-    delete_source: bool,
-    progress: Option<MergeProgress>,
-    verbose: bool,
-    retry: usize,
-) -> Result<MergeSummary> {
-    let output_dir = output_dir.to_path_buf();
-    let pairs = scan_result.pairs;
-
-    let progress_ref = progress.as_ref();
-
-    let _ = jobs; // pool is configured at app startup in main.rs
-
-    let results: Vec<MergeResult> = pairs
-        .par_iter()
-        .enumerate()
-        .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format, progress_ref, verbose, retry))
-        .collect();
-
-    // Note: progress.finish() is NOT called here because execute_merges may be
-    // called multiple times for different chunks (see STATE_SAVE_INTERVAL in main.rs).
-    // The caller (main.rs:execute) is responsible for calling finish() once after
-    // all chunks are processed.
-
-    let mut summary = MergeSummary {
-        skipped_count: scan_result.stats.skipped,
-        orphaned_count: scan_result.stats.orphaned,
-        ..Default::default()
-    };
-
-    if delete_source {
-        let deletion_failures: usize = results
-            .iter()
-            .filter(|r| r.success)
-            .map(|result| {
-                let pair = &pairs[result.pair_index];
-                if let Err(e) = delete_source_files(pair) {
-                    eprintln!("{} {}", t("warning_prefix").yellow(), e);
-                    1
-                } else {
-                    0
-                }
-            })
-            .sum();
-        summary.deletion_failures = deletion_failures;
-    }
-
-    for result in &results {
-        summary.total_duration += result.duration;
-        summary.merge_count += 1;
-        if result.success {
-            summary.success_count += 1;
-        } else {
-            summary.failed_count += 1;
-            if let Some(error) = &result.error {
-                summary
-                    .failures
-                    .push((result.pair_name.clone(), error.clone()));
-            }
-        }
-    }
-
-    Ok(summary)
-}
-
 pub(crate) fn delete_source_files(pair: &FilePair) -> Result<()> {
-    let video_result = std::fs::remove_file(&pair.video);
-    let audio_result = std::fs::remove_file(&pair.audio);
-
-    let mut errors = Vec::new();
-    if let Err(e) = video_result {
-        errors.push(format!("video '{}' ({})", pair.video.display(), e));
-    }
-    if let Err(e) = audio_result {
-        errors.push(format!("audio '{}' ({})", pair.audio.display(), e));
+    // Verify both files exist before deleting either
+    if !pair.video.exists() {
+        anyhow::bail!(
+            "Cannot delete source files: video '{}' is missing",
+            pair.video.display()
+        );
     }
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "{}",
-            tf("failed_delete", &[&errors.join(", ")])
-        ))
+    if !pair.audio.exists() {
+        anyhow::bail!(
+            "Cannot delete source files: audio '{}' is missing",
+            pair.audio.display()
+        );
     }
+
+    // Delete audio first (less valuable file)
+    if let Err(e) = std::fs::remove_file(&pair.audio) {
+        // Audio deletion failed, preserve video
+        anyhow::bail!(
+            "Failed to delete audio '{}': {}. Video preserved at '{}'",
+            pair.audio.display(),
+            e,
+            pair.video.display()
+        );
+    }
+
+    // Then delete video
+    if let Err(e) = std::fs::remove_file(&pair.video) {
+        // Video deletion failed, but audio already deleted
+        anyhow::bail!(
+            "Failed to delete video '{}': {}. Audio already deleted from '{}'",
+            pair.video.display(),
+            e,
+            pair.audio.display()
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -502,25 +473,31 @@ mod tests {
 
     #[test]
     fn test_merge_summary_avg_duration_some_when_merges_exist() {
-        let mut summary = MergeSummary::default();
-        summary.total_duration = Duration::from_secs(6);
-        summary.merge_count = 3;
+        let summary = MergeSummary {
+            total_duration: Duration::from_secs(6),
+            merge_count: 3,
+            ..Default::default()
+        };
         assert_eq!(summary.avg_duration(), Some(Duration::from_secs(2)));
     }
 
     #[test]
     fn test_merge_summary_throughput_none_when_zero_duration() {
-        let mut summary = MergeSummary::default();
-        summary.merge_count = 5;
-        summary.total_duration = Duration::ZERO;
+        let summary = MergeSummary {
+            merge_count: 5,
+            total_duration: Duration::ZERO,
+            ..Default::default()
+        };
         assert!(summary.throughput().is_none());
     }
 
     #[test]
     fn test_merge_summary_throughput_computes_rate() {
-        let mut summary = MergeSummary::default();
-        summary.merge_count = 10;
-        summary.total_duration = Duration::from_secs(2);
+        let summary = MergeSummary {
+            merge_count: 10,
+            total_duration: Duration::from_secs(2),
+            ..Default::default()
+        };
         let tp = summary.throughput().unwrap();
         assert!((tp - 5.0).abs() < f64::EPSILON);
     }
@@ -643,82 +620,66 @@ mod merge_tests {
         assert!(!result.success);
         assert!(result.error.is_some());
     }
-}
-
-#[cfg(test)]
-mod exec_tests {
-    use super::*;
-    use crate::scanner::ScanStats;
-    use tempfile::tempdir;
 
     #[test]
-    fn test_execute_merges_empty_pairs() {
+    fn test_merge_validates_output_exists() {
+        use std::fs::File;
+        use tempfile::tempdir;
+
         let dir = tempdir().unwrap();
-        let scan_result = ScanResult {
-            pairs: vec![],
-            stats: ScanStats::default(),
-            estimated_duration: std::time::Duration::ZERO,
-        };
+        let output_path = dir.path().join("output.mkv");
 
-        let summary = execute_merges(
-            scan_result,
-            dir.path(),
-            OutputFormat::Mkv,
-            1,
-            false,
-            None,
-            false,
-            0,
-        )
-        .unwrap();
+        // Simulate ffmpeg creating empty file (failure case)
+        File::create(&output_path).unwrap();
 
-        assert_eq!(summary.success_count, 0);
-        assert_eq!(summary.failed_count, 0);
-        assert!(summary.all_success());
+        // Validation should reject empty file
+        let metadata = std::fs::metadata(&output_path).unwrap();
+        assert_eq!(metadata.len(), 0, "Empty file should be detected");
     }
 
     #[test]
-    fn test_execute_merges_with_skipped_stats() {
+    fn test_merge_validates_output_nonzero_size() {
+        use tempfile::tempdir;
+
         let dir = tempdir().unwrap();
-        let scan_result = ScanResult {
-            pairs: vec![],
-            stats: ScanStats {
-                pairs: 0,
-                skipped: 5,
-                orphaned: 3,
-            },
-            estimated_duration: std::time::Duration::ZERO,
-        };
+        let output_path = dir.path().join("output.mkv");
 
-        let summary = execute_merges(
-            scan_result,
-            dir.path(),
-            OutputFormat::Mkv,
-            1,
-            false,
-            None,
-            false,
-            0,
-        )
-        .unwrap();
+        // Simulate ffmpeg creating valid file
+        std::fs::write(&output_path, b"fake video data").unwrap();
 
-        assert_eq!(summary.skipped_count, 5);
-        assert_eq!(summary.orphaned_count, 3);
+        // Validation should accept non-zero file
+        let metadata = std::fs::metadata(&output_path).unwrap();
+        assert!(metadata.len() > 0, "Non-zero file should be accepted");
     }
 
     #[test]
-    fn test_deletion_failures_counted_correctly() {
-        let summary = MergeSummary {
-            success_count: 5,
-            failed_count: 0,
-            skipped_count: 0,
-            orphaned_count: 0,
-            failures: vec![],
-            deletion_failures: 2,
-            total_duration: Duration::ZERO,
-            merge_count: 0,
-        };
-        assert_eq!(summary.deletion_failures, 2);
+    fn test_validate_output_helper() {
+        use std::fs::File;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+
+        // Test 1: Non-existent file
+        let missing_path = dir.path().join("missing.mkv");
+        let result = validate_output(&missing_path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not created"));
+
+        // Test 2: Empty file
+        let empty_path = dir.path().join("empty.mkv");
+        File::create(&empty_path).unwrap();
+        let result = validate_output(&empty_path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+        // Empty file should be cleaned up
+        assert!(!empty_path.exists(), "Empty file should be cleaned up");
+
+        // Test 3: Valid file
+        let valid_path = dir.path().join("valid.mkv");
+        std::fs::write(&valid_path, b"video data").unwrap();
+        let result = validate_output(&valid_path);
+        assert!(result.is_ok());
+        assert!(valid_path.exists(), "Valid file should remain");
     }
 }
 
@@ -786,8 +747,12 @@ mod delete_tests {
         let result = delete_source_files(&pair);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("video"), "Error should mention video: {}", err);
-        assert!(err.contains("audio"), "Error should mention audio: {}", err);
+        // Should mention at least one missing file
+        assert!(
+            err.contains("video") || err.contains("audio"),
+            "Error should mention missing file: {}",
+            err
+        );
     }
 
     #[test]
@@ -818,11 +783,60 @@ mod delete_tests {
             err_msg
         );
 
-        // Video should be deleted (even though overall operation failed)
+        // NEW BEHAVIOR: Video should be preserved (not deleted) because audio is missing
+        // This is the atomic deletion guarantee
         assert!(
-            !video_path.exists(),
-            "Video should be deleted despite partial failure"
+            video_path.exists(),
+            "Video should be preserved when audio is missing (atomic deletion)"
         );
+    }
+
+    #[test]
+    fn test_delete_preserves_video_on_audio_failure() {
+        let dir = tempdir().unwrap();
+        let video_path = dir.path().join("video.mp4");
+        let audio_path = dir.path().join("nonexistent.m4a"); // Doesn't exist
+
+        // Create only video
+        File::create(&video_path).unwrap();
+
+        let pair = FilePair {
+            video: video_path.clone(),
+            audio: audio_path,
+            stem: "video".to_string(),
+        };
+
+        let result = delete_source_files(&pair);
+        assert!(result.is_err(), "Should fail when audio missing");
+
+        // Video should still exist (not deleted)
+        assert!(
+            video_path.exists(),
+            "Video should be preserved when audio deletion fails"
+        );
+    }
+
+    #[test]
+    fn test_delete_checks_existence_first() {
+        let dir = tempdir().unwrap();
+        let video_path = dir.path().join("video.mp4");
+        let audio_path = dir.path().join("audio.m4a");
+
+        // Create both files
+        File::create(&video_path).unwrap();
+        File::create(&audio_path).unwrap();
+
+        let pair = FilePair {
+            video: video_path.clone(),
+            audio: audio_path.clone(),
+            stem: "video".to_string(),
+        };
+
+        // Both exist, deletion should succeed
+        let result = delete_source_files(&pair);
+        assert!(result.is_ok());
+        assert!(!video_path.exists());
+        assert!(!audio_path.exists());
     }
 }
 

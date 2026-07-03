@@ -46,6 +46,13 @@ fn collect_files(
         let entry = entry.context(t("failed_read_entry").into_owned())?;
         let path = entry.path();
 
+        // Check if this is a symlink BEFORE following it
+        // Use file_type() which does NOT follow symlinks (unlike metadata())
+        if entry.file_type()?.is_symlink() {
+            // Skip symlinks to prevent infinite loops and security issues
+            continue;
+        }
+
         if path.is_dir() {
             if recursive {
                 collect_files(&path, mp4_files, m4a_files, aria2_files, true)?;
@@ -471,5 +478,57 @@ mod scan_tests {
         let result = scan_directory(path, false).unwrap();
         // 10 MB / 10 MB/s = 1s, 20 MB / 10 MB/s = 2s, total = 3s
         assert_eq!(result.estimated_duration.as_secs(), 3);
+    }
+
+    #[test]
+    fn test_scan_symlink_loop_does_not_infinite_loop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        // Create a valid pair
+        File::create(path.join("video.mp4")).unwrap();
+        File::create(path.join("video.m4a")).unwrap();
+
+        // Create symlink pointing to parent directory (circular)
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(path, path.join("loop_link")).unwrap();
+
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(path, path.join("loop_link")).unwrap();
+
+        // Should complete without hanging or stack overflow
+        let result = scan_directory(path, true);
+        assert!(result.is_ok());
+
+        // Should find the valid pair
+        assert_eq!(result.unwrap().pairs.len(), 1);
+    }
+
+    #[test]
+    fn test_scan_skips_symlinks_to_external_dirs() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        // Create external directory with files
+        let external = tempdir().unwrap();
+        File::create(external.path().join("external.mp4")).unwrap();
+        File::create(external.path().join("external.m4a")).unwrap();
+
+        // Create symlink to external directory
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), path.join("external_link")).unwrap();
+
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(external.path(), path.join("external_link")).unwrap();
+
+        // Create valid pair in main directory
+        File::create(path.join("video.mp4")).unwrap();
+        File::create(path.join("video.m4a")).unwrap();
+
+        let result = scan_directory(path, true).unwrap();
+
+        // Should only find the local pair, not external files
+        assert_eq!(result.pairs.len(), 1);
+        assert_eq!(result.pairs[0].stem, "video");
     }
 }

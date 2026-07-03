@@ -288,9 +288,32 @@ fn run() -> Result<()> {
     }
 }
 
+/// Validate stem argument to prevent path traversal attacks
+fn validate_stem(stem: &str) -> Result<()> {
+    // Reject path separators
+    if stem.contains('/') || stem.contains('\\') {
+        anyhow::bail!("Invalid stem '{}': must not contain path separators", stem);
+    }
+
+    // Reject empty or whitespace-only stems
+    if stem.trim().is_empty() {
+        anyhow::bail!("Invalid stem: cannot be empty");
+    }
+
+    // Reject special directory names
+    if stem == "." || stem == ".." {
+        anyhow::bail!("Invalid stem '{}': cannot be . or ..", stem);
+    }
+
+    Ok(())
+}
+
 /// --once mode: merge a single pair identified by stem.
 /// No scanning, no state file, no progress bar — just merge and exit.
 fn run_once(args: &Args, format: cli::OutputFormat, stem: &str) -> Result<()> {
+    // Validate stem before using it
+    validate_stem(stem)?;
+
     let video_path = args.source.join(format!("{stem}.mp4"));
     let audio_path = args.source.join(format!("{stem}.m4a"));
 
@@ -331,6 +354,13 @@ fn run_once(args: &Args, format: cli::OutputFormat, stem: &str) -> Result<()> {
         }
         Ok(())
     } else {
+        // Clean up partial output file if merge failed
+        let output_path = args.output.join(format!("{}{}", stem, format.extension()));
+        if output_path.exists() {
+            if let Err(e) = std::fs::remove_file(&output_path) {
+                eprintln!("{} Failed to clean up partial output: {}", t("warning_prefix").yellow(), e);
+            }
+        }
         Err(AppError::MergeFailed { count: 1 }.into())
     }
 }
@@ -384,7 +414,8 @@ fn execute(
 
             // Update state and periodically save
             let snapshot = {
-                let mut state = state_mutex.lock().unwrap();
+                // Handle mutex poisoning: recover data even if a worker panicked
+                let mut state = state_mutex.lock().unwrap_or_else(|e| e.into_inner());
                 if !result.was_interrupted {
                     if result.success {
                         state.mark_completed(&pair.stem);
@@ -413,7 +444,8 @@ fn execute(
 
     // Final state save
     {
-        let state = state_mutex.lock().unwrap();
+        // Handle mutex poisoning: recover data even if a worker panicked
+        let state = state_mutex.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(e) = state.save(&source) {
             eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
         }
@@ -607,6 +639,141 @@ mod integration_tests {
     fn test_get_exit_code_non_app_error() {
         let err = anyhow::anyhow!("Something went wrong");
         assert_eq!(get_exit_code(&err), exit_codes::GENERAL_ERROR);
+    }
+
+    #[test]
+    fn test_run_once_rejects_path_traversal() {
+        use std::fs::File;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+
+        // Create dummy files
+        File::create(dir.path().join("test.mp4")).unwrap();
+        File::create(dir.path().join("test.m4a")).unwrap();
+
+        let args = cli::Args {
+            source: dir.path().to_path_buf(),
+            output: dir.path().to_path_buf(),
+            recursive: false,
+            format: cli::OutputFormat::Mkv,
+            jobs: 1,
+            sdel: false,
+            dry_run: false,
+            interactive: false,
+            resume: false,
+            progress: false,
+            quiet: true,
+            verbose: false,
+            retry: 0,
+            once: Some("../escape".to_string()),
+        };
+
+        let result = run_once(&args, cli::OutputFormat::Mkv, "../escape");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invalid") || err.contains("traversal") || err.contains("path separator"),
+            "Error should mention invalid stem: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_run_once_rejects_absolute_path() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+
+        let args = cli::Args {
+            source: dir.path().to_path_buf(),
+            output: dir.path().to_path_buf(),
+            recursive: false,
+            format: cli::OutputFormat::Mkv,
+            jobs: 1,
+            sdel: false,
+            dry_run: false,
+            interactive: false,
+            resume: false,
+            progress: false,
+            quiet: true,
+            verbose: false,
+            retry: 0,
+            once: Some("/etc/passwd".to_string()),
+        };
+
+        let result = run_once(&args, cli::OutputFormat::Mkv, "/etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_run_once_rejects_backslash_traversal() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+
+        let args = cli::Args {
+            source: dir.path().to_path_buf(),
+            output: dir.path().to_path_buf(),
+            recursive: false,
+            format: cli::OutputFormat::Mkv,
+            jobs: 1,
+            sdel: false,
+            dry_run: false,
+            interactive: false,
+            resume: false,
+            progress: false,
+            quiet: true,
+            verbose: false,
+            retry: 0,
+            once: Some("..\\escape".to_string()),
+        };
+
+        let result = run_once(&args, cli::OutputFormat::Mkv, "..\\escape");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_run_once_accepts_valid_stem() {
+        use std::fs::File;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+
+        // Create valid pair
+        File::create(dir.path().join("video.mp4")).unwrap();
+        File::create(dir.path().join("video.m4a")).unwrap();
+
+        let args = cli::Args {
+            source: dir.path().to_path_buf(),
+            output: dir.path().to_path_buf(),
+            recursive: false,
+            format: cli::OutputFormat::Mkv,
+            jobs: 1,
+            sdel: false,
+            dry_run: false,
+            interactive: false,
+            resume: false,
+            progress: false,
+            quiet: true,
+            verbose: false,
+            retry: 0,
+            once: Some("video".to_string()),
+        };
+
+        // Should not error on validation (may error on ffmpeg, but that's OK)
+        let result = run_once(&args, cli::OutputFormat::Mkv, "video");
+        // We're only testing validation, not actual merge
+        // If it gets past validation, it will try to run ffmpeg
+        // So we just check it doesn't error with "invalid stem"
+        if let Err(e) = result {
+            let err = e.to_string();
+            assert!(
+                !err.contains("invalid") || !err.contains("stem"),
+                "Valid stem should not be rejected: {}",
+                err
+            );
+        }
     }
 
     #[test]

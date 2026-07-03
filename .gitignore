@@ -4,3 +4,7 @@
 *.pdb
 .DS_Store
 .worktrees/
+# Local Pi runtime state
+.atl/
+# CocoIndex Code (ccc)
+/.cocoindex_code/
