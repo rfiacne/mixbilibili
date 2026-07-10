@@ -83,8 +83,6 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "dry_run_marker"), "[dry-run]"),
     ((Lang::Cn, "dry_run_time_estimate"), "预计时间：{0}"),
     ((Lang::En, "dry_run_time_estimate"), "Estimated time: {0}"),
-    ((Lang::Cn, "starting_merges"), "开始合并 {0} 个文件（预计时间：{1}）"),
-    ((Lang::En, "starting_merges"), "Starting {0} merges (estimated time: {1})"),
     ((Lang::Cn, "cli_interactive"), "交互式模式：显示预览并等待确认"),
     ((Lang::En, "cli_interactive"), "Interactive mode: show preview and wait for confirmation"),
     ((Lang::Cn, "interactive_preview_header"), "预览合并操作："),
@@ -144,8 +142,6 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     // ffmpeg install
     ((Lang::Cn, "installing_ffmpeg"), "未找到 ffmpeg。是否安装？[Y/n]"),
     ((Lang::En, "installing_ffmpeg"), "ffmpeg not found. Install it? [Y/n]"),
-    ((Lang::Cn, "installing"), "正在安装 ffmpeg..."),
-    ((Lang::En, "installing"), "Installing ffmpeg..."),
     ((Lang::Cn, "install_success"), "ffmpeg 安装成功！"),
     ((Lang::En, "install_success"), "ffmpeg installed successfully!"),
     ((Lang::Cn, "install_failed_notfound"), "安装完成但 PATH 中未找到 ffmpeg。可能需要重启终端。"),
@@ -427,17 +423,5 @@ mod tests {
     fn test_dry_run_time_estimate_cn() {
         let result = t_for(Lang::Cn, "dry_run_time_estimate");
         assert_eq!(result.as_ref(), "预计时间：{0}");
-    }
-
-    #[test]
-    fn test_starting_merges_en() {
-        let result = t_for(Lang::En, "starting_merges");
-        assert_eq!(result.as_ref(), "Starting {0} merges (estimated time: {1})");
-    }
-
-    #[test]
-    fn test_starting_merges_cn() {
-        let result = t_for(Lang::Cn, "starting_merges");
-        assert_eq!(result.as_ref(), "开始合并 {0} 个文件（预计时间：{1}）");
     }
 }

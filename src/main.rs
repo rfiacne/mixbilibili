@@ -295,6 +295,11 @@ fn validate_stem(stem: &str) -> Result<()> {
         anyhow::bail!("Invalid stem '{}': must not contain path separators", stem);
     }
 
+    // Reject null bytes (path injection)
+    if stem.contains('\0') {
+        anyhow::bail!("Invalid stem: must not contain null bytes");
+    }
+
     // Reject empty or whitespace-only stems
     if stem.trim().is_empty() {
         anyhow::bail!("Invalid stem: cannot be empty");
@@ -478,17 +483,9 @@ fn execute(
                         );
                     }
                 }
-                // Also clean up source audio file when --sdel is active
-                if args.sdel && pair.audio.exists() {
-                    if let Err(e) = std::fs::remove_file(&pair.audio) {
-                        eprintln!("{} {}", t("warning_prefix").yellow(), e);
-                    } else if args.verbose {
-                        eprintln!(
-                            "{}",
-                            tf("cleanup_partial", &[&pair.audio.display().to_string()]).yellow()
-                        );
-                    }
-                }
+                // NOTE: Do NOT delete source files on interrupt.
+                // ffmpeg -c copy doesn't consume source files, so they remain valid.
+                // Deleting them would cause data loss. Keep them for --resume.
             }
         }
     }
@@ -735,6 +732,39 @@ mod integration_tests {
 
         let result = run_once(&args, cli::OutputFormat::Mkv, "..\\escape");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_run_once_rejects_null_byte() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+
+        let args = cli::Args {
+            source: dir.path().to_path_buf(),
+            output: dir.path().to_path_buf(),
+            recursive: false,
+            format: cli::OutputFormat::Mkv,
+            jobs: 1,
+            sdel: false,
+            dry_run: false,
+            interactive: false,
+            resume: false,
+            progress: false,
+            quiet: true,
+            verbose: false,
+            retry: 0,
+            once: Some("evil\0path".to_string()),
+        };
+
+        let result = run_once(&args, cli::OutputFormat::Mkv, "evil\0path");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("null") || err.contains("Invalid"),
+            "Error should mention null byte or invalid: {}",
+            err
+        );
     }
 
     #[test]

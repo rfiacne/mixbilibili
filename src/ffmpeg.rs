@@ -16,7 +16,7 @@ pub fn ffmpeg_path() -> Option<std::path::PathBuf> {
 // Os variants are matched in get_install_command/get_manual_instructions
 // but only one variant is constructed at compile time via detect_os()
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Cross-platform: only one variant constructed per target
 pub enum Os {
     Windows,
     MacOS,
@@ -86,7 +86,7 @@ fn package_managers(os: Os) -> Vec<(&'static str, &'static str)> {
     }
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // Used in tests only, but kept as public utility
 pub fn get_install_command(os: Os) -> Option<(String, String)> {
     package_managers(os)
         .first()

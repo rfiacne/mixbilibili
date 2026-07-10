@@ -290,3 +290,144 @@ fn test_recursive_not_default() {
         stdout
     );
 }
+
+#[test]
+fn test_once_mode_merge() {
+    if !ffmpeg_available() {
+        eprintln!("Skipping: ffmpeg not available");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("output");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&output).unwrap();
+
+    create_test_media(&source, "once_video");
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--sdel",
+            "false",
+            "--once",
+            "once_video",
+        ])
+        .output()
+        .expect("Failed to execute binary");
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "Command failed: {}", stderr);
+
+    let output_file = output.join("once_video.mkv");
+    assert!(
+        output_file.exists(),
+        "Output file should exist: {:?}",
+        output_file
+    );
+
+    // Verify output is non-empty
+    let metadata = fs::metadata(&output_file).unwrap();
+    assert!(metadata.len() > 0, "Output file should not be empty");
+
+    // Source files should be kept (--sdel false)
+    assert!(
+        source.join("once_video.mp4").exists(),
+        "Source video should be kept"
+    );
+    assert!(
+        source.join("once_video.m4a").exists(),
+        "Source audio should be kept"
+    );
+}
+
+#[test]
+fn test_resume_after_partial() {
+    if !ffmpeg_available() {
+        eprintln!("Skipping: ffmpeg not available");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("output");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&output).unwrap();
+
+    // Create two pairs
+    create_test_media(&source, "video1");
+    create_test_media(&source, "video2");
+
+    // First run: merge both
+    let result1 = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--sdel",
+            "false",
+        ])
+        .output()
+        .expect("Failed to execute first run");
+
+    assert!(result1.status.success());
+    assert!(output.join("video1.mkv").exists());
+    assert!(output.join("video2.mkv").exists());
+
+    // Delete output files to simulate partial state
+    fs::remove_file(output.join("video1.mkv")).unwrap();
+    fs::remove_file(output.join("video2.mkv")).unwrap();
+
+    // Create a state file marking video1 as completed
+    let state_content = format!(
+        r#"{{
+  "source_dir": "{}",
+  "output_dir": "{}",
+  "completed": ["video1"],
+  "failed": [],
+  "pending": []
+}}"#,
+        source.display(),
+        output.display()
+    );
+    fs::write(source.join(".mixbilibili_state.json"), state_content).unwrap();
+
+    // Second run with --resume: should only merge video2
+    let result2 = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--sdel",
+            "false",
+            "--resume",
+        ])
+        .output()
+        .expect("Failed to execute resume run");
+
+    assert!(result2.status.success());
+
+    // video1 should NOT be recreated (marked as completed)
+    assert!(
+        !output.join("video1.mkv").exists(),
+        "video1 should not be re-merged"
+    );
+
+    // video2 should be merged
+    assert!(
+        output.join("video2.mkv").exists(),
+        "video2 should be merged on resume"
+    );
+
+    // State file should be cleared after successful completion
+    assert!(
+        !source.join(".mixbilibili_state.json").exists(),
+        "State file should be cleared after success"
+    );
+}

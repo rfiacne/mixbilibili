@@ -25,7 +25,6 @@ pub struct ScanStats {
 pub struct ScanResult {
     pub pairs: Vec<FilePair>,
     pub stats: ScanStats,
-    #[allow(dead_code)]
     pub estimated_duration: Duration,
 }
 
