@@ -299,18 +299,28 @@ fn run() -> Result<()> {
 
     // Phase 2.5: Interactive preview + confirmation
     if args.interactive {
+        use crate::ui::Colors;
+
         print_preview_pairs(&ctx, &format, &t("interactive_preview_header"));
         if args.sdel {
-            println!("{}", t("dry_run_sdel_header").yellow().bold());
+            println!("{}", Colors::warning(&t("dry_run_sdel_header")));
         }
         println!();
-        print!("{} ", t("interactive_confirm").bold());
+
+        let prompt = format!(
+            "{} {} \u{203a} ({}/{})",
+            Colors::info("?"),
+            t("prompt_continue"),
+            Colors::success(&t("prompt_default_yes")),
+            Colors::secondary(&t("prompt_default_no")),
+        );
+        print!("{} ", prompt);
         std::io::Write::flush(&mut std::io::stdout())?;
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         let response = input.trim().to_lowercase();
         if response != "y" && response != "yes" {
-            println!("{}", t("interactive_cancelled").yellow());
+            println!("{}", Colors::warning(&t("interactive_cancelled")));
             state::MergeState::clear(&args.source)?;
             return Ok(());
         }
