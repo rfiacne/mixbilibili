@@ -27,10 +27,7 @@ pub fn supports_unicode() -> bool {
 pub struct Symbols {
     pub success: &'static str,
     pub failure: &'static str,
-    pub skipped: &'static str,
     pub retry: &'static str,
-    pub info: &'static str,
-    pub warning: &'static str,
     pub horizontal_line: &'static str,
     pub vertical_line: &'static str,
     pub top_left: &'static str,
@@ -46,10 +43,7 @@ impl Symbols {
             Self {
                 success: "✓",
                 failure: "✗",
-                skipped: "⊘",
                 retry: "↻",
-                info: "ℹ",
-                warning: "⚠",
                 horizontal_line: "─",
                 vertical_line: "│",
                 top_left: "┌",
@@ -62,10 +56,7 @@ impl Symbols {
             Self {
                 success: "[OK]",
                 failure: "[FAIL]",
-                skipped: "[SKIP]",
                 retry: "[RETRY]",
-                info: "[INFO]",
-                warning: "[WARN]",
                 horizontal_line: "-",
                 vertical_line: "|",
                 top_left: "+",
