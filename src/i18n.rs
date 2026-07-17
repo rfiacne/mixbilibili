@@ -275,6 +275,8 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "cli_recursive"), "Scan subdirectories recursively"),
     ((Lang::Cn, "cli_once"), "仅合并指定 stem 的文件对（跳过扫描）"),
     ((Lang::En, "cli_once"), "Merge only the specified stem (skip scanning)"),
+    ((Lang::Cn, "cli_ascii"), "强制使用 ASCII 符号（禁用 Unicode 字符）"),
+    ((Lang::En, "cli_ascii"), "Force ASCII mode (disable Unicode characters)"),
     ((Lang::Cn, "once_missing_video"), "未找到视频文件：{0}"),
     ((Lang::En, "once_missing_video"), "Video file not found: {0}"),
     ((Lang::Cn, "once_missing_audio"), "未找到音频文件：{0}"),

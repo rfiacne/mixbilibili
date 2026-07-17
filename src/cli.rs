@@ -114,6 +114,7 @@ pub struct Args {
     pub retry: usize,
     pub recursive: bool,
     pub once: Option<String>,
+    pub ascii: bool,
 }
 
 fn default_jobs() -> usize {
@@ -231,6 +232,12 @@ pub fn build_cli() -> Command {
                 .help(t("cli_once"))
                 .value_name("STEM"),
         )
+        .arg(
+            Arg::new("ascii")
+                .long("ascii")
+                .help(t("cli_ascii"))
+                .action(ArgAction::SetTrue),
+        )
 }
 
 /// Parse ArgMatches into Args struct.
@@ -278,6 +285,7 @@ pub fn parse_args(matches: &clap::ArgMatches) -> Args {
         retry,
         recursive: matches.get_flag("recursive"),
         once: matches.get_one::<String>("once").map(|s| s.to_string()),
+        ascii: matches.get_flag("ascii"),
     }
 }
 
@@ -324,6 +332,7 @@ fn make_args() -> Args {
         retry: 0,
         recursive: false,
         once: None,
+        ascii: false,
     }
 }
 

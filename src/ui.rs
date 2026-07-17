@@ -4,6 +4,10 @@ use colored::Colorize;
 /// Detect whether the terminal supports Unicode output.
 #[allow(dead_code)]
 pub fn supports_unicode() -> bool {
+    // Check force-ASCII override
+    if std::env::var("MIXBILIBILI_ASCII").is_ok() {
+        return false;
+    }
     if let Ok(lang) = std::env::var("LANG") {
         if lang.contains("UTF-8") || lang.contains("utf-8") {
             return true;

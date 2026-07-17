@@ -285,6 +285,11 @@ fn run() -> Result<()> {
     // Phase 1: Initialize
     let (args, format) = init()?;
 
+    // Set ASCII mode environment variable if --ascii flag is present
+    if args.ascii {
+        std::env::set_var("MIXBILIBILI_ASCII", "1");
+    }
+
     // --once mode: merge a single pair by stem, skip scanning
     if let Some(ref stem) = args.once {
         return run_once(&args, format, stem);
@@ -751,6 +756,7 @@ mod integration_tests {
             verbose: false,
             retry: 0,
             once: Some("../escape".to_string()),
+            ascii: false,
         };
 
         let result = run_once(&args, cli::OutputFormat::Mkv, "../escape");
@@ -784,6 +790,7 @@ mod integration_tests {
             verbose: false,
             retry: 0,
             once: Some("/etc/passwd".to_string()),
+            ascii: false,
         };
 
         let result = run_once(&args, cli::OutputFormat::Mkv, "/etc/passwd");
@@ -811,6 +818,7 @@ mod integration_tests {
             verbose: false,
             retry: 0,
             once: Some("..\\escape".to_string()),
+            ascii: false,
         };
 
         let result = run_once(&args, cli::OutputFormat::Mkv, "..\\escape");
@@ -838,6 +846,7 @@ mod integration_tests {
             verbose: false,
             retry: 0,
             once: Some("evil\0path".to_string()),
+            ascii: false,
         };
 
         let result = run_once(&args, cli::OutputFormat::Mkv, "evil\0path");
@@ -876,6 +885,7 @@ mod integration_tests {
             verbose: false,
             retry: 0,
             once: Some("video".to_string()),
+            ascii: false,
         };
 
         // Should not error on validation (may error on ffmpeg, but that's OK)
@@ -927,6 +937,7 @@ mod integration_tests {
             verbose: false,
             retry: 0,
             once: None,
+            ascii: false,
         };
 
         // video3 remains pending (never processed, e.g. interrupted)
