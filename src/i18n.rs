@@ -279,6 +279,32 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "once_missing_video"), "Video file not found: {0}"),
     ((Lang::Cn, "once_missing_audio"), "未找到音频文件：{0}"),
     ((Lang::En, "once_missing_audio"), "Audio file not found: {0}"),
+    // UI 组件 - 报告头部
+    ((Lang::Cn, "report_border_top"), "┌"),
+    ((Lang::En, "report_border_top"), "┌"),
+    ((Lang::Cn, "report_border_bottom"), "└"),
+    ((Lang::En, "report_border_bottom"), "└"),
+    ((Lang::Cn, "report_border_middle"), "├"),
+    ((Lang::En, "report_border_middle"), "├"),
+    ((Lang::Cn, "report_border_vertical"), "│"),
+    ((Lang::En, "report_border_vertical"), "│"),
+    // UI 组件 - 预览列表
+    ((Lang::Cn, "preview_list_title"), "预览列表 ({} 项)"),
+    ((Lang::En, "preview_list_title"), "Preview ({} items)"),
+    ((Lang::Cn, "preview_item_prefix"), "{}."),
+    ((Lang::En, "preview_item_prefix"), "{}."),
+    // UI 组件 - 交互确认
+    ((Lang::Cn, "prompt_continue"), "继续吗？"),
+    ((Lang::En, "prompt_continue"), "Continue?"),
+    ((Lang::Cn, "prompt_default_yes"), "Y"),
+    ((Lang::En, "prompt_default_yes"), "Y"),
+    ((Lang::Cn, "prompt_default_no"), "n"),
+    ((Lang::En, "prompt_default_no"), "n"),
+    // UI 组件 - 错误消息
+    ((Lang::Cn, "error_context_file"), "文件"),
+    ((Lang::En, "error_context_file"), "File"),
+    ((Lang::Cn, "error_context_reason"), "原因"),
+    ((Lang::En, "error_context_reason"), "Reason"),
 ];
 
 static TRANSLATION_MAP: OnceLock<HashMap<TranslationKey, &'static str>> = OnceLock::new();
@@ -423,5 +449,21 @@ mod tests {
     fn test_dry_run_time_estimate_cn() {
         let result = t_for(Lang::Cn, "dry_run_time_estimate");
         assert_eq!(result.as_ref(), "预计时间：{0}");
+    }
+
+    #[test]
+    fn test_new_ui_keys_exist_cn() {
+        assert_eq!(t_for(Lang::Cn, "report_border_top").as_ref(), "┌");
+        assert_eq!(t_for(Lang::Cn, "report_border_bottom").as_ref(), "└");
+        assert_eq!(t_for(Lang::Cn, "preview_list_title").as_ref(), "预览列表 ({} 项)");
+        assert_eq!(t_for(Lang::Cn, "prompt_continue").as_ref(), "继续吗？");
+    }
+
+    #[test]
+    fn test_new_ui_keys_exist_en() {
+        assert_eq!(t_for(Lang::En, "report_border_top").as_ref(), "┌");
+        assert_eq!(t_for(Lang::En, "report_border_bottom").as_ref(), "└");
+        assert_eq!(t_for(Lang::En, "preview_list_title").as_ref(), "Preview ({} items)");
+        assert_eq!(t_for(Lang::En, "prompt_continue").as_ref(), "Continue?");
     }
 }
