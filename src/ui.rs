@@ -142,4 +142,11 @@ mod tests {
         assert_eq!(symbols.failure, "✗");
         assert_eq!(symbols.horizontal_line, "─");
     }
+
+    #[test]
+    fn test_supports_unicode_with_force_ascii() {
+        std::env::set_var("MIXBILIBILI_ASCII", "1");
+        assert!(!supports_unicode());
+        std::env::remove_var("MIXBILIBILI_ASCII");
+    }
 }

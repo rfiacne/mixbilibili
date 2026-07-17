@@ -487,6 +487,22 @@ mod args_tests {
         let args = parse_args(&matches);
         assert!(args.progress);
     }
+
+    #[test]
+    fn test_ascii_flag_default() {
+        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
+        let args = parse_args(&matches);
+        assert!(!args.ascii);
+    }
+
+    #[test]
+    fn test_ascii_flag_enabled() {
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "--ascii"])
+            .unwrap();
+        let args = parse_args(&matches);
+        assert!(args.ascii);
+    }
 }
 
 #[cfg(test)]
