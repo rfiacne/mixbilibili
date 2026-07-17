@@ -1,6 +1,7 @@
 mod cli;
 mod ffmpeg;
 mod i18n;
+mod ui;
 use crate::i18n::{t, tf};
 mod merger;
 mod progress;
@@ -528,19 +529,16 @@ fn execute(
     Ok(final_summary)
 }
 
-/// Finalize: update state based on results, clear on full success or save otherwise.
+/// Finalize: clear state on full success, save otherwise.
+/// Note: execute() already marks completed/failed items in the state via the mutex,
+/// so we only need to decide whether to clear or persist the state file.
 fn finalize(
     args: &Args,
-    mut merge_state: state::MergeState,
+    merge_state: state::MergeState,
     summary: &merger::MergeSummary,
 ) -> Result<()> {
     if args.dry_run {
         return Ok(());
-    }
-
-    // Mark all failures (interrupted items are already excluded from summary.failures)
-    for (name, _error) in &summary.failures {
-        merge_state.mark_failed(name);
     }
 
     if summary.all_success() {
