@@ -88,7 +88,6 @@ impl Colors {
         text.green().to_string()
     }
 
-    #[allow(dead_code)]
     pub fn failure(text: &str) -> String {
         text.red().to_string()
     }

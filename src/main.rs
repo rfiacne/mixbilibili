@@ -265,8 +265,12 @@ fn print_preview_pairs(ctx: &ScanContext, format: &cli::OutputFormat, header: &s
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
+    use crate::ui::{Colors, Symbols};
+
     if let Err(e) = run() {
-        eprintln!("{} {}", t("error_prefix").red(), translate_error(&e));
+        let symbols = Symbols::new(crate::ui::supports_unicode());
+        let error_prefix = Colors::failure(&format!("{} {}", symbols.failure, t("error_prefix")));
+        eprintln!("{} {}", error_prefix, translate_error(&e));
         std::process::exit(get_exit_code(&e));
     }
 }
