@@ -146,7 +146,7 @@ fn run_install(pms: &[(&str, &str)]) -> bool {
                 println!("{}", t("ffmpeg_installed"));
                 return true;
             }
-            println!("{} {}", t("ffmpeg_not_found_path"), t("restart_terminal"));
+            println!("{}", t("ffmpeg_not_found_path"));
         }
         Ok(status) => {
             println!(
