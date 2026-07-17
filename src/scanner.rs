@@ -96,13 +96,13 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
 
     let mut pairs = Vec::new();
     let mut stats = ScanStats::default();
-    let mut processed_stems: HashSet<String> = HashSet::new();
 
-    for stem in mp4_files.keys().chain(m4a_files.keys()) {
-        if !processed_stems.insert(stem.clone()) {
-            continue;
-        }
+    // Collect and sort stems for deterministic output order
+    let mut all_stems: Vec<&String> = mp4_files.keys().chain(m4a_files.keys()).collect();
+    all_stems.sort();
+    all_stems.dedup();
 
+    for stem in all_stems {
         if is_downloading(stem, &aria2_files) {
             stats.skipped += 1;
             continue;
@@ -529,5 +529,36 @@ mod scan_tests {
         // Should only find the local pair, not external files
         assert_eq!(result.pairs.len(), 1);
         assert_eq!(result.pairs[0].stem, "video");
+    }
+
+    #[test]
+    fn test_scan_pairs_correct_matching() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        File::create(path.join("video1.mp4")).unwrap();
+        File::create(path.join("video1.m4a")).unwrap();
+        File::create(path.join("video2.mp4")).unwrap();
+        File::create(path.join("video2.m4a")).unwrap();
+
+        let result = scan_directory(path, false).unwrap();
+
+        // Verify each video is paired with the correct audio by stem
+        for pair in &result.pairs {
+            let video_stem = pair.video.file_stem().unwrap().to_str().unwrap();
+            let audio_stem = pair.audio.file_stem().unwrap().to_str().unwrap();
+            assert_eq!(
+                video_stem, audio_stem,
+                "Video and audio stems must match: video={}, audio={}",
+                pair.video.display(),
+                pair.audio.display()
+            );
+            assert_eq!(
+                video_stem, pair.stem,
+                "Pair stem must match video stem: pair.stem={}, video={}",
+                pair.stem,
+                pair.video.display()
+            );
+        }
     }
 }

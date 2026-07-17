@@ -103,6 +103,7 @@ impl MergeState {
     }
 
     pub fn add_pending(&mut self, stem: &str) {
+        // Guard pending.contains to avoid allocation when stem already exists
         if !self.pending.contains(stem)
             && !self.completed.contains(stem)
             && !self.failed.contains(stem)
