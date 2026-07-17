@@ -1,8 +1,6 @@
-#![allow(dead_code)]
 use colored::Colorize;
 
 /// Detect whether the terminal supports Unicode output.
-#[allow(dead_code)]
 pub fn supports_unicode() -> bool {
     // Check force-ASCII override
     if std::env::var("MIXBILIBILI_ASCII").is_ok() {
@@ -26,7 +24,6 @@ pub fn supports_unicode() -> bool {
 }
 
 /// Unicode/ASCII symbol mapping for terminal output.
-#[allow(dead_code)]
 pub struct Symbols {
     pub success: &'static str,
     pub failure: &'static str,
@@ -44,7 +41,6 @@ pub struct Symbols {
 }
 
 impl Symbols {
-    #[allow(dead_code)]
     pub fn new(unicode: bool) -> Self {
         if unicode {
             Self {
@@ -83,11 +79,9 @@ impl Symbols {
 }
 
 /// Semantic color mapping for terminal output.
-#[allow(dead_code)]
 pub enum Colors {}
 
 impl Colors {
-    #[allow(dead_code)]
     pub fn success(text: &str) -> String {
         text.green().to_string()
     }
@@ -96,22 +90,18 @@ impl Colors {
         text.red().to_string()
     }
 
-    #[allow(dead_code)]
     pub fn warning(text: &str) -> String {
         text.yellow().to_string()
     }
 
-    #[allow(dead_code)]
     pub fn info(text: &str) -> String {
         text.cyan().to_string()
     }
 
-    #[allow(dead_code)]
     pub fn secondary(text: &str) -> String {
         text.bright_black().to_string()
     }
 
-    #[allow(dead_code)]
     pub fn title(text: &str) -> String {
         text.cyan().bold().to_string()
     }

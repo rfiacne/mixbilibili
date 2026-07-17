@@ -144,8 +144,16 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "installing_ffmpeg"), "ffmpeg not found. Install it? [Y/n]"),
     ((Lang::Cn, "install_success"), "ffmpeg 安装成功！"),
     ((Lang::En, "install_success"), "ffmpeg installed successfully!"),
+    ((Lang::Cn, "ffmpeg_installed"), "ffmpeg 安装成功！"),
+    ((Lang::En, "ffmpeg_installed"), "ffmpeg installed successfully!"),
     ((Lang::Cn, "install_failed_notfound"), "安装完成但 PATH 中未找到 ffmpeg。可能需要重启终端。"),
     ((Lang::En, "install_failed_notfound"), "Installation completed but ffmpeg not found in PATH. You may need to restart your terminal."),
+    ((Lang::Cn, "ffmpeg_not_found_path"), "安装完成但 ffmpeg 未找到在 PATH 中。"),
+    ((Lang::En, "ffmpeg_not_found_path"), "Installation completed but ffmpeg not found in PATH."),
+    ((Lang::Cn, "restart_terminal"), "你可能需要重启终端。"),
+    ((Lang::En, "restart_terminal"), "You may need to restart your terminal."),
+    ((Lang::Cn, "skipping_ffmpeg"), "跳过：ffmpeg 不可用"),
+    ((Lang::En, "skipping_ffmpeg"), "Skipping: ffmpeg not available"),
     ((Lang::Cn, "install_failed_exit"), "安装失败，退出码：{0}"),
     ((Lang::En, "install_failed_exit"), "Installation failed with exit code: {0}"),
     ((Lang::Cn, "install_failed_run"), "无法运行安装程序：{0}"),
@@ -467,5 +475,21 @@ mod tests {
         assert_eq!(t_for(Lang::En, "report_border_bottom").as_ref(), "└");
         assert_eq!(t_for(Lang::En, "preview_list_title").as_ref(), "Preview ({} items)");
         assert_eq!(t_for(Lang::En, "prompt_continue").as_ref(), "Continue?");
+    }
+
+    #[test]
+    fn test_ffmpeg_i18n_keys_cn() {
+        assert_eq!(t_for(Lang::Cn, "ffmpeg_installed").as_ref(), "ffmpeg 安装成功！");
+        assert_eq!(t_for(Lang::Cn, "ffmpeg_not_found_path").as_ref(), "安装完成但 ffmpeg 未找到在 PATH 中。");
+        assert_eq!(t_for(Lang::Cn, "restart_terminal").as_ref(), "你可能需要重启终端。");
+        assert_eq!(t_for(Lang::Cn, "skipping_ffmpeg").as_ref(), "跳过：ffmpeg 不可用");
+    }
+
+    #[test]
+    fn test_ffmpeg_i18n_keys_en() {
+        assert_eq!(t_for(Lang::En, "ffmpeg_installed").as_ref(), "ffmpeg installed successfully!");
+        assert_eq!(t_for(Lang::En, "ffmpeg_not_found_path").as_ref(), "Installation completed but ffmpeg not found in PATH.");
+        assert_eq!(t_for(Lang::En, "restart_terminal").as_ref(), "You may need to restart your terminal.");
+        assert_eq!(t_for(Lang::En, "skipping_ffmpeg").as_ref(), "Skipping: ffmpeg not available");
     }
 }

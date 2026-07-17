@@ -143,10 +143,10 @@ fn run_install(pms: &[(&str, &str)]) -> bool {
     match result {
         Ok(status) if status.success() => {
             if is_ffmpeg_available() {
-                println!("{}", t("install_success"));
+                println!("{}", t("ffmpeg_installed"));
                 return true;
             }
-            println!("{}", t("install_failed_notfound"));
+            println!("{} {}", t("ffmpeg_not_found_path"), t("restart_terminal"));
         }
         Ok(status) => {
             println!(
