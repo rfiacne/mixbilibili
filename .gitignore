@@ -8,3 +8,7 @@
 .atl/
 # CocoIndex Code (ccc)
 /.cocoindex_code/
+
+# Claude Code
+.mcp.json
+CLAUDE.md
