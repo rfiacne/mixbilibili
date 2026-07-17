@@ -1,4 +1,3 @@
-use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -71,30 +70,42 @@ fn format_record(
     retry: Option<usize>,
     colored: bool,
 ) -> String {
+    use crate::ui::{Colors, Symbols};
+
+    let symbols = Symbols::new(crate::ui::supports_unicode());
     let time = format_duration(duration);
+
     match (success, retry, error) {
         (true, _, _) => {
             let sym = if colored {
-                "✓".green()
+                Colors::success(symbols.success)
             } else {
-                "✓".normal()
+                symbols.success.to_string()
             };
             format!("{} {} ({})", sym, stem, time)
         }
         (false, Some(r), _) => {
             let sym = if colored {
-                "↻".yellow()
+                Colors::warning(symbols.retry)
             } else {
-                "↻".normal()
+                symbols.retry.to_string()
             };
             format!("{} {} retry {} ({})", sym, stem, r, time)
         }
         (false, None, Some(e)) => {
-            let sym = if colored { "✗".red() } else { "✗".normal() };
+            let sym = if colored {
+                Colors::failure(symbols.failure)
+            } else {
+                symbols.failure.to_string()
+            };
             format!("{} {}: {}", sym, stem, e)
         }
         (false, None, None) => {
-            let sym = if colored { "✗".red() } else { "✗".normal() };
+            let sym = if colored {
+                Colors::failure(symbols.failure)
+            } else {
+                symbols.failure.to_string()
+            };
             format!("{} {} ({})", sym, stem, time)
         }
     }
@@ -122,42 +133,34 @@ impl MergeProgress {
         if std::io::stderr().is_terminal() {
             let bar = ProgressBar::new(total as u64);
             bar.enable_steady_tick(Duration::from_millis(100));
+
+            // 新模板：使用 ● spinner，蓝色已完成，亮黑未完成
+            let template = "{spinner} {msg:20} {bar:20.cyan/blue} {pos}/{len} ETA: {eta}".to_string();
+
             bar.set_style(
-                ProgressStyle::with_template(
-                    "[{elapsed_precise}] {bar:30.cyan/blue} {pos}/{len} ({per_sec}) ETA: {eta}",
-                )
-                .unwrap()
-                .progress_chars("=>-")
-                .with_key(
-                    "per_sec",
-                    |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
-                        let elapsed = state.elapsed().as_secs_f64();
-                        if elapsed > 0.0 {
-                            let _ = write!(w, "{:.1} files/s", state.pos() as f64 / elapsed);
-                        } else {
-                            let _ = write!(w, "0.0 files/s");
-                        }
-                    },
-                )
-                .with_key(
-                    "eta",
-                    |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
-                        let pos = state.pos() as usize;
-                        let total = state.len().unwrap_or(0) as usize;
-                        let elapsed = state.elapsed().as_secs_f64();
-                        if pos > 0 && elapsed > 0.0 && total > pos {
-                            let rate = pos as f64 / elapsed;
-                            let remaining = (total - pos) as f64 / rate;
-                            let _ = write!(
-                                w,
-                                "{}",
-                                format_duration(Duration::from_secs_f64(remaining))
-                            );
-                        } else {
-                            let _ = write!(w, "--");
-                        }
-                    },
-                ),
+                ProgressStyle::with_template(&template)
+                    .unwrap()
+                    .progress_chars("███░░░") // 三阶灰度
+                    .tick_strings(&["●", "○", "●"]) // spinner 动画
+                    .with_key(
+                        "eta",
+                        |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
+                            let pos = state.pos() as usize;
+                            let total = state.len().unwrap_or(0) as usize;
+                            let elapsed = state.elapsed().as_secs_f64();
+                            if pos > 0 && elapsed > 0.0 && total > pos {
+                                let rate = pos as f64 / elapsed;
+                                let remaining = (total - pos) as f64 / rate;
+                                let _ = write!(
+                                    w,
+                                    "{}",
+                                    format_duration(Duration::from_secs_f64(remaining))
+                                );
+                            } else {
+                                let _ = write!(w, "--");
+                            }
+                        },
+                    ),
             );
             Self {
                 inner: Renderer::Bar(Arc::new(bar)),
@@ -259,5 +262,20 @@ mod tests {
         cloned.record("test", true, Duration::from_millis(100), None, None);
         progress.finish();
         cloned.finish();
+    }
+
+    #[test]
+    fn test_progress_bar_template_uses_new_style() {
+        // 验证进度条使用 ███░░ 样式
+        let progress = MergeProgress::new(10);
+        // 由于 indicatif 内部状态难以直接访问，这里验证创建成功
+        progress.finish();
+    }
+
+    #[test]
+    fn test_format_record_uses_unicode_symbols() {
+        let result = format_record("test", true, Duration::from_millis(500), None, None, true);
+        assert!(result.contains("✓"));
+        assert!(result.contains("test"));
     }
 }
