@@ -125,27 +125,50 @@ impl MergeSummary {
     }
 
     fn print_full_report(&self) {
-        println!("{}", t("separator").bright_black());
-        println!("{}", t("merge_report").cyan().bold());
-        println!("{}", t("separator").bright_black());
+        use crate::ui::{Colors, Symbols};
+
+        let symbols = Symbols::new(crate::ui::supports_unicode());
+        let width = 40;
+
+        let top_border = format!(
+            "{}{}{}",
+            symbols.top_left,
+            symbols.horizontal_line.repeat(width),
+            symbols.top_right
+        );
+        println!("{}", Colors::secondary(&top_border));
+
+        let title = Colors::title(&t("merge_report"));
+        println!(
+            "{} {} {}",
+            Colors::secondary(symbols.vertical_line),
+            title,
+            Colors::secondary(symbols.vertical_line)
+        );
+
+        let mid_border = format!(
+            "{}{}{}",
+            symbols.top_left,
+            symbols.horizontal_line.repeat(width),
+            symbols.top_right
+        );
+        println!("{}", Colors::secondary(&mid_border));
 
         let success_str = format!(
             "{} {}",
-            t("checkmark").green(),
+            Colors::success(symbols.success),
             tf("succeeded_fmt", &[&self.success_count.to_string()])
         );
         let fail_str = if self.failed_count > 0 {
-            format!(
+            Colors::failure(&format!(
                 "{} {}",
-                t("cross").red(),
+                symbols.failure,
                 tf("failed_fmt", &[&self.failed_count.to_string()])
-            )
-            .red()
-            .to_string()
+            ))
         } else {
             format!(
                 "{} {}",
-                t("cross"),
+                symbols.failure,
                 tf("failed_fmt", &[&self.failed_count.to_string()])
             )
         };
@@ -155,14 +178,14 @@ impl MergeSummary {
             println!(
                 "  {} {}",
                 tf("skipped_fmt", &[&self.skipped_count.to_string()]),
-                "(aria2)".bright_black()
+                Colors::secondary("(aria2)")
             );
         }
         if self.orphaned_count > 0 {
             println!(
                 "  {} {}",
                 tf("orphaned_fmt", &[&self.orphaned_count.to_string()]),
-                "(orphan)".bright_black()
+                Colors::secondary("(orphan)")
             );
         }
 
@@ -170,14 +193,18 @@ impl MergeSummary {
             let total = self.total_duration;
             println!(
                 "  {}: {}",
-                t("duration").bright_black(),
+                Colors::secondary(&t("duration")),
                 format_duration(total)
             );
             if let Some(avg) = self.avg_duration() {
-                println!("  {}: {}", t("avg").bright_black(), format_duration(avg));
+                println!("  {}: {}", Colors::secondary(&t("avg")), format_duration(avg));
             }
             if let Some(tp) = self.throughput() {
-                println!("  {}: {:.2} pairs/sec", t("throughput").bright_black(), tp);
+                println!(
+                    "  {}: {:.2} pairs/sec",
+                    Colors::secondary(&t("throughput")),
+                    tp
+                );
             }
         }
 
@@ -185,16 +212,33 @@ impl MergeSummary {
             println!(
                 "  {} {}",
                 tf("deletion_failures", &[&self.deletion_failures.to_string()]),
-                "(warn)".yellow()
+                Colors::warning("(warn)")
             );
         }
 
-        println!("{}", t("separator").bright_black());
+        let bottom_border = format!(
+            "{}{}{}",
+            symbols.bottom_left,
+            symbols.horizontal_line.repeat(width),
+            symbols.bottom_right
+        );
+        println!("{}", Colors::secondary(&bottom_border));
 
         if !self.failures.is_empty() {
-            println!("\n{}", t("failed_files").red().bold());
-            for (name, error) in &self.failures {
-                println!("  {} {}: {}", t("cross").red(), name, error);
+            println!("\n{}", Colors::failure(&t("failed_files")));
+            for (i, (name, error)) in self.failures.iter().enumerate() {
+                let connector = if i == self.failures.len() - 1 {
+                    "└"
+                } else {
+                    "├"
+                };
+                println!(
+                    "  {}─ {} {}: {}",
+                    connector,
+                    Colors::failure(symbols.failure),
+                    name,
+                    error
+                );
             }
             println!();
         }
