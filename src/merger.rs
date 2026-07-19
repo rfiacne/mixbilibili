@@ -420,6 +420,14 @@ fn do_merge(
 }
 
 fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus> {
+    // Reset SIGCHLD to SIG_DFL in the current process.
+    // aria2 sets SIGCHLD to SIG_IGN in its on-download-complete hook,
+    // which causes waitpid() to fail with ECHILD.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+    }
+
     let mut child = cmd.spawn().context(t("failed_to_spawn"))?;
 
     match child.wait_with_timeout(timeout, POLL_INTERVAL) {
