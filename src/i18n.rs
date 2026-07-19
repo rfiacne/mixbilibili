@@ -457,7 +457,10 @@ mod tests {
     fn test_new_ui_keys_exist_cn() {
         assert_eq!(t_for(Lang::Cn, "report_border_top").as_ref(), "┌");
         assert_eq!(t_for(Lang::Cn, "report_border_bottom").as_ref(), "└");
-        assert_eq!(t_for(Lang::Cn, "preview_list_title").as_ref(), "预览列表 ({} 项)");
+        assert_eq!(
+            t_for(Lang::Cn, "preview_list_title").as_ref(),
+            "预览列表 ({} 项)"
+        );
         assert_eq!(t_for(Lang::Cn, "prompt_continue").as_ref(), "继续吗？");
     }
 
@@ -465,19 +468,31 @@ mod tests {
     fn test_new_ui_keys_exist_en() {
         assert_eq!(t_for(Lang::En, "report_border_top").as_ref(), "┌");
         assert_eq!(t_for(Lang::En, "report_border_bottom").as_ref(), "└");
-        assert_eq!(t_for(Lang::En, "preview_list_title").as_ref(), "Preview ({} items)");
+        assert_eq!(
+            t_for(Lang::En, "preview_list_title").as_ref(),
+            "Preview ({} items)"
+        );
         assert_eq!(t_for(Lang::En, "prompt_continue").as_ref(), "Continue?");
     }
 
     #[test]
     fn test_ffmpeg_i18n_keys_cn() {
-        assert_eq!(t_for(Lang::Cn, "ffmpeg_installed").as_ref(), "ffmpeg 安装成功！");
-        assert_eq!(t_for(Lang::Cn, "ffmpeg_not_found_path").as_ref(), "安装完成但 PATH 中未找到 ffmpeg。可能需要重启终端。");
+        assert_eq!(
+            t_for(Lang::Cn, "ffmpeg_installed").as_ref(),
+            "ffmpeg 安装成功！"
+        );
+        assert_eq!(
+            t_for(Lang::Cn, "ffmpeg_not_found_path").as_ref(),
+            "安装完成但 PATH 中未找到 ffmpeg。可能需要重启终端。"
+        );
     }
 
     #[test]
     fn test_ffmpeg_i18n_keys_en() {
-        assert_eq!(t_for(Lang::En, "ffmpeg_installed").as_ref(), "ffmpeg installed successfully!");
+        assert_eq!(
+            t_for(Lang::En, "ffmpeg_installed").as_ref(),
+            "ffmpeg installed successfully!"
+        );
         assert_eq!(t_for(Lang::En, "ffmpeg_not_found_path").as_ref(), "Installation completed but ffmpeg not found in PATH. You may need to restart your terminal.");
     }
 }

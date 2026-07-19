@@ -548,13 +548,15 @@ mod scan_tests {
             let video_stem = pair.video.file_stem().unwrap().to_str().unwrap();
             let audio_stem = pair.audio.file_stem().unwrap().to_str().unwrap();
             assert_eq!(
-                video_stem, audio_stem,
+                video_stem,
+                audio_stem,
                 "Video and audio stems must match: video={}, audio={}",
                 pair.video.display(),
                 pair.audio.display()
             );
             assert_eq!(
-                video_stem, pair.stem,
+                video_stem,
+                pair.stem,
                 "Pair stem must match video stem: pair.stem={}, video={}",
                 pair.stem,
                 pair.video.display()

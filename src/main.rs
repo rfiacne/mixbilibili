@@ -978,12 +978,12 @@ mod integration_tests {
         use std::path::PathBuf;
         // file_name component only
         assert_eq!(file_name_width(&PathBuf::from("short.mp4")), 9);
-        assert_eq!(file_name_width(&PathBuf::from("very_long_filename.mp4")), 22);
-        // path prefix stripped
         assert_eq!(
-            file_name_width(&PathBuf::from("/some/dir/file.mp4")),
-            8
+            file_name_width(&PathBuf::from("very_long_filename.mp4")),
+            22
         );
+        // path prefix stripped
+        assert_eq!(file_name_width(&PathBuf::from("/some/dir/file.mp4")), 8);
     }
 
     #[test]

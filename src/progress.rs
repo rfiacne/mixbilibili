@@ -135,7 +135,8 @@ impl MergeProgress {
             bar.enable_steady_tick(Duration::from_millis(100));
 
             // 新模板：使用 ● spinner，蓝色已完成，亮黑未完成
-            let template = "{spinner} {msg:20} {bar:20.cyan/blue} {pos}/{len} ETA: {eta}".to_string();
+            let template =
+                "{spinner} {msg:20} {bar:20.cyan/blue} {pos}/{len} ETA: {eta}".to_string();
 
             bar.set_style(
                 ProgressStyle::with_template(&template)

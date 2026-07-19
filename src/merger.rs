@@ -197,7 +197,11 @@ impl MergeSummary {
                 format_duration(total)
             );
             if let Some(avg) = self.avg_duration() {
-                println!("  {}: {}", Colors::secondary(&t("avg")), format_duration(avg));
+                println!(
+                    "  {}: {}",
+                    Colors::secondary(&t("avg")),
+                    format_duration(avg)
+                );
             }
             if let Some(tp) = self.throughput() {
                 println!(
