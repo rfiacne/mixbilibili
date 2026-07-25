@@ -35,6 +35,12 @@ impl ChildExt for Child {
             match self.try_wait() {
                 Ok(Some(status)) => return Ok(Some(status)),
                 Ok(None) => {
+                    // Check for interrupt signal and kill child if interrupted
+                    if INTERRUPTED.load(Ordering::SeqCst) {
+                        let _ = self.kill();
+                        let _ = self.wait();
+                        return Ok(None);
+                    }
                     if start.elapsed() >= timeout {
                         return Ok(None);
                     }
@@ -270,7 +276,26 @@ pub fn merge_pair(
         };
     }
 
-    let output_path = output_dir.join(format!("{}.{}", pair.stem, format.extension()));
+    // stem is now a composite key "parent/stem", replace "/" with "_" for safe filename
+    let safe_stem = pair.stem.replace('/', "_");
+    let output_path = output_dir.join(format!("{}.{}", safe_stem, format.extension()));
+
+    // Safety check: output path must not be identical to input video path
+    // Use canonicalize to handle different path representations pointing to the same file
+    let dominated = std::fs::canonicalize(&output_path)
+        .ok()
+        .zip(std::fs::canonicalize(&pair.video).ok())
+        .map(|(o, v)| o == v)
+        .unwrap_or(false);
+    if dominated {
+        return record_failure(
+            pair,
+            pair_index,
+            t("same_source_output_runtime").into_owned(),
+            Duration::ZERO,
+            progress,
+        );
+    }
 
     do_merge(
         pair,
@@ -344,6 +369,18 @@ fn do_merge(
     let start = std::time::Instant::now();
 
     for attempt in 0..=max_retries {
+        // Early exit if interrupted — avoid useless retries after Ctrl+C
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return MergeResult {
+                pair_index,
+                pair_name: pair.stem.clone(),
+                success: false,
+                error: None,
+                duration: start.elapsed(),
+                was_interrupted: true,
+            };
+        }
+
         if attempt > 0 {
             std::thread::sleep(Duration::from_secs(1));
             if let Some(p) = progress {
@@ -424,13 +461,7 @@ fn do_merge(
 }
 
 fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus> {
-    // Reset SIGCHLD to SIG_DFL in the current process.
-    // aria2 sets SIGCHLD to SIG_IGN in its on-download-complete hook,
-    // which causes waitpid() to fail with ECHILD.
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
-    }
+    // SIGCHLD reset is now done once in main.rs run() before rayon pool creation
 
     let mut child = cmd.spawn().context(t("failed_to_spawn"))?;
 
@@ -1023,5 +1054,164 @@ mod timeout_tests {
         let result = child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
+    }
+}
+
+/// Additional pure-logic tests for MergeSummary and MergeResult.
+#[cfg(test)]
+mod summary_logic_tests {
+    use super::*;
+
+    #[test]
+    fn test_merge_result_interrupted_flag() {
+        let result = MergeResult {
+            pair_index: 3,
+            pair_name: "interrupted_video".to_string(),
+            success: false,
+            error: Some("Skipped (interrupted)".to_string()),
+            duration: Duration::ZERO,
+            was_interrupted: true,
+        };
+        assert!(result.was_interrupted);
+        assert!(!result.success);
+        assert_eq!(result.duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn test_merge_summary_with_skipped_and_orphaned() {
+        let summary = MergeSummary {
+            success_count: 5,
+            failed_count: 1,
+            skipped_count: 2,
+            orphaned_count: 3,
+            failures: vec![("bad.mp4".to_string(), "codec error".to_string())],
+            deletion_failures: 1,
+            total_duration: Duration::from_secs(12),
+            merge_count: 6,
+        };
+        assert!(!summary.all_success());
+        assert_eq!(summary.avg_duration(), Some(Duration::from_secs(2)));
+        assert!(summary.throughput().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn test_merge_summary_throughput_precision() {
+        let summary = MergeSummary {
+            merge_count: 3,
+            total_duration: Duration::from_secs(3),
+            ..Default::default()
+        };
+        let tp = summary.throughput().unwrap();
+        assert!((tp - 1.0).abs() < f64::EPSILON, "3 merges / 3s = 1.0/s");
+    }
+
+    #[test]
+    fn test_merge_summary_avg_with_subsecond_duration() {
+        let summary = MergeSummary {
+            merge_count: 4,
+            total_duration: Duration::from_millis(400),
+            ..Default::default()
+        };
+        assert_eq!(summary.avg_duration(), Some(Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn test_merge_summary_failures_vec() {
+        let mut summary = MergeSummary::default();
+        summary.failures.push(("a.mp4".to_string(), "err1".to_string()));
+        summary.failures.push(("b.mp4".to_string(), "err2".to_string()));
+        summary.failed_count = 2;
+        assert_eq!(summary.failures.len(), 2);
+        assert!(!summary.all_success());
+    }
+
+    #[test]
+    fn test_validate_output_non_existent_file() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("does_not_exist.mkv");
+        let result = validate_output(&missing);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_output_empty_file_is_cleaned_up() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let empty = dir.path().join("empty.mkv");
+        std::fs::File::create(&empty).unwrap();
+
+        let result = validate_output(&empty);
+        assert!(result.is_err());
+        assert!(!empty.exists(), "Empty output file should be removed");
+    }
+
+    #[test]
+    fn test_validate_output_valid_file_succeeds() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let valid = dir.path().join("good.mkv");
+        std::fs::write(&valid, b"real content here").unwrap();
+
+        let result = validate_output(&valid);
+        assert!(result.is_ok());
+        assert!(valid.exists());
+    }
+
+    #[test]
+    fn test_delete_source_audio_missing_preserves_video() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let video = dir.path().join("keep_me.mp4");
+        let audio = dir.path().join("nonexistent.m4a");
+        std::fs::write(&video, b"video data").unwrap();
+
+        let pair = FilePair {
+            video: video.clone(),
+            audio,
+            stem: "keep_me".to_string(),
+        };
+
+        let result = delete_source_files(&pair);
+        assert!(result.is_err());
+        // Atomic guarantee: video preserved when audio deletion fails
+        assert!(video.exists());
+    }
+
+    #[test]
+    fn test_merge_pair_rejects_identical_output() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+
+        // Create a pair where video is in the same dir as output would be
+        let video_path = dir.path().join("test.mp4");
+        let audio_path = dir.path().join("test.m4a");
+        std::fs::write(&video_path, b"video").unwrap();
+        std::fs::write(&audio_path, b"audio").unwrap();
+
+        let pair = FilePair {
+            video: video_path,
+            audio: audio_path,
+            stem: "test".to_string(),
+        };
+
+        // When output_dir == video's parent and format == mp4,
+        // output path would be identical to input video path
+        let result = merge_pair(
+            &pair,
+            0,
+            dir.path(),
+            crate::cli::OutputFormat::Mp4,
+            None,
+            false,
+            0,
+        );
+
+        assert!(!result.success, "merge_pair should reject identical output path");
+        assert!(
+            result.error.as_ref().unwrap().contains("identical") || result.error.as_ref().unwrap().contains("相同"),
+            "Error should mention identical path: {:?}",
+            result.error
+        );
     }
 }

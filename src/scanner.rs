@@ -34,6 +34,7 @@ fn is_downloading(stem: &str, aria2_files: &HashSet<String>) -> bool {
 
 fn collect_files(
     dir: &Path,
+    scan_root: &Path,
     mp4_files: &mut HashMap<String, PathBuf>,
     m4a_files: &mut HashMap<String, PathBuf>,
     aria2_files: &mut HashSet<String>,
@@ -54,7 +55,7 @@ fn collect_files(
 
         if path.is_dir() {
             if recursive {
-                collect_files(&path, mp4_files, m4a_files, aria2_files, true)?;
+                collect_files(&path, scan_root, mp4_files, m4a_files, aria2_files, true)?;
             }
             continue;
         }
@@ -64,17 +65,35 @@ fn collect_files(
             None => continue,
         };
 
+        // Build key: bare stem for non-recursive, relative path prefix for recursive
+        let make_key = |stem: &str| -> String {
+            if recursive {
+                let relative_parent = path
+                    .parent()
+                    .and_then(|p| p.strip_prefix(scan_root).ok())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if relative_parent.is_empty() {
+                    stem.to_string()
+                } else {
+                    format!("{}/{}", relative_parent, stem)
+                }
+            } else {
+                stem.to_string()
+            }
+        };
+
         if let Some(stem) = filename.strip_suffix(".aria2") {
             // Normalize: strip .mp4/.m4a suffix so is_downloading needs only one lookup
             let bare = stem
                 .strip_suffix(".mp4")
                 .or_else(|| stem.strip_suffix(".m4a"))
                 .unwrap_or(stem);
-            aria2_files.insert(bare.to_string());
+            aria2_files.insert(make_key(bare));
         } else if let Some(stem) = filename.strip_suffix(".mp4") {
-            mp4_files.insert(stem.to_string(), path);
+            mp4_files.insert(make_key(stem), path);
         } else if let Some(stem) = filename.strip_suffix(".m4a") {
-            m4a_files.insert(stem.to_string(), path);
+            m4a_files.insert(make_key(stem), path);
         }
     }
 
@@ -88,6 +107,7 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
 
     collect_files(
         source_dir,
+        source_dir,
         &mut mp4_files,
         &mut m4a_files,
         &mut aria2_files,
@@ -97,22 +117,22 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
     let mut pairs = Vec::new();
     let mut stats = ScanStats::default();
 
-    // Collect and sort stems for deterministic output order
-    let mut all_stems: Vec<&String> = mp4_files.keys().chain(m4a_files.keys()).collect();
-    all_stems.sort();
-    all_stems.dedup();
+    // Collect and sort keys for deterministic output order
+    let mut all_keys: Vec<&String> = mp4_files.keys().chain(m4a_files.keys()).collect();
+    all_keys.sort();
+    all_keys.dedup();
 
-    for stem in all_stems {
-        if is_downloading(stem, &aria2_files) {
+    for key in all_keys {
+        if is_downloading(key, &aria2_files) {
             stats.skipped += 1;
             continue;
         }
 
-        if let (Some(video), Some(audio)) = (mp4_files.get(stem), m4a_files.get(stem)) {
+        if let (Some(video), Some(audio)) = (mp4_files.get(key), m4a_files.get(key)) {
             pairs.push(FilePair {
                 video: video.clone(),
                 audio: audio.clone(),
-                stem: stem.clone(),
+                stem: key.clone(),
             });
             stats.pairs += 1;
         } else {
@@ -156,18 +176,18 @@ mod tests {
     }
 
     #[test]
-    fn test_is_downloading_with_bare_stem() {
+    fn test_is_downloading_with_composite_key() {
         let mut aria2_files = HashSet::new();
-        aria2_files.insert("foo".to_string());
-        assert!(is_downloading("foo", &aria2_files));
+        aria2_files.insert("parent/foo".to_string());
+        assert!(is_downloading("parent/foo", &aria2_files));
     }
 
     #[test]
-    fn test_is_downloading_with_suffixed_stem() {
-        // After normalization in collect_files, aria2_files stores bare stems
+    fn test_is_downloading_with_suffixed_composite_key() {
+        // After normalization in collect_files, aria2_files stores composite keys
         let mut aria2_files = HashSet::new();
-        aria2_files.insert("foo".to_string()); // was "foo.mp4" before normalization
-        assert!(is_downloading("foo", &aria2_files));
+        aria2_files.insert("parent/foo".to_string()); // was "foo.mp4" before normalization
+        assert!(is_downloading("parent/foo", &aria2_files));
     }
 
     #[test]
@@ -438,8 +458,10 @@ mod scan_tests {
             .iter()
             .map(|p| p.stem.as_str())
             .collect();
+        // stems are composite keys in recursive mode: "subdir/stem"
+        // Top-level files have bare stem (empty relative parent)
         assert!(stems.contains(&"top"));
-        assert!(stems.contains(&"deep"));
+        assert!(stems.iter().any(|s| s.ends_with("/deep")));
     }
 
     #[test]
@@ -554,13 +576,221 @@ mod scan_tests {
                 pair.video.display(),
                 pair.audio.display()
             );
+            // In non-recursive mode, pair.stem is the bare stem
             assert_eq!(
-                video_stem,
-                pair.stem,
-                "Pair stem must match video stem: pair.stem={}, video={}",
-                pair.stem,
-                pair.video.display()
+                pair.stem, video_stem,
+                "Pair stem must equal video stem in non-recursive mode"
             );
         }
+    }
+
+    #[test]
+    fn test_scan_recursive_same_stem_different_subdirs() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        // Create same-named files in different subdirectories
+        let season1 = path.join("season1");
+        let season2 = path.join("season2");
+        fs::create_dir(&season1).unwrap();
+        fs::create_dir(&season2).unwrap();
+
+        File::create(season1.join("ep01.mp4")).unwrap();
+        File::create(season1.join("ep01.m4a")).unwrap();
+        File::create(season2.join("ep01.mp4")).unwrap();
+        File::create(season2.join("ep01.m4a")).unwrap();
+
+        let result = scan_directory(path, true).unwrap();
+        assert_eq!(
+            result.pairs.len(),
+            2,
+            "should find both pairs with same stem in different subdirs"
+        );
+
+        // Verify each pair has video and audio from the same subdirectory
+        for pair in &result.pairs {
+            let video_parent = pair.video.parent().unwrap();
+            let audio_parent = pair.audio.parent().unwrap();
+            assert_eq!(
+                video_parent, audio_parent,
+                "Video and audio must be from same directory: video={}, audio={}",
+                pair.video.display(),
+                pair.audio.display()
+            );
+            // stem is now a composite key: "season1/ep01" or "season2/ep01"
+            assert!(
+                pair.stem == "season1/ep01" || pair.stem == "season2/ep01",
+                "Pair stem should be composite key: {}",
+                pair.stem
+            );
+        }
+    }
+
+    #[test]
+    fn test_scan_recursive_same_stem_with_aria2() {
+        // Test that aria2 detection works correctly with composite keys in recursive mode
+        // season1/ep01 has .aria2 -> should be skipped
+        // season2/ep01 has no .aria2 -> should be paired
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        let season1 = path.join("season1");
+        let season2 = path.join("season2");
+        fs::create_dir(&season1).unwrap();
+        fs::create_dir(&season2).unwrap();
+
+        // season1/ep01 is downloading
+        File::create(season1.join("ep01.mp4")).unwrap();
+        File::create(season1.join("ep01.m4a")).unwrap();
+        File::create(season1.join("ep01.mp4.aria2")).unwrap();
+
+        // season2/ep01 is complete
+        File::create(season2.join("ep01.mp4")).unwrap();
+        File::create(season2.join("ep01.m4a")).unwrap();
+
+        let result = scan_directory(path, true).unwrap();
+        assert_eq!(
+            result.pairs.len(),
+            1,
+            "only season2/ep01 should be paired"
+        );
+        assert_eq!(result.stats.skipped, 1, "season1/ep01 should be skipped");
+        assert_eq!(result.pairs[0].stem, "season2/ep01");
+    }
+}
+
+#[cfg(test)]
+mod collect_tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_collect_ignores_unrelated_extensions() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        // Non-media files should be silently ignored
+        File::create(path.join("readme.txt")).unwrap();
+        File::create(path.join("data.json")).unwrap();
+        File::create(path.join("script.sh")).unwrap();
+        File::create(path.join("video.mkv")).unwrap(); // Not .mp4
+
+        let result = scan_directory(path, false).unwrap();
+        assert_eq!(result.pairs.len(), 0);
+        assert_eq!(result.stats.orphaned, 0);
+        assert_eq!(result.stats.skipped, 0);
+    }
+
+    #[test]
+    fn test_collect_case_sensitive_extensions() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        // Uppercase extensions should NOT match (Unix is case-sensitive)
+        File::create(path.join("video.MP4")).unwrap();
+        File::create(path.join("video.M4A")).unwrap();
+
+        let result = scan_directory(path, false).unwrap();
+        // These should not be recognized as valid media pairs
+        assert_eq!(result.stats.pairs, 0);
+    }
+
+    #[test]
+    fn test_collect_stem_with_dots() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        // Filenames with dots in stem: "ep.01.final.mp4"
+        File::create(path.join("ep.01.final.mp4")).unwrap();
+        File::create(path.join("ep.01.final.m4a")).unwrap();
+
+        let result = scan_directory(path, false).unwrap();
+        assert_eq!(result.pairs.len(), 1);
+        assert_eq!(result.pairs[0].stem, "ep.01.final");
+    }
+
+    #[test]
+    fn test_collect_stem_with_spaces_and_unicode() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        File::create(path.join("第1集 正片.mp4")).unwrap();
+        File::create(path.join("第1集 正片.m4a")).unwrap();
+
+        let result = scan_directory(path, false).unwrap();
+        assert_eq!(result.pairs.len(), 1);
+        assert_eq!(result.pairs[0].stem, "第1集 正片");
+    }
+
+    #[test]
+    fn test_collect_aria2_with_mp4_suffix_blocks_pair() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        // "video.mp4.aria2" means video.mp4 is still downloading
+        File::create(path.join("video.mp4")).unwrap();
+        File::create(path.join("video.m4a")).unwrap();
+        File::create(path.join("video.mp4.aria2")).unwrap();
+
+        let mut mp4 = HashMap::new();
+        let mut m4a = HashMap::new();
+        let mut aria2 = HashSet::new();
+        collect_files(path, path, &mut mp4, &mut m4a, &mut aria2, false).unwrap();
+
+        // In non-recursive mode, aria2 set uses bare stem
+        assert!(aria2.contains("video"), "aria2 should contain bare key: video");
+    }
+
+    #[test]
+    fn test_collect_aria2_with_m4a_suffix_blocks_pair() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        File::create(path.join("audio.mp4")).unwrap();
+        File::create(path.join("audio.m4a")).unwrap();
+        File::create(path.join("audio.m4a.aria2")).unwrap();
+
+        let mut mp4 = HashMap::new();
+        let mut m4a = HashMap::new();
+        let mut aria2 = HashSet::new();
+        collect_files(path, path, &mut mp4, &mut m4a, &mut aria2, false).unwrap();
+
+        // In non-recursive mode, aria2 set uses bare stem
+        assert!(aria2.contains("audio"), "aria2 should contain bare key: audio");
+    }
+
+    #[test]
+    fn test_collect_multiple_pairs_deterministic_order() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        // Create pairs in reverse alphabetical order
+        for name in ["zebra", "alpha", "middle"] {
+            File::create(path.join(format!("{}.mp4", name))).unwrap();
+            File::create(path.join(format!("{}.m4a", name))).unwrap();
+        }
+
+        let result = scan_directory(path, false).unwrap();
+        let stems: Vec<&str> = result.pairs.iter().map(|p| p.stem.as_str()).collect();
+
+        // Non-recursive: bare stems, sorted alphabetically
+        assert_eq!(
+            stems,
+            vec!["alpha", "middle", "zebra"]
+        );
+    }
+
+    #[test]
+    fn test_collect_empty_subdir_non_recursive() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        fs::create_dir(path.join("empty_sub")).unwrap();
+        File::create(path.join("video.mp4")).unwrap();
+        File::create(path.join("video.m4a")).unwrap();
+
+        let result = scan_directory(path, false).unwrap();
+        assert_eq!(result.pairs.len(), 1);
     }
 }

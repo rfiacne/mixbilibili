@@ -16,8 +16,14 @@ fn vec_as_set<'de, D: Deserializer<'de>>(d: D) -> Result<HashSet<String>, D::Err
     Ok(vec.into_iter().collect())
 }
 
+fn default_schema_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MergeState {
+    #[serde(default = "default_schema_version")]
+    pub version: u32,
     pub source_dir: String,
     pub output_dir: String,
     #[serde(serialize_with = "set_as_vec", deserialize_with = "vec_as_set")]
@@ -31,6 +37,7 @@ pub struct MergeState {
 impl MergeState {
     pub fn new(source: &Path, output: &Path) -> Self {
         Self {
+            version: 1,
             source_dir: source.to_string_lossy().to_string(),
             output_dir: output.to_string_lossy().to_string(),
             completed: HashSet::new(),
@@ -57,6 +64,14 @@ impl MergeState {
                 anyhow::bail!("{}: {}. {}", t("failed_parse_state"), path.display(), e);
             }
         };
+
+        // Check schema version for forward compatibility
+        if state.version > 1 {
+            anyhow::bail!(
+                "State file schema version {} is not supported (max: 1). Please upgrade mixbilibili.",
+                state.version
+            );
+        }
 
         let expected = source.to_string_lossy().to_string();
         if state.source_dir != expected {
@@ -90,6 +105,7 @@ impl MergeState {
 
     pub fn mark_completed(&mut self, stem: &str) {
         self.pending.remove(stem);
+        self.failed.remove(stem); // Clean failed set on successful completion
         self.completed.insert(stem.to_string());
     }
 
@@ -506,5 +522,181 @@ mod tests {
 
         // Clean up
         fs::remove_file(&tmp_path).ok();
+    }
+}
+
+/// Additional tests for state transitions, serialization order, and edge cases.
+#[cfg(test)]
+mod state_logic_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_add_pending_skips_already_failed() {
+        let mut state = MergeState::new(Path::new("."), Path::new("."));
+        state.failed.insert("bad_video".to_string());
+
+        state.add_pending("bad_video");
+
+        assert!(
+            !state.pending.contains("bad_video"),
+            "Failed items should not be re-added to pending"
+        );
+    }
+
+    #[test]
+    fn test_mark_completed_idempotent() {
+        let mut state = MergeState::new(Path::new("."), Path::new("."));
+        state.mark_completed("vid");
+        state.mark_completed("vid"); // second call should not panic
+        assert!(state.completed.contains("vid"));
+        assert_eq!(state.completed.len(), 1);
+    }
+
+    #[test]
+    fn test_mark_failed_idempotent() {
+        let mut state = MergeState::new(Path::new("."), Path::new("."));
+        state.mark_failed("vid");
+        state.mark_failed("vid");
+        assert!(state.failed.contains("vid"));
+        assert_eq!(state.failed.len(), 1);
+    }
+
+    #[test]
+    fn test_serialized_sets_are_sorted() {
+        let dir = tempdir().unwrap();
+        let mut state = MergeState::new(dir.path(), dir.path());
+        // Insert in non-sorted order
+        state.completed.insert("zebra".to_string());
+        state.completed.insert("alpha".to_string());
+        state.completed.insert("middle".to_string());
+
+        state.save(dir.path()).unwrap();
+
+        let content = fs::read_to_string(MergeState::state_file_path(dir.path())).unwrap();
+        // In JSON, the array should be sorted
+        let alpha_pos = content.find("alpha").unwrap();
+        let middle_pos = content.find("middle").unwrap();
+        let zebra_pos = content.find("zebra").unwrap();
+        assert!(
+            alpha_pos < middle_pos && middle_pos < zebra_pos,
+            "Serialized completed set should be sorted alphabetically"
+        );
+    }
+
+    #[test]
+    fn test_state_file_path_format() {
+        let path = MergeState::state_file_path(Path::new("/some/dir"));
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), ".mixbilibili_state.json");
+        assert_eq!(path.parent().unwrap(), Path::new("/some/dir"));
+    }
+
+    #[test]
+    fn test_state_new_stores_paths_correctly() {
+        let state = MergeState::new(Path::new("/src"), Path::new("/out"));
+        assert_eq!(state.source_dir, "/src");
+        assert_eq!(state.output_dir, "/out");
+    }
+
+    #[test]
+    fn test_mark_completed_also_removes_from_failed() {
+        let mut state = MergeState::new(Path::new("."), Path::new("."));
+        state.pending.insert("a".to_string());
+        state.failed.insert("a".to_string()); // edge case: in both sets
+
+        state.mark_completed("a");
+
+        assert!(!state.pending.contains("a"));
+        assert!(state.completed.contains("a"));
+        // mark_completed removes from both pending and failed
+        assert!(!state.failed.contains("a"));
+    }
+
+    #[test]
+    fn test_large_state_roundtrip() {
+        let dir = tempdir().unwrap();
+        let mut state = MergeState::new(dir.path(), dir.path());
+
+        // Add many items
+        for i in 0..100 {
+            state.add_pending(&format!("video_{:04}", i));
+        }
+        for i in 0..50 {
+            state.mark_completed(&format!("video_{:04}", i));
+        }
+        for i in 50..75 {
+            state.mark_failed(&format!("video_{:04}", i));
+        }
+
+        state.save(dir.path()).unwrap();
+        let loaded = MergeState::load(dir.path()).unwrap().unwrap();
+
+        assert_eq!(loaded.completed.len(), 50);
+        assert_eq!(loaded.failed.len(), 25);
+        assert_eq!(loaded.pending.len(), 25);
+    }
+
+    #[test]
+    fn test_state_default_has_empty_fields() {
+        let state = MergeState::default();
+        assert!(state.source_dir.is_empty());
+        assert!(state.output_dir.is_empty());
+        assert!(state.completed.is_empty());
+        assert!(state.failed.is_empty());
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn test_load_old_format_gets_default_version() {
+        let dir = tempdir().unwrap();
+        let dir_str = dir.path().to_string_lossy().to_string();
+        // Old format JSON without "version" field
+        let json = format!(
+            r#"{{
+  "source_dir": "{dir_str}",
+  "output_dir": "{dir_str}",
+  "completed": [],
+  "failed": [],
+  "pending": []
+}}"#
+        );
+        let path = MergeState::state_file_path(dir.path());
+        fs::write(&path, json).unwrap();
+
+        let loaded = MergeState::load(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.version, 1, "old format should default to version 1");
+    }
+
+    #[test]
+    fn test_save_includes_version() {
+        let dir = tempdir().unwrap();
+        let state = MergeState::new(dir.path(), dir.path());
+        state.save(dir.path()).unwrap();
+
+        let content = fs::read_to_string(MergeState::state_file_path(dir.path())).unwrap();
+        assert!(content.contains("\"version\""), "serialized state should include version field");
+    }
+
+    #[test]
+    fn test_reject_future_version() {
+        let dir = tempdir().unwrap();
+        let dir_str = dir.path().to_string_lossy().to_string();
+        // Future format with version > 1
+        let json = format!(
+            r#"{{
+  "version": 99,
+  "source_dir": "{dir_str}",
+  "output_dir": "{dir_str}",
+  "completed": [],
+  "failed": [],
+  "pending": []
+}}"#
+        );
+        let path = MergeState::state_file_path(dir.path());
+        fs::write(&path, json).unwrap();
+
+        let result = MergeState::load(dir.path());
+        assert!(result.is_err(), "should reject future schema version");
+        assert!(result.unwrap_err().to_string().contains("not supported"));
     }
 }

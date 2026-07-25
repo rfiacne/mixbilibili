@@ -280,3 +280,134 @@ mod tests {
         assert!(result.contains("test"));
     }
 }
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    // --- format_duration boundary tests ---
+
+    #[test]
+    fn test_format_duration_zero() {
+        let s = format_duration(Duration::ZERO);
+        assert_eq!(s, "0ms");
+    }
+
+    #[test]
+    fn test_format_duration_sub_second_boundary() {
+        // Just under 1 second → should use ms
+        let s = format_duration(Duration::from_millis(999));
+        assert!(s.ends_with("ms"), "999ms should format as ms: {}", s);
+        assert!(s.contains("999"));
+    }
+
+    #[test]
+    fn test_format_duration_exactly_one_second() {
+        let s = format_duration(Duration::from_secs(1));
+        assert!(s.ends_with("s"), "1s should format as seconds: {}", s);
+        assert!(!s.contains("ms"));
+        assert!(!s.contains("m "));
+    }
+
+    #[test]
+    fn test_format_duration_under_minute() {
+        let s = format_duration(Duration::from_secs(59));
+        assert!(s.contains("s"));
+        assert!(!s.contains("m "));
+    }
+
+    #[test]
+    fn test_format_duration_exactly_one_minute() {
+        let s = format_duration(Duration::from_secs(60));
+        assert!(s.contains("m"), "60s should format with minutes: {}", s);
+        assert!(s.contains("1m"));
+    }
+
+    #[test]
+    fn test_format_duration_minutes_and_seconds() {
+        let s = format_duration(Duration::from_secs(90));
+        assert!(s.contains("1m"));
+        assert!(s.contains("30s"));
+    }
+
+    #[test]
+    fn test_format_duration_large_value() {
+        let s = format_duration(Duration::from_secs(3661));
+        assert!(s.contains("m"), "large durations should use minutes: {}", s);
+    }
+
+    // --- format_record branch coverage ---
+
+    #[test]
+    fn test_format_record_success_uncolored() {
+        let s = format_record("my_video", true, Duration::from_millis(200), None, None, false);
+        assert!(s.contains("my_video"));
+        assert!(s.contains("200ms"));
+    }
+
+    #[test]
+    fn test_format_record_failure_with_retry() {
+        let s = format_record("vid", false, Duration::from_secs(1), None, Some(2), false);
+        assert!(s.contains("vid"));
+        assert!(s.contains("retry"));
+        assert!(s.contains("2"));
+    }
+
+    #[test]
+    fn test_format_record_failure_with_error_message() {
+        let s = format_record(
+            "broken",
+            false,
+            Duration::from_secs(3),
+            Some("ffmpeg crashed"),
+            None,
+            false,
+        );
+        assert!(s.contains("broken"));
+        assert!(s.contains("ffmpeg crashed"));
+    }
+
+    #[test]
+    fn test_format_record_failure_no_error_no_retry() {
+        let s = format_record("fail", false, Duration::from_millis(50), None, None, false);
+        assert!(s.contains("fail"));
+        assert!(s.contains("50ms"));
+    }
+
+    #[test]
+    fn test_format_record_colored_flag_changes_code_path() {
+        // When colored=true, format_record uses Colors::success/failure/warning
+        // When colored=false, it uses plain symbol.to_string()
+        // Both produce valid output containing the stem and duration
+        let colored = format_record("x", true, Duration::from_millis(10), None, None, true);
+        let plain = format_record("x", true, Duration::from_millis(10), None, None, false);
+        // Both should contain the stem and time regardless of coloring
+        assert!(colored.contains("x"));
+        assert!(colored.contains("10ms"));
+        assert!(plain.contains("x"));
+        assert!(plain.contains("10ms"));
+    }
+
+    // --- MergeProgress text mode tests ---
+
+    #[test]
+    fn test_progress_set_message_text_mode_no_panic() {
+        let progress = MergeProgress::new_text(5);
+        progress.set_message("processing...");
+        progress.finish();
+    }
+
+    #[test]
+    fn test_progress_record_with_retry() {
+        let progress = MergeProgress::new_text(5);
+        progress.record("vid", false, Duration::from_secs(1), None, Some(1));
+        progress.finish();
+    }
+
+    #[test]
+    fn test_progress_text_mode_finish_idempotent() {
+        let progress = MergeProgress::new_text(3);
+        progress.finish();
+        progress.finish(); // should not panic on double-finish
+    }
+}

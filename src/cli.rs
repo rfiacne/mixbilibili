@@ -297,6 +297,10 @@ impl Args {
             bail!("Cannot use --interactive with --dry-run");
         }
 
+        if self.verbose && self.quiet {
+            bail!("{}", t("verbose_quiet_conflict"));
+        }
+
         if !self.source.is_dir() {
             bail!(
                 "{}",
@@ -309,6 +313,24 @@ impl Args {
                 "{}",
                 tf("not_dir_output", &[&self.output.display().to_string()])
             );
+        }
+
+        // Prevent source==output + mp4/mov format from overwriting source video files
+        if self.format == OutputFormat::Mp4 || self.format == OutputFormat::Mov {
+            let src = std::fs::canonicalize(&self.source).ok();
+            let out = self
+                .output
+                .exists()
+                .then(|| std::fs::canonicalize(&self.output).ok())
+                .flatten();
+            if let (Some(s), Some(o)) = (src, out) {
+                if s == o {
+                    bail!(
+                        "{}",
+                        tf("same_source_output", &[&self.format.to_string()])
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -458,13 +480,22 @@ mod args_tests {
             .try_get_matches_from(["mixbilibili", "--sdel"])
             .unwrap();
         let args = parse_args(&matches);
-        assert!(args.sdel);
+        assert!(args.sdel); // bare --sdel uses default_missing_value("true")
     }
 
     #[test]
     fn test_sdel_bare_short() {
         let matches = build_cli()
             .try_get_matches_from(["mixbilibili", "-d"])
+            .unwrap();
+        let args = parse_args(&matches);
+        assert!(args.sdel); // bare -d uses default_missing_value("true")
+    }
+
+    #[test]
+    fn test_sdel_explicit_true() {
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "--sdel", "true"])
             .unwrap();
         let args = parse_args(&matches);
         assert!(args.sdel);
@@ -647,5 +678,65 @@ mod validation_tests {
         args.source = PathBuf::from("/nonexistent/path/that/does/not/exist");
         let result = args.validate();
         assert!(result.is_err(), "validate should reject nonexistent source");
+    }
+
+    #[test]
+    fn test_validate_rejects_mp4_same_source_output() {
+        let dir = tempdir().unwrap();
+        let mut args = make_args();
+        args.source = dir.path().to_path_buf();
+        args.output = dir.path().to_path_buf();
+        args.format = OutputFormat::Mp4;
+        let result = args.validate();
+        assert!(result.is_err(), "should reject mp4 when source == output");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("overwrite") || err_msg.contains("覆盖"));
+    }
+
+    #[test]
+    fn test_validate_allows_mkv_same_source_output() {
+        let dir = tempdir().unwrap();
+        let mut args = make_args();
+        args.source = dir.path().to_path_buf();
+        args.output = dir.path().to_path_buf();
+        args.format = OutputFormat::Mkv;
+        // mkv extension differs from mp4 input, so no overwrite risk
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_allows_mp4_different_dirs() {
+        let dir1 = tempdir().unwrap();
+        let dir2 = tempdir().unwrap();
+        let mut args = make_args();
+        args.source = dir1.path().to_path_buf();
+        args.output = dir2.path().to_path_buf();
+        args.format = OutputFormat::Mp4;
+        assert!(args.validate().is_ok(), "mp4 with different dirs should be allowed");
+    }
+
+    #[test]
+    fn test_validate_rejects_verbose_with_quiet() {
+        let mut args = make_args();
+        args.verbose = true;
+        args.quiet = true;
+        let result = args.validate();
+        assert!(result.is_err(), "should reject --verbose with --quiet");
+    }
+
+    #[test]
+    fn test_validate_accepts_verbose_alone() {
+        let mut args = make_args();
+        args.verbose = true;
+        args.quiet = false;
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_quiet_alone() {
+        let mut args = make_args();
+        args.verbose = false;
+        args.quiet = true;
+        assert!(args.validate().is_ok());
     }
 }

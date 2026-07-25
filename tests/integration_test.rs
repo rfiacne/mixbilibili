@@ -145,6 +145,7 @@ fn test_basic_merge() {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(result.status.success(), "Command failed: {}", stderr);
 
+    // Non-recursive mode: output uses bare stem
     let output_file = output.join("test_video.mkv");
     assert!(
         output_file.exists(),
@@ -225,6 +226,7 @@ fn test_merge_with_delete_source() {
 
     assert!(result.status.success());
 
+    // Non-recursive mode: output uses bare stem
     let output_file = output.join("del_video.mkv");
     assert!(output_file.exists(), "Output file should exist");
 
@@ -376,6 +378,7 @@ fn test_resume_after_partial() {
         .expect("Failed to execute first run");
 
     assert!(result1.status.success());
+    // Non-recursive mode: output uses bare stem
     assert!(output.join("video1.mkv").exists());
     assert!(output.join("video2.mkv").exists());
 
@@ -383,9 +386,10 @@ fn test_resume_after_partial() {
     fs::remove_file(output.join("video1.mkv")).unwrap();
     fs::remove_file(output.join("video2.mkv")).unwrap();
 
-    // Create a state file marking video1 as completed
+    // Create a state file marking video1 as completed (bare stem in non-recursive)
     let state_content = format!(
         r#"{{
+  "version": 1,
   "source_dir": "{}",
   "output_dir": "{}",
   "completed": ["video1"],

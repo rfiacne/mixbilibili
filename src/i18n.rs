@@ -240,8 +240,8 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "failed_delete_video_audio_gone"), "Failed to delete video '{0}': Audio already deleted from '{1}'"),
     ((Lang::Cn, "failed_delete_video"), "无法删除视频 '{0}'：{1}。音频已从 '{2}' 删除"),
     ((Lang::En, "failed_delete_video"), "Failed to delete video '{0}': {1}. Audio already deleted from '{2}'"),
-    ((Lang::Cn, "failed_build_pool"), "无法创建线程池"),
-    ((Lang::En, "failed_build_pool"), "Failed to build thread pool"),
+    ((Lang::Cn, "failed_build_pool"), "无法创建线程池: {0}"),
+    ((Lang::En, "failed_build_pool"), "Failed to build thread pool: {0}"),
     ((Lang::Cn, "merge_failed_exit"), "ffmpeg 退出码 {0}，已重试 {1} 次"),
     ((Lang::En, "merge_failed_exit"), "ffmpeg exited with code {0} after {1} retries"),
     ((Lang::Cn, "merge_failed_io"), "{0}，已重试 {1} 次"),
@@ -307,6 +307,14 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "error_context_file"), "File"),
     ((Lang::Cn, "error_context_reason"), "原因"),
     ((Lang::En, "error_context_reason"), "Reason"),
+    // 路径安全检查
+    ((Lang::Cn, "same_source_output"), "源目录和输出目录相同且格式为 {0} 时，输出文件会覆盖源视频。请使用不同的输出目录。"),
+    ((Lang::En, "same_source_output"), "Output directory is the same as source and format is {0}; output would overwrite source video. Use a different output directory."),
+    ((Lang::Cn, "same_source_output_runtime"), "输出路径与输入视频路径相同，跳过以防止覆盖"),
+    ((Lang::En, "same_source_output_runtime"), "Output path identical to input video, skipping to prevent overwrite"),
+    // 参数冲突
+    ((Lang::Cn, "verbose_quiet_conflict"), "不能同时使用 --verbose 和 --quiet"),
+    ((Lang::En, "verbose_quiet_conflict"), "Cannot use --verbose with --quiet"),
 ];
 
 static TRANSLATION_MAP: OnceLock<HashMap<TranslationKey, &'static str>> = OnceLock::new();

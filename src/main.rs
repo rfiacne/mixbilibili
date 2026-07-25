@@ -174,9 +174,11 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
 }
 
 /// Compute display width of a path's file_name component.
+/// Uses unicode-width for correct CJK character width calculation.
 fn file_name_width(p: &std::path::Path) -> usize {
+    use unicode_width::UnicodeWidthStr;
     p.file_name()
-        .map(|n| n.to_string_lossy().len())
+        .map(|n| UnicodeWidthStr::width(n.to_string_lossy().as_ref()))
         .unwrap_or_else(|| p.display().to_string().len())
 }
 
@@ -228,8 +230,11 @@ fn print_preview_pairs(ctx: &ScanContext, format: &cli::OutputFormat, header: &s
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| pair.audio.display().to_string());
 
-        let video_pad = " ".repeat(max_video_width - video_name.len());
-        let audio_pad = " ".repeat(max_audio_width - audio_name.len());
+        // Use unicode-width for correct CJK character padding
+        let video_display_width = unicode_width::UnicodeWidthStr::width(video_name.as_str());
+        let audio_display_width = unicode_width::UnicodeWidthStr::width(audio_name.as_str());
+        let video_pad = " ".repeat(max_video_width.saturating_sub(video_display_width));
+        let audio_pad = " ".repeat(max_audio_width.saturating_sub(audio_display_width));
 
         let num = Colors::secondary(&format!("{:>width$}.", idx + 1, width = idx_width));
         let arrow = Colors::info(symbols.arrow);
@@ -276,19 +281,28 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    // Reset SIGCHLD to SIG_DFL once, before any threads are created.
+    // aria2 sets SIGCHLD to SIG_IGN in its on-download-complete hook,
+    // which causes waitpid() to fail with ECHILD.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+    }
+
+    // Phase 1: Initialize (parse args, verify ffmpeg)
+    let (args, format) = init()?;
+
+    // Set ASCII mode environment variable BEFORE creating any threads.
+    // POSIX: setenv is UB in multi-threaded programs.
+    if args.ascii {
+        std::env::set_var("MIXBILIBILI_ASCII", "1");
+    }
+
     // Set up Ctrl+C handler for graceful shutdown
     ctrlc::set_handler(|| {
         INTERRUPTED.store(true, Ordering::SeqCst);
     })
     .context(t("failed_set_signal").into_owned())?;
-
-    // Phase 1: Initialize
-    let (args, format) = init()?;
-
-    // Set ASCII mode environment variable if --ascii flag is present
-    if args.ascii {
-        std::env::set_var("MIXBILIBILI_ASCII", "1");
-    }
 
     // --once mode: merge a single pair by stem, skip scanning
     if let Some(ref stem) = args.once {
@@ -296,10 +310,16 @@ fn run() -> Result<()> {
     }
 
     // Configure rayon's global thread pool once at startup
-    rayon::ThreadPoolBuilder::new()
+    if let Err(e) = rayon::ThreadPoolBuilder::new()
         .num_threads(args.jobs)
         .build_global()
-        .ok();
+    {
+        eprintln!(
+            "{} {}",
+            t("warning_prefix"),
+            tf("failed_build_pool", &[&e.to_string()])
+        );
+    }
 
     // Phase 2: Scan and filter
     let Some((ctx, mut merge_state)) = scan_and_filter(&args)? else {
@@ -327,8 +347,7 @@ fn run() -> Result<()> {
         std::io::Write::flush(&mut std::io::stdout())?;
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
-        let response = input.trim().to_lowercase();
-        if response != "y" && response != "yes" {
+        if !parse_prompt_response(&input, args.sdel) {
             println!("{}", Colors::warning(&t("interactive_cancelled")));
             state::MergeState::clear(&args.source)?;
             return Ok(());
@@ -376,6 +395,18 @@ fn run() -> Result<()> {
             count: summary.failed_count,
         }
         .into())
+    }
+}
+
+/// Parse user response for (Y/n) prompt. Returns true if the user wants to proceed.
+/// When `destructive` is true (e.g. --sdel), only explicit "y"/"yes" confirms (default-reject).
+/// Otherwise, only "n"/"no" rejects (default-accept), matching the (Y/n) convention.
+fn parse_prompt_response(input: &str, destructive: bool) -> bool {
+    let response = input.trim().to_lowercase();
+    if destructive {
+        response == "y" || response == "yes"
+    } else {
+        !(response == "n" || response == "no")
     }
 }
 
@@ -561,9 +592,11 @@ fn execute(
         for result in &results {
             if result.was_interrupted {
                 let pair = &ctx.pairs[result.pair_index];
+                // stem is composite key "parent/stem", replace "/" with "_" for filename
+                let safe_stem = pair.stem.replace('/', "_");
                 let output_path = args
                     .output
-                    .join(format!("{}.{}", pair.stem, format.extension()));
+                    .join(format!("{}.{}", safe_stem, format.extension()));
                 if output_path.exists() {
                     if let Err(e) = std::fs::remove_file(&output_path) {
                         eprintln!("{} {}", t("warning_prefix").yellow(), e);
@@ -987,6 +1020,16 @@ mod integration_tests {
     }
 
     #[test]
+    fn test_file_name_width_cjk() {
+        use std::path::PathBuf;
+        // CJK characters are 2 columns wide each
+        // "第1集.mp4" = 2+1+2+1+1+1+1 = 9 display columns
+        assert_eq!(file_name_width(&PathBuf::from("第1集.mp4")), 9);
+        // "正片.mp4" = 2+2+1+1+1+1 = 8 display columns
+        assert_eq!(file_name_width(&PathBuf::from("正片.mp4")), 8);
+    }
+
+    #[test]
     fn test_preview_list_alignment() {
         let pairs = vec![
             crate::scanner::FilePair {
@@ -1048,5 +1091,47 @@ mod integration_tests {
             result.is_err(),
             "should error when source_dir doesn't match load path"
         );
+    }
+
+    #[test]
+    fn test_parse_prompt_response_empty_is_yes() {
+        // Non-destructive: empty = yes
+        assert!(parse_prompt_response("", false));
+        // Destructive: empty = NO (default-reject)
+        assert!(!parse_prompt_response("", true));
+    }
+
+    #[test]
+    fn test_parse_prompt_response_whitespace_is_yes() {
+        assert!(parse_prompt_response("   ", false));
+        assert!(!parse_prompt_response("   ", true));
+    }
+
+    #[test]
+    fn test_parse_prompt_response_y_is_yes() {
+        assert!(parse_prompt_response("y", false));
+        assert!(parse_prompt_response("Y", false));
+        assert!(parse_prompt_response("yes", false));
+        assert!(parse_prompt_response("Yes", false));
+        // Also yes in destructive mode
+        assert!(parse_prompt_response("y", true));
+        assert!(parse_prompt_response("yes", true));
+    }
+
+    #[test]
+    fn test_parse_prompt_response_n_is_no() {
+        assert!(!parse_prompt_response("n", false));
+        assert!(!parse_prompt_response("N", false));
+        assert!(!parse_prompt_response("no", false));
+        assert!(!parse_prompt_response("No", false));
+        assert!(!parse_prompt_response("NO", false));
+    }
+
+    #[test]
+    fn test_parse_prompt_response_destructive_rejects_unknown() {
+        // In destructive mode, anything other than y/yes is rejection
+        assert!(!parse_prompt_response("ok", true));
+        assert!(!parse_prompt_response("sure", true));
+        assert!(!parse_prompt_response("yy", true));
     }
 }

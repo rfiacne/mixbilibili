@@ -1,5 +1,4 @@
 /target
-/Cargo.lock
 **/*.rs.bk
 *.pdb
 .DS_Store
@@ -12,3 +11,6 @@
 # Claude Code
 .mcp.json
 CLAUDE.md
+
+# Qoder agent workspace
+.qoder/

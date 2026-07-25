@@ -423,3 +423,143 @@ mod estimate_tests {
         assert_eq!(dur.as_secs(), 20);
     }
 }
+
+/// Tests verifying the no-transcode constraint and full argument correctness.
+#[cfg(test)]
+mod no_transcode_tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+
+    /// Helper: get all args from a command as Strings for easier assertion.
+    fn args_vec(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn test_no_encoding_args_present() {
+        // Ensure no transcoding codecs like libx264/aac/libvorbis sneak in
+        let cmd = build_merge_command(
+            &PathBuf::from("v.mp4"),
+            &PathBuf::from("a.m4a"),
+            &PathBuf::from("o.mkv"),
+            OutputFormat::Mkv,
+        );
+        let args = args_vec(&cmd);
+        let forbidden = ["libx264", "libx265", "aac", "libvorbis", "libopus", "h264", "hevc"];
+        for codec in &forbidden {
+            assert!(
+                !args.contains(&codec.to_string()),
+                "Command should not contain encoding codec '{}', args: {:?}",
+                codec,
+                args
+            );
+        }
+    }
+
+    #[test]
+    fn test_copy_codec_appears_for_both_streams() {
+        let cmd = build_merge_command(
+            &PathBuf::from("v.mp4"),
+            &PathBuf::from("a.m4a"),
+            &PathBuf::from("o.mkv"),
+            OutputFormat::Mkv,
+        );
+        let args = args_vec(&cmd);
+
+        // Find positions of -c:v and -c:a and verify their following arg is "copy"
+        let cv_idx = args.iter().position(|a| a == "-c:v").expect("-c:v should exist");
+        let ca_idx = args.iter().position(|a| a == "-c:a").expect("-c:a should exist");
+        assert_eq!(args[cv_idx + 1], "copy", "-c:v must be followed by 'copy'");
+        assert_eq!(args[ca_idx + 1], "copy", "-c:a must be followed by 'copy'");
+    }
+
+    #[test]
+    fn test_input_paths_in_correct_order() {
+        let video = PathBuf::from("/path/to/video.mp4");
+        let audio = PathBuf::from("/path/to/audio.m4a");
+        let output = PathBuf::from("/out/merged.mkv");
+
+        let cmd = build_merge_command(&video, &audio, &output, OutputFormat::Mkv);
+        let args = args_vec(&cmd);
+
+        // First -i should be video, second -i should be audio
+        let i_positions: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.as_str() == "-i")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(i_positions.len(), 2, "Should have exactly 2 -i flags");
+        assert_eq!(args[i_positions[0] + 1], video.to_string_lossy());
+        assert_eq!(args[i_positions[1] + 1], audio.to_string_lossy());
+    }
+
+    #[test]
+    fn test_output_path_is_last_arg() {
+        let output = PathBuf::from("/out/result.mkv");
+        let cmd = build_merge_command(
+            &PathBuf::from("v.mp4"),
+            &PathBuf::from("a.m4a"),
+            &output,
+            OutputFormat::Mkv,
+        );
+        let args = args_vec(&cmd);
+        assert_eq!(
+            args.last().unwrap(),
+            &output.to_string_lossy().to_string(),
+            "Output path should be the last argument"
+        );
+    }
+
+    #[test]
+    fn test_mp4_format_adds_movflags_faststart() {
+        let cmd = build_merge_command(
+            &PathBuf::from("v.mp4"),
+            &PathBuf::from("a.m4a"),
+            &PathBuf::from("o.mp4"),
+            OutputFormat::Mp4,
+        );
+        let args = args_vec(&cmd);
+        let movflags_idx = args.iter().position(|a| a == "-movflags");
+        assert!(movflags_idx.is_some(), "MP4 should have -movflags");
+        assert_eq!(args[movflags_idx.unwrap() + 1], "+faststart");
+    }
+
+    #[test]
+    fn test_mkv_format_no_movflags() {
+        let cmd = build_merge_command(
+            &PathBuf::from("v.mp4"),
+            &PathBuf::from("a.m4a"),
+            &PathBuf::from("o.mkv"),
+            OutputFormat::Mkv,
+        );
+        let args = args_vec(&cmd);
+        assert!(
+            !args.contains(&"-movflags".to_string()),
+            "MKV should not have -movflags"
+        );
+    }
+
+    #[test]
+    fn test_command_program_is_ffmpeg() {
+        let cmd = build_merge_command(
+            &PathBuf::from("v.mp4"),
+            &PathBuf::from("a.m4a"),
+            &PathBuf::from("o.mkv"),
+            OutputFormat::Mkv,
+        );
+        assert_eq!(cmd.get_program(), OsStr::new("ffmpeg"));
+    }
+
+    #[test]
+    fn test_estimate_empty_file_returns_zero() {
+        use std::time::Duration;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // 0 bytes file
+        let dur = estimate_merge_duration(tmp.path());
+        assert_eq!(dur, Duration::ZERO);
+    }
+}
