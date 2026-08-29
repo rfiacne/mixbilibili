@@ -1,16 +1,127 @@
 use crate::cli::OutputFormat;
 use crate::i18n::{t, tf};
-use std::io::{self, BufRead, Write};
+use crate::interrupt::Interrupt;
+use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 pub fn is_ffmpeg_available() -> bool {
     which::which("ffmpeg").is_ok()
 }
 
-#[cfg(test)]
-pub fn ffmpeg_path() -> Option<std::path::PathBuf> {
-    which::which("ffmpeg").ok()
+/// How a merge command finished, expressed without `std::process` so tests can
+/// fabricate an outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunOutcome {
+    Success,
+    /// ffmpeg exited non-zero. `message` is what it wrote to stderr, which is
+    /// the only reason the user ever gets.
+    Failed {
+        code: Option<i32>,
+        message: String,
+    },
+    /// ffmpeg was still running when the timeout elapsed and was killed.
+    TimedOut,
+    /// ffmpeg was killed because the run was cancelled. Distinct from
+    /// `TimedOut`: a cancelled pair stays pending rather than being recorded
+    /// as a failure.
+    Cancelled,
+}
+
+/// Seam at the ffmpeg process boundary.
+///
+/// Two adapters satisfy it: [`FfmpegRunner`], which really spawns ffmpeg, and
+/// the scripted runner in the test suite, which replays canned outcomes.
+/// Merge policy — retry, validate, clean up — lives above this seam, in
+/// `merger`.
+pub trait MergeRunner: Send + Sync {
+    fn run(&self, cmd: &mut Command, interrupt: &Interrupt) -> io::Result<RunOutcome>;
+}
+
+const FFMPEG_TIMEOUT: Duration = Duration::from_secs(300);
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Production adapter: spawn ffmpeg, poll it until it exits, the timeout
+/// elapses, or the run is cancelled.
+pub struct FfmpegRunner {
+    pub timeout: Duration,
+}
+
+impl Default for FfmpegRunner {
+    fn default() -> Self {
+        Self {
+            timeout: FFMPEG_TIMEOUT,
+        }
+    }
+}
+
+impl MergeRunner for FfmpegRunner {
+    fn run(&self, cmd: &mut Command, interrupt: &Interrupt) -> io::Result<RunOutcome> {
+        let mut child = cmd.stderr(Stdio::piped()).spawn()?;
+
+        // Drain stderr on another thread: a full pipe would otherwise let
+        // ffmpeg block forever while we poll for its exit. A channel rather
+        // than a join handle, because a killed child can leave the pipe's
+        // write end open in a grandchild — waiting on it would hang us.
+        let mut stderr = child.stderr.take().expect("stderr is piped above");
+        let (sender, captured) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = stderr.read_to_end(&mut buffer);
+            let _ = sender.send(buffer);
+        });
+
+        match wait_with_timeout(&mut child, self.timeout, POLL_INTERVAL, interrupt) {
+            Ok(Some(status)) if status.success() => {
+                let _ = read_captured(&captured);
+                Ok(RunOutcome::Success)
+            }
+            Ok(Some(status)) => Ok(RunOutcome::Failed {
+                code: status.code(),
+                message: read_captured(&captured),
+            }),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // Cancelled and timed out both mean "it was still running";
+                // only the reason differs, and the caller acts differently.
+                Ok(if interrupt.is_triggered() {
+                    RunOutcome::Cancelled
+                } else {
+                    RunOutcome::TimedOut
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// The child has exited, so its end of the pipe is closed; the short timeout
+/// covers the pathological case without ever hanging the batch.
+fn read_captured(captured: &std::sync::mpsc::Receiver<Vec<u8>>) -> String {
+    captured
+        .recv_timeout(Duration::from_secs(1))
+        .map(|buffer| String::from_utf8_lossy(&buffer).into_owned())
+        .unwrap_or_default()
+}
+
+/// Poll `try_wait` until the child exits, `timeout` elapses, or the run is
+/// cancelled. `Ok(None)` means the child is still running and must be killed.
+fn wait_with_timeout(
+    child: &mut Child,
+    timeout: Duration,
+    poll_interval: Duration,
+    interrupt: &Interrupt,
+) -> io::Result<Option<std::process::ExitStatus>> {
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait()? {
+            Some(status) => return Ok(Some(status)),
+            None if interrupt.is_triggered() || start.elapsed() >= timeout => return Ok(None),
+            None => std::thread::sleep(poll_interval),
+        }
+    }
 }
 
 // Os variants are matched in get_install_command/get_manual_instructions
@@ -222,6 +333,81 @@ pub fn estimate_merge_duration(video_path: &Path) -> std::time::Duration {
     std::time::Duration::from_secs(estimated_seconds as u64)
 }
 
+#[cfg(all(test, unix))]
+mod runner_tests {
+    use super::*;
+
+    fn sh(script: &str) -> Command {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script]);
+        cmd.stdout(Stdio::null());
+        cmd
+    }
+
+    #[test]
+    fn adapter_reports_success() {
+        let outcome = FfmpegRunner::default()
+            .run(&mut sh("exit 0"), &Interrupt::new())
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Success);
+    }
+
+    #[test]
+    fn adapter_reports_the_exit_code_and_what_was_written_to_stderr() {
+        // Quiet mode can only promise silence because this output is captured
+        // rather than inherited, and the reason is what the report shows.
+        let outcome = FfmpegRunner::default()
+            .run(&mut sh("echo boom >&2; exit 3"), &Interrupt::new())
+            .unwrap();
+        match outcome {
+            RunOutcome::Failed { code, message } => {
+                assert_eq!(code, Some(3));
+                assert_eq!(message.trim(), "boom");
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_kills_a_slow_child_and_calls_it_a_timeout() {
+        let runner = FfmpegRunner {
+            timeout: Duration::from_millis(100),
+        };
+        let start = std::time::Instant::now();
+        let outcome = runner.run(&mut sh("sleep 30"), &Interrupt::new()).unwrap();
+        assert_eq!(outcome, RunOutcome::TimedOut);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the child must be killed, not waited out"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_run_is_not_a_timeout() {
+        // The pair has to stay pending for --resume, so the two must not share
+        // an outcome.
+        let interrupt = Interrupt::new();
+        interrupt.trigger();
+        let outcome = FfmpegRunner {
+            timeout: Duration::from_millis(100),
+        }
+        .run(&mut sh("sleep 30"), &interrupt)
+        .unwrap();
+        assert_eq!(outcome, RunOutcome::Cancelled);
+    }
+
+    #[test]
+    fn adapter_surfaces_a_failed_spawn() {
+        let err = FfmpegRunner::default()
+            .run(
+                &mut Command::new("definitely-not-a-real-binary-xyz"),
+                &Interrupt::new(),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,19 +418,6 @@ mod tests {
         // It should not panic either way
         let _ = is_ffmpeg_available();
     }
-
-    #[test]
-    fn test_ffmpeg_path_returns_some_if_available() {
-        // If ffmpeg is installed, should return Some
-        if is_ffmpeg_available() {
-            assert!(ffmpeg_path().is_some());
-        }
-    }
-}
-
-#[cfg(test)]
-mod os_tests {
-    use super::*;
 
     #[test]
     fn test_detect_os_returns_valid_value() {

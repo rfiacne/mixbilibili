@@ -97,12 +97,10 @@ impl From<anyhow::Error> for Failure {
 }
 
 /// Initialize the application: parse args, verify ffmpeg, ensure directories.
-fn init() -> Result<(Args, cli::OutputFormat)> {
+fn init() -> Result<Args> {
     let matches = cli::build_cli().get_matches();
     let mut args = cli::parse_args(&matches);
     args.validate()?;
-
-    let format = args.format;
 
     if !ffmpeg::ensure_ffmpeg()? {
         return Err(AppError::FfmpegNotFound.into());
@@ -112,13 +110,15 @@ fn init() -> Result<(Args, cli::OutputFormat)> {
         std::fs::create_dir_all(&args.output).context(t("failed_create_output").into_owned())?;
     }
 
-    Ok((args, format))
+    Ok(args)
 }
 
 /// Result of the scan-and-filter phase.
 struct ScanContext {
     /// Pairs ready for merging (filtered by resume state).
     pairs: Vec<scanner::FilePair>,
+    /// Where the merged files go, so the preview cannot disagree with the run.
+    format: cli::OutputFormat,
     /// Original scan statistics (skipped, orphaned, etc.).
     stats: scanner::ScanStats,
     /// Estimated total merge duration.
@@ -190,6 +190,7 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
 
     let ctx = ScanContext {
         pairs: pairs_to_process,
+        format: args.format,
         stats: scan_result.stats.clone(),
         estimated_duration: scan_result.estimated_duration,
     };
@@ -207,7 +208,7 @@ fn file_name_width(p: &std::path::Path) -> usize {
 }
 
 /// Print preview of pairs to be processed, including header and time estimate.
-fn print_preview_pairs(ctx: &ScanContext, format: &cli::OutputFormat, header: &str) {
+fn print_preview_pairs(ctx: &ScanContext, header: &str) {
     use crate::ui::{Colors, Symbols};
 
     let symbols = Symbols::new(crate::ui::supports_unicode());
@@ -273,7 +274,7 @@ fn print_preview_pairs(ctx: &ScanContext, format: &cli::OutputFormat, header: &s
             audio_name,
             audio_pad,
             Colors::info(&pair.stem),
-            format.extension()
+            ctx.format.extension()
         );
     }
 
@@ -307,7 +308,8 @@ fn run_inner() -> Result<()> {
     }
 
     // Phase 1: Initialize (parse args, verify ffmpeg)
-    let (args, format) = init()?;
+    let args = init()?;
+    let runner = ffmpeg::FfmpegRunner::default();
 
     // Set ASCII mode environment variable BEFORE creating any threads.
     // POSIX: setenv is UB in multi-threaded programs.
@@ -320,7 +322,7 @@ fn run_inner() -> Result<()> {
 
     // --once mode: merge a single pair by stem, skip scanning
     if let Some(ref stem) = args.once {
-        return run_once(&args, format, stem, &interrupt);
+        return run_once(&args, stem, &interrupt, &runner);
     }
 
     // Configure rayon's global thread pool once at startup
@@ -344,7 +346,7 @@ fn run_inner() -> Result<()> {
     if args.interactive {
         use crate::ui::Colors;
 
-        print_preview_pairs(&ctx, &format, &t("interactive_preview_header"));
+        print_preview_pairs(&ctx, &t("interactive_preview_header"));
         if args.sdel {
             println!("{}", Colors::warning(&t("dry_run_sdel_header")));
         }
@@ -371,7 +373,7 @@ fn run_inner() -> Result<()> {
     // Phase 3: Dry-run preview or execute merges
     if args.dry_run {
         if !args.quiet {
-            print_preview_pairs(&ctx, &format, &t("dry_run_header"));
+            print_preview_pairs(&ctx, &t("dry_run_header"));
             if args.sdel {
                 println!("\n{}", t("dry_run_sdel_header").yellow().bold());
                 for pair in &ctx.pairs {
@@ -391,7 +393,7 @@ fn run_inner() -> Result<()> {
         return Ok(());
     }
 
-    let summary = execute(&args, ctx, &mut merge_state, format, &interrupt)?;
+    let summary = execute(&args, ctx, &mut merge_state, &interrupt, &runner)?;
 
     // Phase 4: Update state and report
     finalize(&args, merge_state, &summary)?;
@@ -453,9 +455,9 @@ fn validate_stem(stem: &str) -> Result<()> {
 /// No scanning, no state file, no progress bar — just merge and exit.
 fn run_once(
     args: &Args,
-    format: cli::OutputFormat,
     stem: &str,
     interrupt: &Interrupt,
+    runner: &dyn ffmpeg::MergeRunner,
 ) -> Result<()> {
     // Validate stem before using it
     validate_stem(stem)?;
@@ -484,13 +486,13 @@ fn run_once(
 
     let plan = merger::MergePlan {
         output_dir: &args.output,
-        format,
+        format: args.format,
         retries: args.retry,
         verbose: args.verbose,
         progress: None,
         interrupt,
     };
-    let result = merger::merge_pair(&pair, 0, &plan);
+    let result = merger::merge_pair(&pair, 0, &plan, runner);
 
     if result.success {
         if args.sdel {
@@ -522,8 +524,8 @@ fn execute(
     args: &Args,
     ctx: ScanContext,
     merge_state: &mut state::MergeState,
-    format: cli::OutputFormat,
     interrupt: &Interrupt,
+    runner: &dyn ffmpeg::MergeRunner,
 ) -> Result<merger::MergeSummary> {
     if !args.quiet {
         if let Some(msg) = ctx.format_time_estimate() {
@@ -554,13 +556,13 @@ fn execute(
         .map(|(idx, pair)| {
             let plan = merger::MergePlan {
                 output_dir: &args.output,
-                format,
+                format: args.format,
                 retries: args.retry,
                 verbose: args.verbose,
                 progress: progress.as_ref(),
                 interrupt,
             };
-            let result = merger::merge_pair(pair, idx, &plan);
+            let result = merger::merge_pair(pair, idx, &plan, runner);
 
             // Update state and periodically save
             let snapshot = {
@@ -800,9 +802,9 @@ mod tests {
 
         let result = run_once(
             &args,
-            cli::OutputFormat::Mkv,
             "../escape",
             &Interrupt::new(),
+            &ffmpeg::FfmpegRunner::default(),
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -839,9 +841,9 @@ mod tests {
 
         let result = run_once(
             &args,
-            cli::OutputFormat::Mkv,
             "/etc/passwd",
             &Interrupt::new(),
+            &ffmpeg::FfmpegRunner::default(),
         );
         assert!(result.is_err());
     }
@@ -872,9 +874,9 @@ mod tests {
 
         let result = run_once(
             &args,
-            cli::OutputFormat::Mkv,
             "..\\escape",
             &Interrupt::new(),
+            &ffmpeg::FfmpegRunner::default(),
         );
         assert!(result.is_err());
     }
@@ -905,9 +907,9 @@ mod tests {
 
         let result = run_once(
             &args,
-            cli::OutputFormat::Mkv,
             "evil\0path",
             &Interrupt::new(),
+            &ffmpeg::FfmpegRunner::default(),
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -948,7 +950,12 @@ mod tests {
         };
 
         // Should not error on validation (may error on ffmpeg, but that's OK)
-        let result = run_once(&args, cli::OutputFormat::Mkv, "video", &Interrupt::new());
+        let result = run_once(
+            &args,
+            "video",
+            &Interrupt::new(),
+            &ffmpeg::FfmpegRunner::default(),
+        );
         // We're only testing validation, not actual merge
         // If it gets past validation, it will try to run ffmpeg
         // So we just check it doesn't error with "invalid stem"

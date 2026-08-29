@@ -1,57 +1,13 @@
 use crate::cli::OutputFormat;
-use crate::ffmpeg;
+use crate::ffmpeg::{self, MergeRunner, RunOutcome};
 use crate::i18n::{t, tf};
 use crate::interrupt::Interrupt;
 use crate::progress::{format_duration, MergeProgress};
 use crate::scanner::FilePair;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
-use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ExitStatus};
 use std::time::Duration;
-
-const FFMPEG_TIMEOUT: Duration = Duration::from_secs(300);
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-/// Extension trait for `std::process::Child` that adds timeout-aware waiting.
-trait ChildExt {
-    fn wait_with_timeout(
-        &mut self,
-        timeout: Duration,
-        poll_interval: Duration,
-        interrupt: &Interrupt,
-    ) -> io::Result<Option<ExitStatus>>;
-}
-
-impl ChildExt for Child {
-    fn wait_with_timeout(
-        &mut self,
-        timeout: Duration,
-        poll_interval: Duration,
-        interrupt: &Interrupt,
-    ) -> io::Result<Option<ExitStatus>> {
-        let start = std::time::Instant::now();
-        loop {
-            match self.try_wait() {
-                Ok(Some(status)) => return Ok(Some(status)),
-                Ok(None) => {
-                    // Check for interrupt signal and kill child if interrupted
-                    if interrupt.is_triggered() {
-                        let _ = self.kill();
-                        let _ = self.wait();
-                        return Ok(None);
-                    }
-                    if start.elapsed() >= timeout {
-                        return Ok(None);
-                    }
-                    std::thread::sleep(poll_interval);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct MergeResult {
@@ -274,7 +230,12 @@ pub fn output_name(pair: &FilePair, format: OutputFormat) -> String {
     format!("{}.{}", pair.stem.replace('/', "_"), format.extension())
 }
 
-pub fn merge_pair(pair: &FilePair, pair_index: usize, plan: &MergePlan) -> MergeResult {
+pub fn merge_pair(
+    pair: &FilePair,
+    pair_index: usize,
+    plan: &MergePlan,
+    runner: &dyn MergeRunner,
+) -> MergeResult {
     let output_path = plan.output_dir.join(output_name(pair, plan.format));
 
     if plan.interrupt.is_triggered() {
@@ -307,7 +268,7 @@ pub fn merge_pair(pair: &FilePair, pair_index: usize, plan: &MergePlan) -> Merge
         );
     }
 
-    do_merge(pair, output_path, pair_index, plan)
+    do_merge(pair, output_path, pair_index, plan, runner)
 }
 
 fn record_failure(
@@ -366,6 +327,7 @@ fn do_merge(
     output_path: PathBuf,
     pair_index: usize,
     plan: &MergePlan,
+    runner: &dyn MergeRunner,
 ) -> MergeResult {
     let start = std::time::Instant::now();
     let retries = plan.retries;
@@ -400,23 +362,31 @@ fn do_merge(
 
         // Each arm below either returns, retries, or falls through to the one
         // failure exit at the bottom of the loop.
-        let error_msg = match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT, plan.interrupt) {
-            Ok(status) if status.success() => match validate_output(&output_path) {
+        let error_msg = match runner.run(&mut cmd, plan.interrupt) {
+            Ok(RunOutcome::Success) => match validate_output(&output_path) {
                 // ffmpeg claims it worked; the file on disk has to agree.
                 Ok(()) => {
                     return record_success(pair, pair_index, output_path, start.elapsed(), plan)
                 }
                 Err(e) => e.to_string(),
             },
-            Ok(status) if attempt < retries => {
-                let _ = status;
-                continue;
+            // A cancelled pair is not a failure: it stays pending for resume.
+            Ok(RunOutcome::Cancelled) => {
+                return MergeResult {
+                    pair_index,
+                    pair_name: pair.stem.clone(),
+                    output_path,
+                    success: false,
+                    error: None,
+                    duration: start.elapsed(),
+                    was_interrupted: true,
+                }
             }
-            Ok(status) => tf(
-                "merge_failed_exit",
-                &[&exit_code_text(status.code()), &retries.to_string()],
-            ),
+            Ok(RunOutcome::TimedOut) if attempt < retries => continue,
+            Ok(RunOutcome::Failed { .. }) if attempt < retries => continue,
             Err(_) if attempt < retries => continue,
+            Ok(RunOutcome::TimedOut) => t("timed_out").into_owned(),
+            Ok(RunOutcome::Failed { code, message }) => failure_message(code, &message, retries),
             Err(e) => tf("merge_failed_io", &[&e.to_string(), &retries.to_string()]),
         };
 
@@ -471,28 +441,23 @@ fn announce_retry(pair: &FilePair, attempt: usize, plan: &MergePlan) {
     }
 }
 
+/// What ffmpeg said beats a bare exit code, so the last line of its stderr is
+/// appended when there is one.
+fn failure_message(code: Option<i32>, stderr: &str, retries: usize) -> String {
+    let base = tf(
+        "merge_failed_exit",
+        &[&exit_code_text(code), &retries.to_string()],
+    );
+    match stderr.trim().lines().last() {
+        Some(reason) => format!("{base}: {reason}"),
+        None => base,
+    }
+}
+
 /// Render an exit code for a message, when there is one.
 fn exit_code_text(code: Option<i32>) -> String {
     code.map(|c| c.to_string())
         .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn run_with_timeout(
-    cmd: &mut std::process::Command,
-    timeout: Duration,
-    interrupt: &Interrupt,
-) -> Result<ExitStatus> {
-    let mut child = cmd.spawn().context(t("failed_to_spawn"))?;
-
-    match child.wait_with_timeout(timeout, POLL_INTERVAL, interrupt) {
-        Ok(Some(status)) => Ok(status),
-        Ok(None) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            anyhow::bail!("{}", t("timed_out"));
-        }
-        Err(e) => Err(e).context(t("failed_to_wait")),
-    }
 }
 
 pub(crate) fn delete_source_files(pair: &FilePair) -> Result<()> {
@@ -1003,86 +968,6 @@ mod delete_tests {
 }
 
 #[cfg(test)]
-mod timeout_tests {
-    use super::*;
-
-    #[test]
-    fn test_wait_timeout_normal_completion() {
-        // Use cross-platform sleep command
-        #[cfg(unix)]
-        let mut child = std::process::Command::new("sleep")
-            .arg("0.1")
-            .spawn()
-            .expect("sleep command should be available");
-
-        #[cfg(windows)]
-        let mut child = std::process::Command::new("timeout")
-            .arg("/T")
-            .arg("1")
-            .arg("/NOBREAK")
-            .spawn()
-            .expect("timeout command should be available");
-
-        let result =
-            child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL, &Interrupt::new());
-        assert!(result.is_ok());
-        let status = result.unwrap();
-        assert!(status.is_some());
-    }
-
-    #[test]
-    fn test_wait_timeout_exceeded() {
-        #[cfg(unix)]
-        let mut child = std::process::Command::new("sleep")
-            .arg("10")
-            .spawn()
-            .expect("sleep command should be available");
-
-        #[cfg(windows)]
-        let mut child = std::process::Command::new("timeout")
-            .arg("/T")
-            .arg("10")
-            .arg("/NOBREAK")
-            .spawn()
-            .expect("timeout command should be available");
-
-        let result =
-            child.wait_with_timeout(Duration::from_millis(50), POLL_INTERVAL, &Interrupt::new());
-        assert!(result.is_ok());
-        // Should return None indicating timeout
-        let status = result.unwrap();
-        assert!(status.is_none());
-    }
-
-    #[test]
-    fn test_wait_timeout_already_finished() {
-        // Very short sleep that finishes almost immediately
-        #[cfg(unix)]
-        let mut child = std::process::Command::new("sleep")
-            .arg("0.01")
-            .spawn()
-            .expect("sleep command should be available");
-
-        #[cfg(windows)]
-        let mut child = std::process::Command::new("timeout")
-            .arg("/T")
-            .arg("1")
-            .arg("/NOBREAK")
-            .spawn()
-            .expect("timeout command should be available");
-
-        // Wait a bit for it to finish
-        std::thread::sleep(Duration::from_millis(150));
-
-        let result =
-            child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL, &Interrupt::new());
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_some());
-    }
-}
-
-/// Additional pure-logic tests for MergeSummary and MergeResult.
-#[cfg(test)]
 mod summary_logic_tests {
     use super::*;
 
@@ -1235,7 +1120,7 @@ mod summary_logic_tests {
             progress: None,
             interrupt: &interrupt,
         };
-        let result = merge_pair(&pair, 0, &plan);
+        let result = merge_pair(&pair, 0, &plan, &crate::ffmpeg::FfmpegRunner::default());
 
         assert!(
             !result.success,
