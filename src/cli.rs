@@ -325,10 +325,7 @@ impl Args {
                 .flatten();
             if let (Some(s), Some(o)) = (src, out) {
                 if s == o {
-                    bail!(
-                        "{}",
-                        tf("same_source_output", &[&self.format.to_string()])
-                    );
+                    bail!("{}", tf("same_source_output", &[&self.format.to_string()]));
                 }
             }
         }
@@ -712,7 +709,10 @@ mod validation_tests {
         args.source = dir1.path().to_path_buf();
         args.output = dir2.path().to_path_buf();
         args.format = OutputFormat::Mp4;
-        assert!(args.validate().is_ok(), "mp4 with different dirs should be allowed");
+        assert!(
+            args.validate().is_ok(),
+            "mp4 with different dirs should be allowed"
+        );
     }
 
     #[test]

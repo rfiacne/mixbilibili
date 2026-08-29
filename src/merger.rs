@@ -1118,8 +1118,12 @@ mod summary_logic_tests {
     #[test]
     fn test_merge_summary_failures_vec() {
         let mut summary = MergeSummary::default();
-        summary.failures.push(("a.mp4".to_string(), "err1".to_string()));
-        summary.failures.push(("b.mp4".to_string(), "err2".to_string()));
+        summary
+            .failures
+            .push(("a.mp4".to_string(), "err1".to_string()));
+        summary
+            .failures
+            .push(("b.mp4".to_string(), "err2".to_string()));
         summary.failed_count = 2;
         assert_eq!(summary.failures.len(), 2);
         assert!(!summary.all_success());
@@ -1207,9 +1211,13 @@ mod summary_logic_tests {
             0,
         );
 
-        assert!(!result.success, "merge_pair should reject identical output path");
         assert!(
-            result.error.as_ref().unwrap().contains("identical") || result.error.as_ref().unwrap().contains("相同"),
+            !result.success,
+            "merge_pair should reject identical output path"
+        );
+        assert!(
+            result.error.as_ref().unwrap().contains("identical")
+                || result.error.as_ref().unwrap().contains("相同"),
             "Error should mention identical path: {:?}",
             result.error
         );

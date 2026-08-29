@@ -587,7 +587,10 @@ mod state_logic_tests {
     #[test]
     fn test_state_file_path_format() {
         let path = MergeState::state_file_path(Path::new("/some/dir"));
-        assert_eq!(path.file_name().unwrap().to_str().unwrap(), ".mixbilibili_state.json");
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            ".mixbilibili_state.json"
+        );
         assert_eq!(path.parent().unwrap(), Path::new("/some/dir"));
     }
 
@@ -674,7 +677,10 @@ mod state_logic_tests {
         state.save(dir.path()).unwrap();
 
         let content = fs::read_to_string(MergeState::state_file_path(dir.path())).unwrap();
-        assert!(content.contains("\"version\""), "serialized state should include version field");
+        assert!(
+            content.contains("\"version\""),
+            "serialized state should include version field"
+        );
     }
 
     #[test]

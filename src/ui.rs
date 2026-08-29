@@ -2,25 +2,34 @@ use colored::Colorize;
 
 /// Detect whether the terminal supports Unicode output.
 pub fn supports_unicode() -> bool {
-    // Check force-ASCII override
-    if std::env::var("MIXBILIBILI_ASCII").is_ok() {
+    prefers_unicode(
+        std::env::var("MIXBILIBILI_ASCII").is_ok(),
+        std::env::var("LANG").ok().as_deref(),
+        std::env::var("LC_ALL").ok().as_deref(),
+    )
+}
+
+/// The rule, as a function of the only things it reads: an ASCII override and
+/// the locale variables. Pure, so it is testable without touching the process
+/// environment.
+fn prefers_unicode(ascii_override: bool, lang: Option<&str>, lc_all: Option<&str>) -> bool {
+    if ascii_override {
         return false;
     }
-    if let Ok(lang) = std::env::var("LANG") {
-        if lang.contains("UTF-8") || lang.contains("utf-8") {
-            return true;
-        }
+    // "C.utf8" is as valid a UTF-8 locale as "C.UTF-8", and both spellings
+    // appear in the wild.
+    let utf8 = |value: Option<&str>| {
+        value
+            .map(|v| {
+                let v = v.to_lowercase();
+                v.contains("utf-8") || v.contains("utf8")
+            })
+            .unwrap_or(false)
+    };
+    if utf8(lang) || utf8(lc_all) {
+        return true;
     }
-    if let Ok(lc_all) = std::env::var("LC_ALL") {
-        if lc_all.contains("UTF-8") || lc_all.contains("utf-8") {
-            return true;
-        }
-    }
-    #[cfg(target_os = "macos")]
-    return true;
-
-    #[cfg(not(target_os = "macos"))]
-    false
+    cfg!(target_os = "macos")
 }
 
 /// Unicode/ASCII symbol mapping for terminal output.
@@ -103,9 +112,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_supports_unicode_default() {
-        let result = supports_unicode();
-        assert!(result == true || result == false);
+    fn an_ascii_override_beats_everything() {
+        assert!(!prefers_unicode(
+            true,
+            Some("zh_CN.UTF-8"),
+            Some("en_US.UTF-8")
+        ));
+    }
+
+    #[test]
+    fn a_utf8_locale_enables_unicode_in_either_variable() {
+        assert!(prefers_unicode(false, Some("zh_CN.UTF-8"), None));
+        assert!(prefers_unicode(false, None, Some("en_US.utf8")));
+        assert!(prefers_unicode(false, Some("C.utf8"), None));
+    }
+
+    #[test]
+    fn no_locale_information_falls_back_to_the_platform() {
+        assert_eq!(
+            prefers_unicode(false, None, None),
+            cfg!(target_os = "macos")
+        );
+        assert!(!prefers_unicode(false, Some("C"), Some("POSIX")));
     }
 
     #[test]

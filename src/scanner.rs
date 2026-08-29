@@ -612,7 +612,8 @@ mod scan_tests {
             let video_parent = pair.video.parent().unwrap();
             let audio_parent = pair.audio.parent().unwrap();
             assert_eq!(
-                video_parent, audio_parent,
+                video_parent,
+                audio_parent,
                 "Video and audio must be from same directory: video={}, audio={}",
                 pair.video.display(),
                 pair.audio.display()
@@ -649,11 +650,7 @@ mod scan_tests {
         File::create(season2.join("ep01.m4a")).unwrap();
 
         let result = scan_directory(path, true).unwrap();
-        assert_eq!(
-            result.pairs.len(),
-            1,
-            "only season2/ep01 should be paired"
-        );
+        assert_eq!(result.pairs.len(), 1, "only season2/ep01 should be paired");
         assert_eq!(result.stats.skipped, 1, "season1/ep01 should be skipped");
         assert_eq!(result.pairs[0].stem, "season2/ep01");
     }
@@ -739,7 +736,10 @@ mod collect_tests {
         collect_files(path, path, &mut mp4, &mut m4a, &mut aria2, false).unwrap();
 
         // In non-recursive mode, aria2 set uses bare stem
-        assert!(aria2.contains("video"), "aria2 should contain bare key: video");
+        assert!(
+            aria2.contains("video"),
+            "aria2 should contain bare key: video"
+        );
     }
 
     #[test]
@@ -757,7 +757,10 @@ mod collect_tests {
         collect_files(path, path, &mut mp4, &mut m4a, &mut aria2, false).unwrap();
 
         // In non-recursive mode, aria2 set uses bare stem
-        assert!(aria2.contains("audio"), "aria2 should contain bare key: audio");
+        assert!(
+            aria2.contains("audio"),
+            "aria2 should contain bare key: audio"
+        );
     }
 
     #[test]
@@ -775,10 +778,7 @@ mod collect_tests {
         let stems: Vec<&str> = result.pairs.iter().map(|p| p.stem.as_str()).collect();
 
         // Non-recursive: bare stems, sorted alphabetically
-        assert_eq!(
-            stems,
-            vec!["alpha", "middle", "zebra"]
-        );
+        assert_eq!(stems, vec!["alpha", "middle", "zebra"]);
     }
 
     #[test]

@@ -448,7 +448,15 @@ mod no_transcode_tests {
             OutputFormat::Mkv,
         );
         let args = args_vec(&cmd);
-        let forbidden = ["libx264", "libx265", "aac", "libvorbis", "libopus", "h264", "hevc"];
+        let forbidden = [
+            "libx264",
+            "libx265",
+            "aac",
+            "libvorbis",
+            "libopus",
+            "h264",
+            "hevc",
+        ];
         for codec in &forbidden {
             assert!(
                 !args.contains(&codec.to_string()),
@@ -470,8 +478,14 @@ mod no_transcode_tests {
         let args = args_vec(&cmd);
 
         // Find positions of -c:v and -c:a and verify their following arg is "copy"
-        let cv_idx = args.iter().position(|a| a == "-c:v").expect("-c:v should exist");
-        let ca_idx = args.iter().position(|a| a == "-c:a").expect("-c:a should exist");
+        let cv_idx = args
+            .iter()
+            .position(|a| a == "-c:v")
+            .expect("-c:v should exist");
+        let ca_idx = args
+            .iter()
+            .position(|a| a == "-c:a")
+            .expect("-c:a should exist");
         assert_eq!(args[cv_idx + 1], "copy", "-c:v must be followed by 'copy'");
         assert_eq!(args[ca_idx + 1], "copy", "-c:a must be followed by 'copy'");
     }
