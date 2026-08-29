@@ -1,17 +1,64 @@
-use crate::ffmpeg;
-use crate::i18n::t;
+use crate::cli::OutputFormat;
+use crate::i18n::{t, tf};
 use anyhow::{Context, Result};
-use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
+/// A video/audio pair, identified by its stem.
+///
+/// This module owns the naming convention: which suffixes pair up, how the
+/// aria2 control file is spelled, and where merged output belongs. Everything
+/// else asks for paths instead of formatting them.
 #[derive(Debug, Clone)]
 pub struct FilePair {
     pub video: PathBuf,
     pub audio: PathBuf,
+    /// Bare stem in a flat scan; a composite "subdir/stem" when recursive, so
+    /// same-named files in different directories stay distinct.
     pub stem: String,
+}
+
+impl FilePair {
+    pub const VIDEO_SUFFIX: &'static str = ".mp4";
+    pub const AUDIO_SUFFIX: &'static str = ".m4a";
+    /// aria2 leaves `<name>.<ext>.aria2` next to an in-flight download.
+    pub const ARIA2_SUFFIX: &'static str = ".aria2";
+
+    pub fn video_path(dir: &Path, stem: &str) -> PathBuf {
+        dir.join(format!("{stem}{}", Self::VIDEO_SUFFIX))
+    }
+
+    pub fn audio_path(dir: &Path, stem: &str) -> PathBuf {
+        dir.join(format!("{stem}{}", Self::AUDIO_SUFFIX))
+    }
+
+    /// The pair for `stem` in `dir`, or an error naming the source missing.
+    pub fn sources_in(dir: &Path, stem: &str) -> Result<Self> {
+        let video = Self::video_path(dir, stem);
+        let audio = Self::audio_path(dir, stem);
+        if !video.is_file() {
+            anyhow::bail!("{}", tf("missing_video", &[&video.display().to_string()]));
+        }
+        if !audio.is_file() {
+            anyhow::bail!("{}", tf("missing_audio", &[&audio.display().to_string()]));
+        }
+        Ok(Self {
+            video,
+            audio,
+            stem: stem.to_string(),
+        })
+    }
+
+    /// A composite key is flattened into one file name; the directory
+    /// structure is not reproduced under the output directory.
+    pub fn output_name(&self, format: OutputFormat) -> String {
+        format!("{}.{}", self.stem.replace('/', "_"), format.extension())
+    }
+
+    pub fn output_path(&self, dir: &Path, format: OutputFormat) -> PathBuf {
+        dir.join(self.output_name(format))
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -25,11 +72,6 @@ pub struct ScanStats {
 pub struct ScanResult {
     pub pairs: Vec<FilePair>,
     pub stats: ScanStats,
-    pub estimated_duration: Duration,
-}
-
-fn is_downloading(stem: &str, aria2_files: &HashSet<String>) -> bool {
-    aria2_files.contains(stem)
 }
 
 fn collect_files(
@@ -83,16 +125,17 @@ fn collect_files(
             }
         };
 
-        if let Some(stem) = filename.strip_suffix(".aria2") {
-            // Normalize: strip .mp4/.m4a suffix so is_downloading needs only one lookup
+        if let Some(stem) = filename.strip_suffix(FilePair::ARIA2_SUFFIX) {
+            // Normalize: strip the source suffix so one lookup covers
+            // "foo.aria2", "foo.mp4.aria2" and "foo.m4a.aria2".
             let bare = stem
-                .strip_suffix(".mp4")
-                .or_else(|| stem.strip_suffix(".m4a"))
+                .strip_suffix(FilePair::VIDEO_SUFFIX)
+                .or_else(|| stem.strip_suffix(FilePair::AUDIO_SUFFIX))
                 .unwrap_or(stem);
             aria2_files.insert(make_key(bare));
-        } else if let Some(stem) = filename.strip_suffix(".mp4") {
+        } else if let Some(stem) = filename.strip_suffix(FilePair::VIDEO_SUFFIX) {
             mp4_files.insert(make_key(stem), path);
-        } else if let Some(stem) = filename.strip_suffix(".m4a") {
+        } else if let Some(stem) = filename.strip_suffix(FilePair::AUDIO_SUFFIX) {
             m4a_files.insert(make_key(stem), path);
         }
     }
@@ -123,7 +166,7 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
     all_keys.dedup();
 
     for key in all_keys {
-        if is_downloading(key, &aria2_files) {
+        if aria2_files.contains(key) {
             stats.skipped += 1;
             continue;
         }
@@ -140,16 +183,7 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
         }
     }
 
-    let estimated_duration: std::time::Duration = pairs
-        .par_iter()
-        .map(|p| ffmpeg::estimate_merge_duration(&p.video))
-        .sum();
-
-    Ok(ScanResult {
-        pairs,
-        stats,
-        estimated_duration,
-    })
+    Ok(ScanResult { pairs, stats })
 }
 
 #[cfg(test)]
@@ -166,36 +200,79 @@ mod tests {
         let debug_str = format!("{:?}", pair);
         assert!(debug_str.contains("video"));
     }
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
 
     #[test]
-    fn test_scan_stats_default() {
-        let stats = ScanStats::default();
-        assert_eq!(stats.pairs, 0);
-        assert_eq!(stats.skipped, 0);
-        assert_eq!(stats.orphaned, 0);
+    fn source_paths_follow_the_convention() {
+        let dir = Path::new("/downloads");
+        assert_eq!(
+            FilePair::video_path(dir, "ep01"),
+            PathBuf::from("/downloads/ep01.mp4")
+        );
+        assert_eq!(
+            FilePair::audio_path(dir, "ep01"),
+            PathBuf::from("/downloads/ep01.m4a")
+        );
     }
 
     #[test]
-    fn test_is_downloading_with_composite_key() {
-        let mut aria2_files = HashSet::new();
-        aria2_files.insert("parent/foo".to_string());
-        assert!(is_downloading("parent/foo", &aria2_files));
+    fn output_path_flattens_a_composite_key() {
+        let pair = FilePair {
+            video: PathBuf::from("/in/season1/ep01.mp4"),
+            audio: PathBuf::from("/in/season1/ep01.m4a"),
+            stem: "season1/ep01".to_string(),
+        };
+        // One file name, not a recreated directory tree.
+        assert_eq!(
+            pair.output_path(Path::new("/out"), OutputFormat::Mkv),
+            PathBuf::from("/out/season1_ep01.mkv")
+        );
     }
 
     #[test]
-    fn test_is_downloading_with_suffixed_composite_key() {
-        // After normalization in collect_files, aria2_files stores composite keys
-        let mut aria2_files = HashSet::new();
-        aria2_files.insert("parent/foo".to_string()); // was "foo.mp4" before normalization
-        assert!(is_downloading("parent/foo", &aria2_files));
+    fn sources_in_finds_a_complete_pair() {
+        let dir = tempdir().unwrap();
+        File::create(dir.path().join("ep01.mp4")).unwrap();
+        File::create(dir.path().join("ep01.m4a")).unwrap();
+
+        let pair = FilePair::sources_in(dir.path(), "ep01").unwrap();
+        assert_eq!(pair.stem, "ep01");
+        assert_eq!(pair.video, dir.path().join("ep01.mp4"));
+        assert_eq!(pair.audio, dir.path().join("ep01.m4a"));
     }
 
     #[test]
-    fn test_is_downloading_no_match() {
-        let mut aria2_files = HashSet::new();
-        aria2_files.insert("bar".to_string());
-        aria2_files.insert("baz.mp4".to_string());
-        assert!(!is_downloading("foo", &aria2_files));
+    fn sources_in_names_the_missing_video() {
+        let dir = tempdir().unwrap();
+        File::create(dir.path().join("ep01.m4a")).unwrap();
+
+        let err = FilePair::sources_in(dir.path(), "ep01")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ep01.mp4"),
+            "should name the video file: {err}"
+        );
+    }
+
+    #[test]
+    fn sources_in_names_the_missing_audio() {
+        let dir = tempdir().unwrap();
+        File::create(dir.path().join("ep01.mp4")).unwrap();
+
+        let err = FilePair::sources_in(dir.path(), "ep01")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ep01.m4a"),
+            "should name the audio file: {err}"
+        );
     }
 }
 
@@ -462,43 +539,6 @@ mod scan_tests {
         // Top-level files have bare stem (empty relative parent)
         assert!(stems.contains(&"top"));
         assert!(stems.iter().any(|s| s.ends_with("/deep")));
-    }
-
-    #[test]
-    fn test_scan_includes_estimated_duration() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        File::create(path.join("video1.mp4")).unwrap();
-        File::create(path.join("video1.m4a")).unwrap();
-        File::create(path.join("video2.mp4")).unwrap();
-        File::create(path.join("video2.m4a")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        // Empty files → 0 duration
-        assert_eq!(result.estimated_duration.as_secs(), 0);
-    }
-
-    #[test]
-    fn test_scan_estimated_duration_with_data() {
-        use std::io::Write;
-
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        // Create ~10 MB video file
-        let mut video1 = File::create(path.join("video1.mp4")).unwrap();
-        video1.write_all(&vec![0u8; 10 * 1024 * 1024]).unwrap();
-        File::create(path.join("video1.m4a")).unwrap();
-
-        // Create ~20 MB video file
-        let mut video2 = File::create(path.join("video2.mp4")).unwrap();
-        video2.write_all(&vec![0u8; 20 * 1024 * 1024]).unwrap();
-        File::create(path.join("video2.m4a")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        // 10 MB / 10 MB/s = 1s, 20 MB / 10 MB/s = 2s, total = 3s
-        assert_eq!(result.estimated_duration.as_secs(), 3);
     }
 
     #[test]

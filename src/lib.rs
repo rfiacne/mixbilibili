@@ -121,21 +121,26 @@ struct ScanContext {
     format: cli::OutputFormat,
     /// Original scan statistics (skipped, orphaned, etc.).
     stats: scanner::ScanStats,
-    /// Estimated total merge duration.
-    estimated_duration: Duration,
 }
 
-impl ScanContext {
-    fn format_time_estimate(&self) -> Option<String> {
-        if self.estimated_duration.is_zero() {
-            None
-        } else {
-            Some(tf(
-                "dry_run_time_estimate",
-                &[&progress::format_duration(self.estimated_duration)],
-            ))
-        }
-    }
+/// Rough wall-clock estimate, or None when the batch is too small for the
+/// number to mean anything.
+fn estimate(pairs: &[scanner::FilePair]) -> Option<Duration> {
+    // ponytail: one stat() per pair, sequentially. Re-parallelise if scans
+    // routinely reach tens of thousands of pairs.
+    let total: Duration = pairs
+        .iter()
+        .map(|pair| ffmpeg::estimate_merge_duration(&pair.video))
+        .sum();
+    (total >= Duration::from_secs(1)).then_some(total)
+}
+
+fn estimate_line(pairs: &[scanner::FilePair]) -> Option<String> {
+    let seconds = estimate(pairs)?;
+    Some(tf(
+        "dry_run_time_estimate",
+        &[&progress::format_duration(seconds)],
+    ))
 }
 
 /// Scan source directory and filter pairs based on resume state.
@@ -192,7 +197,6 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
         pairs: pairs_to_process,
         format: args.format,
         stats: scan_result.stats.clone(),
-        estimated_duration: scan_result.estimated_duration,
     };
 
     Ok(Some((ctx, merge_state)))
@@ -264,8 +268,10 @@ fn print_preview_pairs(ctx: &ScanContext, header: &str) {
         let num = Colors::secondary(&format!("{:>width$}.", idx + 1, width = idx_width));
         let arrow = Colors::info(symbols.arrow);
 
+        // The real output name, flattened — the preview must not promise a
+        // path the run never writes.
         println!(
-            "{} {} {}{} {} {}{} {}.{}",
+            "{} {} {}{} {} {}{} {}",
             Colors::secondary(symbols.vertical_line),
             num,
             video_name,
@@ -273,8 +279,7 @@ fn print_preview_pairs(ctx: &ScanContext, header: &str) {
             arrow,
             audio_name,
             audio_pad,
-            Colors::info(&pair.stem),
-            ctx.format.extension()
+            Colors::info(&pair.output_name(ctx.format))
         );
     }
 
@@ -286,7 +291,7 @@ fn print_preview_pairs(ctx: &ScanContext, header: &str) {
     );
 
     // Time estimate
-    if let Some(msg) = ctx.format_time_estimate() {
+    if let Some(msg) = estimate_line(&ctx.pairs) {
         println!("{}", Colors::secondary(&msg));
     }
 }
@@ -528,11 +533,15 @@ fn execute(
     runner: &dyn ffmpeg::MergeRunner,
 ) -> Result<merger::MergeSummary> {
     if !args.quiet {
-        if let Some(msg) = ctx.format_time_estimate() {
-            println!("{}", msg);
-        } else {
-            println!("{}", tf("processing", &[&ctx.pairs.len().to_string()]));
-        }
+        let count = ctx.pairs.len().to_string();
+        let header = match estimate(&ctx.pairs) {
+            Some(seconds) => tf(
+                "starting_merges",
+                &[&count, &progress::format_duration(seconds)],
+            ),
+            None => tf("processing", &[&count]),
+        };
+        println!("{header}");
     }
 
     let progress = if args.progress && !args.quiet {
@@ -691,6 +700,13 @@ fn finalize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_estimate_worth_acting_on_is_shown() {
+        // Empty files estimate at zero, which used to render as an empty
+        // "Estimated time:" line.
+        assert!(estimate_line(&[]).is_none());
+    }
 
     #[test]
     fn test_exit_codes_constants() {

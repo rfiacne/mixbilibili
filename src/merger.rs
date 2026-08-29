@@ -224,19 +224,13 @@ pub struct MergePlan<'a> {
     pub interrupt: &'a Interrupt,
 }
 
-/// Where the merged file for this pair belongs. Recursive scans key pairs by
-/// a composite "subdir/stem", which is flattened into one file name.
-pub fn output_name(pair: &FilePair, format: OutputFormat) -> String {
-    format!("{}.{}", pair.stem.replace('/', "_"), format.extension())
-}
-
 pub fn merge_pair(
     pair: &FilePair,
     pair_index: usize,
     plan: &MergePlan,
     runner: &dyn MergeRunner,
 ) -> MergeResult {
-    let output_path = plan.output_dir.join(output_name(pair, plan.format));
+    let output_path = pair.output_path(plan.output_dir, plan.format);
 
     if plan.interrupt.is_triggered() {
         return MergeResult {
