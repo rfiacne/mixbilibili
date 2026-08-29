@@ -16,10 +16,10 @@ pub mod ui;
 
 use crate::cli::Args;
 use crate::i18n::{t, tf};
+use crate::interrupt::Interrupt;
 use anyhow::{Context, Result};
 use colored::Colorize;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -290,15 +290,14 @@ fn print_preview_pairs(ctx: &ScanContext, format: &cli::OutputFormat, header: &s
     }
 }
 
-/// Shared flag set by the Ctrl+C handler.
-pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
 /// Parse arguments, merge, report. Errors come back as [`Failure`].
 pub fn run() -> Result<(), Failure> {
     run_inner().map_err(Failure::from)
 }
 
 fn run_inner() -> Result<()> {
+    let interrupt = Interrupt::new();
+
     // Reset SIGCHLD to SIG_DFL once, before any threads are created.
     // aria2 sets SIGCHLD to SIG_IGN in its on-download-complete hook,
     // which causes waitpid() to fail with ECHILD.
@@ -317,14 +316,11 @@ fn run_inner() -> Result<()> {
     }
 
     // Set up Ctrl+C handler for graceful shutdown
-    ctrlc::set_handler(|| {
-        INTERRUPTED.store(true, Ordering::SeqCst);
-    })
-    .context(t("failed_set_signal").into_owned())?;
+    ctrlc::set_handler(interrupt.ctrlc_handler()).context(t("failed_set_signal").into_owned())?;
 
     // --once mode: merge a single pair by stem, skip scanning
     if let Some(ref stem) = args.once {
-        return run_once(&args, format, stem);
+        return run_once(&args, format, stem, &interrupt);
     }
 
     // Configure rayon's global thread pool once at startup
@@ -395,14 +391,14 @@ fn run_inner() -> Result<()> {
         return Ok(());
     }
 
-    let summary = execute(&args, ctx, &mut merge_state, format)?;
+    let summary = execute(&args, ctx, &mut merge_state, format, &interrupt)?;
 
     // Phase 4: Update state and report
     finalize(&args, merge_state, &summary)?;
 
     summary.print_report(args.quiet);
 
-    if INTERRUPTED.load(Ordering::SeqCst) {
+    if interrupt.is_triggered() {
         println!("{}", t("interrupted_cleanup").yellow());
         println!("{}", t("interrupted_resume_hint").cyan());
         Ok(())
@@ -455,7 +451,12 @@ fn validate_stem(stem: &str) -> Result<()> {
 
 /// --once mode: merge a single pair identified by stem.
 /// No scanning, no state file, no progress bar — just merge and exit.
-fn run_once(args: &Args, format: cli::OutputFormat, stem: &str) -> Result<()> {
+fn run_once(
+    args: &Args,
+    format: cli::OutputFormat,
+    stem: &str,
+    interrupt: &Interrupt,
+) -> Result<()> {
     // Validate stem before using it
     validate_stem(stem)?;
 
@@ -481,15 +482,15 @@ fn run_once(args: &Args, format: cli::OutputFormat, stem: &str) -> Result<()> {
         stem: stem.to_string(),
     };
 
-    let result = merger::merge_pair(
-        &pair,
-        0,
-        &args.output,
+    let plan = merger::MergePlan {
+        output_dir: &args.output,
         format,
-        None,
-        args.verbose,
-        args.retry,
-    );
+        retries: args.retry,
+        verbose: args.verbose,
+        progress: None,
+        interrupt,
+    };
+    let result = merger::merge_pair(&pair, 0, &plan);
 
     if result.success {
         if args.sdel {
@@ -500,9 +501,8 @@ fn run_once(args: &Args, format: cli::OutputFormat, stem: &str) -> Result<()> {
         Ok(())
     } else {
         // Clean up partial output file if merge failed
-        let output_path = args.output.join(format!("{}.{}", stem, format.extension()));
-        if output_path.exists() {
-            if let Err(e) = std::fs::remove_file(&output_path) {
+        if result.output_path.exists() {
+            if let Err(e) = std::fs::remove_file(&result.output_path) {
                 eprintln!(
                     "{} Failed to clean up partial output: {}",
                     t("warning_prefix").yellow(),
@@ -523,6 +523,7 @@ fn execute(
     ctx: ScanContext,
     merge_state: &mut state::MergeState,
     format: cli::OutputFormat,
+    interrupt: &Interrupt,
 ) -> Result<merger::MergeSummary> {
     if !args.quiet {
         if let Some(msg) = ctx.format_time_estimate() {
@@ -551,15 +552,15 @@ fn execute(
         .par_iter()
         .enumerate()
         .map(|(idx, pair)| {
-            let result = merger::merge_pair(
-                pair,
-                idx,
-                &args.output,
+            let plan = merger::MergePlan {
+                output_dir: &args.output,
                 format,
-                progress.as_ref(),
-                args.verbose,
-                args.retry,
-            );
+                retries: args.retry,
+                verbose: args.verbose,
+                progress: progress.as_ref(),
+                interrupt,
+            };
+            let result = merger::merge_pair(pair, idx, &plan);
 
             // Update state and periodically save
             let snapshot = {
@@ -606,17 +607,12 @@ fn execute(
     }
 
     // Cleanup partial output files on interrupt
-    if INTERRUPTED.load(Ordering::SeqCst) {
+    if interrupt.is_triggered() {
         for result in &results {
             if result.was_interrupted {
-                let pair = &ctx.pairs[result.pair_index];
-                // stem is composite key "parent/stem", replace "/" with "_" for filename
-                let safe_stem = pair.stem.replace('/', "_");
-                let output_path = args
-                    .output
-                    .join(format!("{}.{}", safe_stem, format.extension()));
+                let output_path = &result.output_path;
                 if output_path.exists() {
-                    if let Err(e) = std::fs::remove_file(&output_path) {
+                    if let Err(e) = std::fs::remove_file(output_path) {
                         eprintln!("{} {}", t("warning_prefix").yellow(), e);
                     } else if args.verbose {
                         eprintln!(
@@ -705,18 +701,6 @@ mod tests {
     fn test_state_save_interval_constant() {
         // Ensure reasonable batch size for incremental saves
         const _: () = assert!(STATE_SAVE_INTERVAL >= 1 && STATE_SAVE_INTERVAL <= 20);
-    }
-
-    #[test]
-    fn test_interrupted_flag_default() {
-        assert!(!INTERRUPTED.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn test_interrupted_flag_can_be_set() {
-        INTERRUPTED.store(true, Ordering::SeqCst);
-        assert!(INTERRUPTED.load(Ordering::SeqCst));
-        INTERRUPTED.store(false, Ordering::SeqCst); // Reset
     }
 
     #[test]
@@ -814,7 +798,12 @@ mod tests {
             ascii: false,
         };
 
-        let result = run_once(&args, cli::OutputFormat::Mkv, "../escape");
+        let result = run_once(
+            &args,
+            cli::OutputFormat::Mkv,
+            "../escape",
+            &Interrupt::new(),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -848,7 +837,12 @@ mod tests {
             ascii: false,
         };
 
-        let result = run_once(&args, cli::OutputFormat::Mkv, "/etc/passwd");
+        let result = run_once(
+            &args,
+            cli::OutputFormat::Mkv,
+            "/etc/passwd",
+            &Interrupt::new(),
+        );
         assert!(result.is_err());
     }
 
@@ -876,7 +870,12 @@ mod tests {
             ascii: false,
         };
 
-        let result = run_once(&args, cli::OutputFormat::Mkv, "..\\escape");
+        let result = run_once(
+            &args,
+            cli::OutputFormat::Mkv,
+            "..\\escape",
+            &Interrupt::new(),
+        );
         assert!(result.is_err());
     }
 
@@ -904,7 +903,12 @@ mod tests {
             ascii: false,
         };
 
-        let result = run_once(&args, cli::OutputFormat::Mkv, "evil\0path");
+        let result = run_once(
+            &args,
+            cli::OutputFormat::Mkv,
+            "evil\0path",
+            &Interrupt::new(),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -944,7 +948,7 @@ mod tests {
         };
 
         // Should not error on validation (may error on ffmpeg, but that's OK)
-        let result = run_once(&args, cli::OutputFormat::Mkv, "video");
+        let result = run_once(&args, cli::OutputFormat::Mkv, "video", &Interrupt::new());
         // We're only testing validation, not actual merge
         // If it gets past validation, it will try to run ffmpeg
         // So we just check it doesn't error with "invalid stem"

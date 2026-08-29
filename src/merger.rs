@@ -1,15 +1,14 @@
 use crate::cli::OutputFormat;
 use crate::ffmpeg;
 use crate::i18n::{t, tf};
+use crate::interrupt::Interrupt;
 use crate::progress::{format_duration, MergeProgress};
 use crate::scanner::FilePair;
-use crate::INTERRUPTED;
 use anyhow::{Context, Result};
 use colored::Colorize;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(300);
@@ -21,6 +20,7 @@ trait ChildExt {
         &mut self,
         timeout: Duration,
         poll_interval: Duration,
+        interrupt: &Interrupt,
     ) -> io::Result<Option<ExitStatus>>;
 }
 
@@ -29,6 +29,7 @@ impl ChildExt for Child {
         &mut self,
         timeout: Duration,
         poll_interval: Duration,
+        interrupt: &Interrupt,
     ) -> io::Result<Option<ExitStatus>> {
         let start = std::time::Instant::now();
         loop {
@@ -36,7 +37,7 @@ impl ChildExt for Child {
                 Ok(Some(status)) => return Ok(Some(status)),
                 Ok(None) => {
                     // Check for interrupt signal and kill child if interrupted
-                    if INTERRUPTED.load(Ordering::SeqCst) {
+                    if interrupt.is_triggered() {
                         let _ = self.kill();
                         let _ = self.wait();
                         return Ok(None);
@@ -56,11 +57,13 @@ impl ChildExt for Child {
 pub struct MergeResult {
     pub pair_index: usize,
     pub pair_name: String,
+    /// Where the merged file belongs, so cleanup never rebuilds the path.
+    pub output_path: PathBuf,
     pub success: bool,
     pub error: Option<String>,
     /// Duration of the ffmpeg merge operation.
     pub duration: Duration,
-    /// Set to true when the merge was skipped due to INTERRUPTED flag.
+    /// Set when the merge was skipped because the interrupt token fired.
     pub was_interrupted: bool,
 }
 
@@ -255,20 +258,30 @@ impl MergeSummary {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn merge_pair(
-    pair: &FilePair,
-    pair_index: usize,
-    output_dir: &Path,
-    format: OutputFormat,
-    progress: Option<&MergeProgress>,
-    verbose: bool,
-    max_retries: usize,
-) -> MergeResult {
-    if INTERRUPTED.load(Ordering::SeqCst) {
+/// Everything one merge needs to know.
+pub struct MergePlan<'a> {
+    pub output_dir: &'a Path,
+    pub format: OutputFormat,
+    pub retries: usize,
+    pub verbose: bool,
+    pub progress: Option<&'a MergeProgress>,
+    pub interrupt: &'a Interrupt,
+}
+
+/// Where the merged file for this pair belongs. Recursive scans key pairs by
+/// a composite "subdir/stem", which is flattened into one file name.
+pub fn output_name(pair: &FilePair, format: OutputFormat) -> String {
+    format!("{}.{}", pair.stem.replace('/', "_"), format.extension())
+}
+
+pub fn merge_pair(pair: &FilePair, pair_index: usize, plan: &MergePlan) -> MergeResult {
+    let output_path = plan.output_dir.join(output_name(pair, plan.format));
+
+    if plan.interrupt.is_triggered() {
         return MergeResult {
             pair_index,
             pair_name: pair.stem.clone(),
+            output_path,
             success: false,
             error: Some("Skipped (interrupted)".to_string()),
             duration: Duration::ZERO,
@@ -276,12 +289,8 @@ pub fn merge_pair(
         };
     }
 
-    // stem is now a composite key "parent/stem", replace "/" with "_" for safe filename
-    let safe_stem = pair.stem.replace('/', "_");
-    let output_path = output_dir.join(format!("{}.{}", safe_stem, format.extension()));
-
-    // Safety check: output path must not be identical to input video path
-    // Use canonicalize to handle different path representations pointing to the same file
+    // Safety check: the output must not be the input video itself. Canonicalize
+    // so different path spellings of the same file are still caught.
     let dominated = std::fs::canonicalize(&output_path)
         .ok()
         .zip(std::fs::canonicalize(&pair.video).ok())
@@ -291,31 +300,25 @@ pub fn merge_pair(
         return record_failure(
             pair,
             pair_index,
+            output_path,
             t("same_source_output_runtime").into_owned(),
             Duration::ZERO,
-            progress,
+            plan,
         );
     }
 
-    do_merge(
-        pair,
-        &output_path,
-        pair_index,
-        format,
-        progress,
-        verbose,
-        max_retries,
-    )
+    do_merge(pair, output_path, pair_index, plan)
 }
 
 fn record_failure(
     pair: &FilePair,
     pair_index: usize,
+    output_path: PathBuf,
     error_msg: String,
     duration: Duration,
-    progress: Option<&MergeProgress>,
+    plan: &MergePlan,
 ) -> MergeResult {
-    if let Some(p) = progress {
+    if let Some(p) = plan.progress {
         p.record(&pair.stem, false, duration, Some(&error_msg), None);
     } else {
         println!("{} {}: {}", t("cross").red(), pair.stem, error_msg);
@@ -323,6 +326,7 @@ fn record_failure(
     MergeResult {
         pair_index,
         pair_name: pair.stem.clone(),
+        output_path,
         success: false,
         error: Some(error_msg),
         duration,
@@ -359,21 +363,20 @@ fn validate_output(output_path: &Path) -> Result<()> {
 
 fn do_merge(
     pair: &FilePair,
-    output_path: &Path,
+    output_path: PathBuf,
     pair_index: usize,
-    format: OutputFormat,
-    progress: Option<&MergeProgress>,
-    verbose: bool,
-    max_retries: usize,
+    plan: &MergePlan,
 ) -> MergeResult {
     let start = std::time::Instant::now();
+    let retries = plan.retries;
 
-    for attempt in 0..=max_retries {
-        // Early exit if interrupted — avoid useless retries after Ctrl+C
-        if INTERRUPTED.load(Ordering::SeqCst) {
+    for attempt in 0..=retries {
+        // Stop early once cancelled: retrying after Ctrl+C is wasted work.
+        if plan.interrupt.is_triggered() {
             return MergeResult {
                 pair_index,
                 pair_name: pair.stem.clone(),
+                output_path,
                 success: false,
                 error: None,
                 duration: start.elapsed(),
@@ -382,19 +385,8 @@ fn do_merge(
         }
 
         if attempt > 0 {
-            std::thread::sleep(Duration::from_secs(1));
-            if let Some(p) = progress {
-                p.set_message(&tf("retry_marker", &[&attempt.to_string(), &pair.stem]));
-            } else if verbose {
-                println!(
-                    "{} {}",
-                    "↻".yellow(),
-                    tf("verbose_retry", &[&pair.stem, &attempt.to_string()])
-                );
-            }
-        }
-
-        if verbose && attempt == 0 {
+            announce_retry(pair, attempt, plan);
+        } else if plan.verbose {
             println!(
                 "Running: ffmpeg -i {} -i {} -> {}",
                 pair.video.display(),
@@ -403,69 +395,96 @@ fn do_merge(
             );
         }
 
-        let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, output_path, format);
-        match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT) {
-            Ok(status) if status.success() => {
-                // Validate output file exists and has non-zero size
-                if let Err(e) = validate_output(output_path) {
-                    return record_failure(
-                        pair,
-                        pair_index,
-                        e.to_string(),
-                        start.elapsed(),
-                        progress,
-                    );
-                }
+        let mut cmd =
+            ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, plan.format);
 
-                let duration = start.elapsed();
-                if let Some(p) = progress {
-                    p.record(&pair.stem, true, duration, None, None);
-                } else {
-                    println!("{} {}", t("checkmark").green(), pair.stem);
+        // Each arm below either returns, retries, or falls through to the one
+        // failure exit at the bottom of the loop.
+        let error_msg = match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT, plan.interrupt) {
+            Ok(status) if status.success() => match validate_output(&output_path) {
+                // ffmpeg claims it worked; the file on disk has to agree.
+                Ok(()) => {
+                    return record_success(pair, pair_index, output_path, start.elapsed(), plan)
                 }
-                return MergeResult {
-                    pair_index,
-                    pair_name: pair.stem.clone(),
-                    success: true,
-                    error: None,
-                    duration,
-                    was_interrupted: false,
-                };
+                Err(e) => e.to_string(),
+            },
+            Ok(status) if attempt < retries => {
+                let _ = status;
+                continue;
             }
-            Ok(_) if attempt < max_retries => continue,
-            Ok(status) => {
-                let error_msg = tf(
-                    "merge_failed_exit",
-                    &[
-                        &status
-                            .code()
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        &max_retries.to_string(),
-                    ],
-                );
-                return record_failure(pair, pair_index, error_msg, start.elapsed(), progress);
-            }
-            Err(_) if attempt < max_retries => continue,
-            Err(e) => {
-                let error_msg = tf(
-                    "merge_failed_io",
-                    &[&e.to_string(), &max_retries.to_string()],
-                );
-                return record_failure(pair, pair_index, error_msg, start.elapsed(), progress);
-            }
-        }
+            Ok(status) => tf(
+                "merge_failed_exit",
+                &[&exit_code_text(status.code()), &retries.to_string()],
+            ),
+            Err(_) if attempt < retries => continue,
+            Err(e) => tf("merge_failed_io", &[&e.to_string(), &retries.to_string()]),
+        };
+
+        return record_failure(
+            pair,
+            pair_index,
+            output_path,
+            error_msg,
+            start.elapsed(),
+            plan,
+        );
     }
 
-    unreachable!("retry loop should always return")
+    unreachable!("the final attempt always returns")
 }
 
-fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus> {
-    // SIGCHLD reset is now done once in main.rs run() before rayon pool creation
+fn record_success(
+    pair: &FilePair,
+    pair_index: usize,
+    output_path: PathBuf,
+    duration: Duration,
+    plan: &MergePlan,
+) -> MergeResult {
+    if let Some(p) = plan.progress {
+        p.record(&pair.stem, true, duration, None, None);
+    } else {
+        println!("{} {}", t("checkmark").green(), pair.stem);
+    }
+    MergeResult {
+        pair_index,
+        pair_name: pair.stem.clone(),
+        output_path,
+        success: true,
+        error: None,
+        duration,
+        was_interrupted: false,
+    }
+}
 
+/// Back off, then say so: on the progress bar if there is one, on stdout when
+/// verbose.
+fn announce_retry(pair: &FilePair, attempt: usize, plan: &MergePlan) {
+    std::thread::sleep(Duration::from_secs(1));
+    if let Some(p) = plan.progress {
+        p.set_message(&tf("retry_marker", &[&attempt.to_string(), &pair.stem]));
+    } else if plan.verbose {
+        println!(
+            "{} {}",
+            "↻".yellow(),
+            tf("verbose_retry", &[&pair.stem, &attempt.to_string()])
+        );
+    }
+}
+
+/// Render an exit code for a message, when there is one.
+fn exit_code_text(code: Option<i32>) -> String {
+    code.map(|c| c.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn run_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: Duration,
+    interrupt: &Interrupt,
+) -> Result<ExitStatus> {
     let mut child = cmd.spawn().context(t("failed_to_spawn"))?;
 
-    match child.wait_with_timeout(timeout, POLL_INTERVAL) {
+    match child.wait_with_timeout(timeout, POLL_INTERVAL, interrupt) {
         Ok(Some(status)) => Ok(status),
         Ok(None) => {
             let _ = child.kill();
@@ -728,6 +747,7 @@ mod merge_tests {
         let result = MergeResult {
             pair_index: 0,
             pair_name: "video".to_string(),
+            output_path: PathBuf::from("video.mkv"),
             success: true,
             error: None,
             duration: Duration::from_millis(123),
@@ -742,6 +762,7 @@ mod merge_tests {
         let result = MergeResult {
             pair_index: 0,
             pair_name: "video".to_string(),
+            output_path: PathBuf::from("video.mkv"),
             success: false,
             error: Some("test error".to_string()),
             duration: Duration::from_secs(1),
@@ -1002,7 +1023,8 @@ mod timeout_tests {
             .spawn()
             .expect("timeout command should be available");
 
-        let result = child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL);
+        let result =
+            child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL, &Interrupt::new());
         assert!(result.is_ok());
         let status = result.unwrap();
         assert!(status.is_some());
@@ -1024,7 +1046,8 @@ mod timeout_tests {
             .spawn()
             .expect("timeout command should be available");
 
-        let result = child.wait_with_timeout(Duration::from_millis(50), POLL_INTERVAL);
+        let result =
+            child.wait_with_timeout(Duration::from_millis(50), POLL_INTERVAL, &Interrupt::new());
         assert!(result.is_ok());
         // Should return None indicating timeout
         let status = result.unwrap();
@@ -1051,7 +1074,8 @@ mod timeout_tests {
         // Wait a bit for it to finish
         std::thread::sleep(Duration::from_millis(150));
 
-        let result = child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL);
+        let result =
+            child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL, &Interrupt::new());
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }
@@ -1067,6 +1091,7 @@ mod summary_logic_tests {
         let result = MergeResult {
             pair_index: 3,
             pair_name: "interrupted_video".to_string(),
+            output_path: PathBuf::from("interrupted_video.mkv"),
             success: false,
             error: Some("Skipped (interrupted)".to_string()),
             duration: Duration::ZERO,
@@ -1201,15 +1226,16 @@ mod summary_logic_tests {
 
         // When output_dir == video's parent and format == mp4,
         // output path would be identical to input video path
-        let result = merge_pair(
-            &pair,
-            0,
-            dir.path(),
-            crate::cli::OutputFormat::Mp4,
-            None,
-            false,
-            0,
-        );
+        let interrupt = Interrupt::new();
+        let plan = MergePlan {
+            output_dir: dir.path(),
+            format: crate::cli::OutputFormat::Mp4,
+            retries: 0,
+            verbose: false,
+            progress: None,
+            interrupt: &interrupt,
+        };
+        let result = merge_pair(&pair, 0, &plan);
 
         assert!(
             !result.success,
