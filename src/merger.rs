@@ -660,7 +660,10 @@ mod summary_tests {
         ];
         let summary = MergeSummary::from_results(&results, &ScanStats::default(), 0);
         assert_eq!(summary.avg_duration(), Some(Duration::from_secs(2)));
-        assert!((summary.throughput().unwrap() - 0.5).abs() < f64::EPSILON, "2 merges in 4s");
+        assert!(
+            (summary.throughput().unwrap() - 0.5).abs() < f64::EPSILON,
+            "2 merges in 4s"
+        );
     }
 
     #[test]

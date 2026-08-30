@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Lang {
     Cn,
     En,
@@ -79,21 +79,15 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "dry_run_summary"), "Would merge {0} pair(s)."),
     ((Lang::Cn, "dry_run_complete"), "预览完成。未修改任何文件。"),
     ((Lang::En, "dry_run_complete"), "Dry-run complete. No files were modified."),
-    ((Lang::Cn, "dry_run_marker"), "[预览]"),
-    ((Lang::En, "dry_run_marker"), "[dry-run]"),
     ((Lang::Cn, "dry_run_time_estimate"), "预计时间：{0}"),
     ((Lang::En, "dry_run_time_estimate"), "Estimated time: {0}"),
     ((Lang::Cn, "cli_interactive"), "交互式模式：显示预览并等待确认"),
     ((Lang::En, "cli_interactive"), "Interactive mode: show preview and wait for confirmation"),
     ((Lang::Cn, "interactive_preview_header"), "预览合并操作："),
     ((Lang::En, "interactive_preview_header"), "Preview merge operations:"),
-    ((Lang::Cn, "interactive_confirm"), "是否继续？(y/N)"),
-    ((Lang::En, "interactive_confirm"), "Continue? (y/N)"),
     ((Lang::Cn, "interactive_cancelled"), "操作已取消"),
     ((Lang::En, "interactive_cancelled"), "Operation cancelled"),
     // Interrupt / resume
-    ((Lang::Cn, "interrupted"), "\n已中断。状态已保存，可恢复。"),
-    ((Lang::En, "interrupted"), "\nInterrupted. State saved for resume."),
     ((Lang::Cn, "interrupted_cleanup"), "\n已中断。部分文件已清理。"),
     ((Lang::En, "interrupted_cleanup"), "\nInterrupted. Partial files cleaned up."),
     ((Lang::Cn, "interrupted_resume_hint"), "使用 --resume 从上次中断处继续。"),
@@ -131,17 +125,9 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::Cn, "verbose_retry"), "正在重试 {0}（第 {1} 次）"),
     ((Lang::En, "verbose_retry"), "Retrying {0} (attempt {1})"),
     // Symbols
-    ((Lang::Cn, "separator"), "================================"),
-    ((Lang::En, "separator"), "================================"),
     ((Lang::Cn, "checkmark"), "✓"),
     ((Lang::En, "checkmark"), "✓"),
-    ((Lang::Cn, "cross"), "✗"),
-    ((Lang::En, "cross"), "✗"),
-    ((Lang::Cn, "circle"), "○"),
-    ((Lang::En, "circle"), "○"),
     // ffmpeg install
-    ((Lang::Cn, "installing_ffmpeg"), "未找到 ffmpeg。是否安装？[Y/n]"),
-    ((Lang::En, "installing_ffmpeg"), "ffmpeg not found. Install it? [Y/n]"),
     ((Lang::Cn, "ffmpeg_installed"), "ffmpeg 安装成功！"),
     ((Lang::En, "ffmpeg_installed"), "ffmpeg installed successfully!"),
     ((Lang::Cn, "ffmpeg_not_found_path"), "安装完成但 PATH 中未找到 ffmpeg。可能需要重启终端。"),
@@ -200,14 +186,8 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "merge_failed"), "{0} merge(s) failed"),
     ((Lang::Cn, "unreadable_source"), "源目录不可读：{0}"),
     ((Lang::En, "unreadable_source"), "source directory is not readable: {0}"),
-    ((Lang::Cn, "failed_to_spawn"), "无法启动 ffmpeg 进程"),
-    ((Lang::En, "failed_to_spawn"), "Failed to spawn ffmpeg process"),
-    ((Lang::Cn, "failed_to_wait"), "无法等待 ffmpeg 进程"),
-    ((Lang::En, "failed_to_wait"), "Failed to wait for ffmpeg process"),
     ((Lang::Cn, "timed_out"), "ffmpeg 进程超时（5 分钟）"),
     ((Lang::En, "timed_out"), "ffmpeg process timed out after 5 minutes"),
-    ((Lang::Cn, "failed_delete"), "无法删除 {0}"),
-    ((Lang::En, "failed_delete"), "Failed to delete {0}"),
     ((Lang::Cn, "failed_create_output"), "无法创建输出目录"),
     ((Lang::En, "failed_create_output"), "Failed to create output directory"),
     ((Lang::Cn, "failed_set_signal"), "无法设置信号处理器"),
@@ -286,15 +266,9 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "report_border_top"), "┌"),
     ((Lang::Cn, "report_border_bottom"), "└"),
     ((Lang::En, "report_border_bottom"), "└"),
-    ((Lang::Cn, "report_border_middle"), "├"),
-    ((Lang::En, "report_border_middle"), "├"),
-    ((Lang::Cn, "report_border_vertical"), "│"),
-    ((Lang::En, "report_border_vertical"), "│"),
     // UI 组件 - 预览列表
     ((Lang::Cn, "preview_list_title"), "预览列表 ({} 项)"),
     ((Lang::En, "preview_list_title"), "Preview ({} items)"),
-    ((Lang::Cn, "preview_item_prefix"), "{}."),
-    ((Lang::En, "preview_item_prefix"), "{}."),
     // UI 组件 - 交互确认
     ((Lang::Cn, "prompt_continue"), "继续吗？"),
     ((Lang::En, "prompt_continue"), "Continue?"),
@@ -303,10 +277,6 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::Cn, "prompt_default_no"), "n"),
     ((Lang::En, "prompt_default_no"), "n"),
     // UI 组件 - 错误消息
-    ((Lang::Cn, "error_context_file"), "文件"),
-    ((Lang::En, "error_context_file"), "File"),
-    ((Lang::Cn, "error_context_reason"), "原因"),
-    ((Lang::En, "error_context_reason"), "Reason"),
     // 路径安全检查
     ((Lang::Cn, "same_source_output"), "源目录和输出目录相同且格式为 {0} 时，输出文件会覆盖源视频。请使用不同的输出目录。"),
     ((Lang::En, "same_source_output"), "Output directory is the same as source and format is {0}; output would overwrite source video. Use a different output directory."),
@@ -324,30 +294,34 @@ fn translation_map() -> &'static HashMap<TranslationKey, &'static str> {
 }
 
 fn translate(lang: Lang, key: &str) -> Cow<'static, str> {
-    translation_map()
-        .get(&(lang, key))
-        .map(|s| Cow::Borrowed(*s))
-        .unwrap_or_else(|| Cow::Owned(key.to_string()))
+    let found = translation_map().get(&(lang, key));
+    debug_assert!(found.is_some(), "unknown translation key: {key} ({lang:?})");
+    match found {
+        Some(s) => Cow::Borrowed(*s),
+        // Release builds keep working, but the key name is the tell.
+        None => Cow::Owned(key.to_string()),
+    }
 }
 
 pub fn t(key: &str) -> Cow<'static, str> {
     translate(lang(), key)
 }
 
-#[cfg(test)]
+/// `t_for` with `{0}`-style placeholders filled.
+pub fn tf_for(for_lang: Lang, key: &str, args: &[&str]) -> String {
+    let mut result = translate(for_lang, key).into_owned();
+    for (i, arg) in args.iter().enumerate() {
+        result = result.replace(&format!("{{{i}}}"), arg);
+    }
+    result
+}
+
 pub fn t_for(for_lang: Lang, key: &str) -> Cow<'static, str> {
     translate(for_lang, key)
 }
 
 pub fn tf(key: &str, args: &[&str]) -> String {
-    if args.is_empty() {
-        return t(key).into_owned();
-    }
-    let mut result = t(key).into_owned();
-    for (i, arg) in args.iter().enumerate() {
-        result = result.replace(&format!("{{{i}}}"), arg);
-    }
-    result
+    tf_for(lang(), key, args)
 }
 
 #[cfg(test)]
@@ -366,9 +340,29 @@ mod tests {
         assert_eq!(translate(Lang::En, "checkmark"), "✓");
     }
 
+    /// A key missing in one language is how a half-translated release ships.
     #[test]
-    fn test_translate_fallback() {
-        assert_eq!(translate(Lang::En, "nonexistent_key"), "nonexistent_key");
+    fn every_key_exists_in_both_languages() {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for ((lang, key), _) in TRANSLATIONS {
+            let _ = lang;
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        let one_sided: Vec<&&str> = counts
+            .iter()
+            .filter(|(_, n)| **n != 2)
+            .map(|(k, _)| k)
+            .collect();
+        assert!(
+            one_sided.is_empty(),
+            "keys missing a translation in one language: {one_sided:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown translation key")]
+    fn unknown_key_is_a_bug_not_a_fallback() {
+        let _ = t_for(Lang::En, "totally_nonexistent_key_xyz");
     }
 
     #[test]
@@ -441,12 +435,6 @@ mod tests {
         assert!(!result.contains("{0}"), "Unreplaced {{0}} in: {}", result);
         assert!(!result.contains("{1}"), "Unreplaced {{1}} in: {}", result);
         assert!(!result.contains("{2}"), "Unreplaced {{2}} in: {}", result);
-    }
-
-    #[test]
-    fn test_translate_unknown_key_returns_key_name() {
-        let result = t_for(Lang::En, "totally_nonexistent_key_xyz");
-        assert_eq!(result.as_ref(), "totally_nonexistent_key_xyz");
     }
 
     #[test]
