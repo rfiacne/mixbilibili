@@ -6,7 +6,7 @@ description = "A CLI tool for batch merging Bilibili video and audio files"
 license = "MIT"
 
 [dependencies]
-clap = { version = "4.5.0", features = ["std"] }
+clap = { version = "4.5.0", features = ["std", "derive"] }
 which = "6.0.0"
 rayon = "1.10.0"
 colored = { version = "2.1.0", default-features = false }

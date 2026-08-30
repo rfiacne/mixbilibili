@@ -20,6 +20,7 @@ use crate::i18n::{t, tf};
 use crate::interrupt::Interrupt;
 use crate::ui::Colors;
 use anyhow::{Context, Result};
+use clap::Parser;
 use colored::Colorize;
 use std::time::Duration;
 use thiserror::Error;
@@ -99,8 +100,7 @@ impl From<anyhow::Error> for Failure {
 
 /// Initialize the application: parse args, verify ffmpeg, ensure directories.
 fn init() -> Result<Args> {
-    let matches = cli::build_cli().get_matches();
-    let mut args = cli::parse_args(&matches);
+    let mut args = cli::Args::parse();
     args.validate()?;
 
     if !ffmpeg::ensure_ffmpeg()? {
