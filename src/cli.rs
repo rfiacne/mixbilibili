@@ -117,6 +117,18 @@ pub struct Args {
     pub ascii: bool,
 }
 
+/// A `--once` stem becomes a filename, so it must not carry a path, a null
+/// byte, or a directory shorthand.
+fn is_plain_stem(stem: &str) -> bool {
+    if stem.contains('\0') {
+        return false;
+    }
+    if stem.trim().is_empty() || stem == "." || stem == ".." {
+        return false;
+    }
+    !stem.contains('/') && !stem.contains('\\')
+}
+
 fn default_jobs() -> usize {
     std::thread::available_parallelism()
         .map(|p| p.get())
@@ -327,6 +339,12 @@ impl Args {
                 if s == o {
                     bail!("{}", tf("same_source_output", &[&self.format.to_string()]));
                 }
+            }
+        }
+
+        if let Some(stem) = &self.once {
+            if !is_plain_stem(stem) {
+                bail!("{}", tf("invalid_stem", &[stem]));
             }
         }
 
