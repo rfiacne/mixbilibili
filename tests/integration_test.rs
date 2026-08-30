@@ -435,3 +435,105 @@ fn test_resume_after_partial() {
         "State file should be cleared after success"
     );
 }
+
+/// `scripts/aria2-hook.sh` shells out to exactly this command once both
+/// downloads have landed. The hook is bash and so is untested by this suite,
+/// so the contract it depends on is pinned here: merge in place, remove both
+/// sources, stay silent, and leave nothing to resume.
+#[test]
+fn test_once_quiet_contract_used_by_the_aria2_hook() {
+    if !ffmpeg_available() {
+        eprintln!("Skipping: ffmpeg not available");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    create_test_media(dir.path(), "hook_video");
+
+    let dir_str = dir.path().display().to_string();
+    let output = Command::new(get_binary_path())
+        .args([
+            "--once",
+            "hook_video",
+            "-s",
+            &dir_str,
+            "-o",
+            &dir_str,
+            "--sdel",
+            "true",
+            "--quiet",
+        ])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(output.status.success(), "hook call must succeed");
+    assert!(
+        output.stdout.is_empty(),
+        "--quiet must stay silent for the hook: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        dir.path().join("hook_video.mkv").exists(),
+        "merged in place"
+    );
+    assert!(
+        !dir.path().join("hook_video.mp4").exists() && !dir.path().join("hook_video.m4a").exists(),
+        "--sdel true removes both sources"
+    );
+    assert!(
+        !dir.path().join(".mixbilibili_state.json").exists(),
+        "--once leaves no resume state behind"
+    );
+}
+
+/// `-q` promises summary-only. ffmpeg's stderr is captured rather than
+/// inherited, so its diagnostics cannot leak past the promise — and cannot
+/// scramble the progress bar, which draws on the same stream.
+#[test]
+fn test_quiet_mode_leaks_no_ffmpeg_diagnostics() {
+    if !ffmpeg_available() {
+        eprintln!("Skipping: ffmpeg not available");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("output");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&output).unwrap();
+
+    create_test_media(&source, "good_video");
+    // Not a video: ffmpeg will refuse it, which is exactly what used to leak.
+    fs::write(source.join("bad_video.mp4"), b"not a video").unwrap();
+    fs::write(source.join("bad_video.m4a"), b"not audio").unwrap();
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "-q",
+            "--sdel",
+            "false",
+        ])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(!result.status.success(), "the bad pair should fail the run");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    for leak in ["moov atom", "Error opening", "Invalid data"] {
+        assert!(
+            !combined.contains(leak),
+            "-q leaked ffmpeg's own output ({leak}): {combined}"
+        );
+    }
+    assert!(
+        !combined.contains("✓ good_video"),
+        "-q should not list pairs: {combined}"
+    );
+}

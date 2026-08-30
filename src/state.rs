@@ -114,6 +114,15 @@ impl MergeState {
         self.failed.insert(stem.to_string());
     }
 
+    pub fn is_failed(&self, stem: &str) -> bool {
+        self.failed.contains(stem)
+    }
+
+    /// Still to be merged — including pairs an interrupt left untouched.
+    pub fn is_pending(&self, stem: &str) -> bool {
+        self.pending.contains(stem)
+    }
+
     pub fn is_completed(&self, stem: &str) -> bool {
         self.completed.contains(stem)
     }

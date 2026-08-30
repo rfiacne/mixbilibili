@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-30
+
+### Fixed
+- Ctrl+C no longer deletes the resume state file: an interrupted batch keeps its
+  pending pairs and its sources, so the `--resume` hint it prints is real
+- A failed merge now says what ffmpeg said ("...after 0 retries: Error opening
+  input files: Invalid data found when processing input") instead of an exit code
+- A failed merge no longer leaves a partial output file behind
+- `C.utf8` (no dash) now counts as a UTF-8 locale for symbol output
+
+### Changed
+- `-q/--quiet` really suppresses the per-pair lines — the documented promise —
+  and ffmpeg's stderr is captured rather than inherited, so it cannot leak past
+  `-q` or scramble the progress bar
+- The crate is a library plus a thin `main.rs` adapter: tests drive
+  `mixbilibili::run()` and the module interfaces directly
+- The ffmpeg invocation sits behind an injected `MergeRunner`; retry, timeout,
+  output validation, partial cleanup, source deletion and resume state are
+  tested without ffmpeg (`tests/merge_policy.rs`)
+- A cancelled merge is distinct from a timed-out one: the pair stays pending
+  instead of being recorded as a timeout failure
+- `--once` is a batch of one pair through the same pipeline as a scan; it does
+  not start a thread pool
+- The global `INTERRUPTED` flag is replaced by an injected `Interrupt` token,
+  which also reaches the poll loop that kills a running ffmpeg
+- `MergeSummary` and `MergeState` fields are private; reports are built by
+  `from_results`, state is read through `is_completed`/`is_failed`/`is_pending`
+- `FilePair` owns the naming convention, so the preview can no longer promise a
+  file name the run does not write
+- The CLI is declared once via clap derive; a bad `--format` is rejected by clap
+  instead of silently becoming `mkv`
+- Unknown i18n keys panic in debug builds; every key must exist in both
+  languages; 15 unreferenced keys removed
+
+## [0.8.0] - 2026-07-19
+
+### Added
+- `src/ui` module: `Symbols` and `Colors` for box-drawing, Unicode/ASCII-aware
+  output, and a `--ascii` flag (`MIXBILIBILI_ASCII`) that forces ASCII symbols
+- Redesigned preview list, interactive confirmation and merge report
+- Merge state file carries a schema version, checked on load
+
+### Fixed
+- SIGCHLD is reset to `SIG_DFL` before any thread starts, so `waitpid` works
+  when the tool is invoked from aria2's on-download-complete hook
+- Source files are no longer deleted for a pair whose merge was interrupted
+- Recursive scans key pairs by `subdir/stem`, so same-named files in different
+  directories no longer collide; scan order is deterministic
+- Refusing a source==output run when the output format would overwrite the
+  source video, checked at start-up and again per merge
+
 ## [0.7.0] - 2026-06-24
 
 ### Added
