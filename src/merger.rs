@@ -1,7 +1,7 @@
 use crate::cli::OutputFormat;
 use crate::ffmpeg;
 use crate::i18n::{t, tf};
-use crate::progress::{format_duration, MergeProgress};
+use crate::progress::MergeProgress;
 use crate::scanner::{FilePair, ScanStats};
 use crate::state::StateTracker;
 use anyhow::{Context, Result};
@@ -76,8 +76,21 @@ pub struct MergeResult {
     pub error: Option<String>,
     /// Duration of the ffmpeg merge operation.
     pub duration: Duration,
-    /// Set to true when the merge was skipped due to INTERRUPTED flag.
+    /// True when the merge never ran because the batch was cancelled.
     pub was_interrupted: bool,
+    /// Retries used before this outcome (0 = decided on the first attempt).
+    pub retries: usize,
+}
+
+/// Everything the merge module needs beyond the pair itself: the whole input
+/// contract of `merge_pair` / `run_batch` besides pairs, tracker, cancel,
+/// and progress.
+#[derive(Debug, Clone, Copy)]
+pub struct MergeOptions<'a> {
+    pub output_dir: &'a Path,
+    pub format: OutputFormat,
+    pub verbose: bool,
+    pub retry: usize,
 }
 
 #[derive(Debug, Default)]
@@ -112,126 +125,15 @@ impl MergeSummary {
     pub fn all_success(&self) -> bool {
         self.failed_count == 0
     }
-
-    pub fn print_report(&self, quiet: bool) {
-        if quiet {
-            self.print_quiet_report();
-        } else {
-            self.print_full_report();
-        }
-    }
-
-    fn print_quiet_report(&self) {
-        let total = self.success_count + self.failed_count;
-        if self.failed_count > 0 {
-            println!(
-                "{}",
-                tf(
-                    "merged_summary_fail",
-                    &[
-                        &self.success_count.to_string(),
-                        &total.to_string(),
-                        &self.failed_count.to_string(),
-                    ]
-                )
-            );
-        } else {
-            println!(
-                "{}",
-                tf(
-                    "merged_summary_ok",
-                    &[&self.success_count.to_string(), &total.to_string(),]
-                )
-            );
-        }
-    }
-
-    fn print_full_report(&self) {
-        println!("{}", t("separator").bright_black());
-        println!("{}", t("merge_report").cyan().bold());
-        println!("{}", t("separator").bright_black());
-
-        let success_str = format!(
-            "{} {}",
-            t("checkmark").green(),
-            tf("succeeded_fmt", &[&self.success_count.to_string()])
-        );
-        let fail_str = if self.failed_count > 0 {
-            format!(
-                "{} {}",
-                t("cross").red(),
-                tf("failed_fmt", &[&self.failed_count.to_string()])
-            )
-            .red()
-            .to_string()
-        } else {
-            format!(
-                "{} {}",
-                t("cross"),
-                tf("failed_fmt", &[&self.failed_count.to_string()])
-            )
-        };
-        println!("  {}    {}", success_str, fail_str);
-
-        if self.skipped_count > 0 {
-            println!(
-                "  {} {}",
-                tf("skipped_fmt", &[&self.skipped_count.to_string()]),
-                "(aria2)".bright_black()
-            );
-        }
-        if self.orphaned_count > 0 {
-            println!(
-                "  {} {}",
-                tf("orphaned_fmt", &[&self.orphaned_count.to_string()]),
-                "(orphan)".bright_black()
-            );
-        }
-
-        if self.merge_count > 0 {
-            let total = self.total_duration;
-            println!(
-                "  {}: {}",
-                t("duration").bright_black(),
-                format_duration(total)
-            );
-            if let Some(avg) = self.avg_duration() {
-                println!("  {}: {}", t("avg").bright_black(), format_duration(avg));
-            }
-            if let Some(tp) = self.throughput() {
-                println!("  {}: {:.2} pairs/sec", t("throughput").bright_black(), tp);
-            }
-        }
-
-        if self.deletion_failures > 0 {
-            println!(
-                "  {} {}",
-                tf("deletion_failures", &[&self.deletion_failures.to_string()]),
-                "(warn)".yellow()
-            );
-        }
-
-        println!("{}", t("separator").bright_black());
-
-        if !self.failures.is_empty() {
-            println!("\n{}", t("failed_files").red().bold());
-            for (name, error) in &self.failures {
-                println!("  {} {}: {}", t("cross").red(), name, error);
-            }
-            println!();
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Merge one pair. Pure fact producer: it never prints, never touches
+/// progress — the caller displays the returned result.
 pub fn merge_pair(
     pair: &FilePair,
     pair_index: usize,
-    output_dir: &Path,
-    format: OutputFormat,
-    progress: Option<&MergeProgress>,
-    verbose: bool,
-    max_retries: usize,
+    opts: &MergeOptions,
     cancel: &Cancel,
 ) -> MergeResult {
     if cancel.is_cancelled() {
@@ -242,97 +144,36 @@ pub fn merge_pair(
             error: Some("Skipped (interrupted)".to_string()),
             duration: Duration::ZERO,
             was_interrupted: true,
+            retries: 0,
         };
     }
 
-    let output_path = output_dir.join(format!("{}.{}", pair.stem, format.extension()));
+    let output_path = opts
+        .output_dir
+        .join(format!("{}.{}", pair.stem, opts.format.extension()));
 
-    do_merge(
-        pair,
-        &output_path,
-        pair_index,
-        format,
-        progress,
-        verbose,
-        max_retries,
-    )
-}
-
-fn record_failure(
-    pair: &FilePair,
-    pair_index: usize,
-    error_msg: String,
-    duration: Duration,
-    progress: Option<&MergeProgress>,
-) -> MergeResult {
-    if let Some(p) = progress {
-        p.record(&pair.stem, false, duration, Some(&error_msg), None);
-    } else {
-        println!("{} {}: {}", t("cross").red(), pair.stem, error_msg);
-    }
-    MergeResult {
-        pair_index,
-        pair_name: pair.stem.clone(),
-        success: false,
-        error: Some(error_msg),
-        duration,
-        was_interrupted: false,
-    }
-}
-
-fn do_merge(
-    pair: &FilePair,
-    output_path: &Path,
-    pair_index: usize,
-    format: OutputFormat,
-    progress: Option<&MergeProgress>,
-    verbose: bool,
-    max_retries: usize,
-) -> MergeResult {
     let start = std::time::Instant::now();
 
-    for attempt in 0..=max_retries {
+    for attempt in 0..=opts.retry {
         if attempt > 0 {
             std::thread::sleep(Duration::from_secs(1));
-            if let Some(p) = progress {
-                p.set_message(&tf("retry_marker", &[&attempt.to_string(), &pair.stem]));
-            } else if verbose {
-                println!(
-                    "{} {}",
-                    "↻".yellow(),
-                    tf("verbose_retry", &[&pair.stem, &attempt.to_string()])
-                );
-            }
         }
 
-        if verbose && attempt == 0 {
-            println!(
-                "Running: ffmpeg -i {} -i {} -> {}",
-                pair.video.display(),
-                pair.audio.display(),
-                output_path.display()
-            );
-        }
-
-        let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, output_path, format);
+        let mut cmd =
+            ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, opts.format);
         match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT) {
             Ok(status) if status.success() => {
-                let duration = start.elapsed();
-                if let Some(p) = progress {
-                    p.record(&pair.stem, true, duration, None, None);
-                } else {
-                    println!("{} {}", t("checkmark").green(), pair.stem);
-                }
                 return MergeResult {
                     pair_index,
                     pair_name: pair.stem.clone(),
                     success: true,
                     error: None,
-                    duration,
+                    duration: start.elapsed(),
                     was_interrupted: false,
+                    retries: attempt,
                 };
             }
-            Ok(_) if attempt < max_retries => continue,
+            Ok(_) if attempt < opts.retry => continue,
             Ok(status) => {
                 let error_msg = tf(
                     "merge_failed_exit",
@@ -341,23 +182,80 @@ fn do_merge(
                             .code()
                             .map(|c| c.to_string())
                             .unwrap_or_else(|| "unknown".to_string()),
-                        &max_retries.to_string(),
+                        &opts.retry.to_string(),
                     ],
                 );
-                return record_failure(pair, pair_index, error_msg, start.elapsed(), progress);
+                return failure(pair, pair_index, error_msg, start.elapsed(), attempt);
             }
-            Err(_) if attempt < max_retries => continue,
+            Err(_) if attempt < opts.retry => continue,
             Err(e) => {
                 let error_msg = tf(
                     "merge_failed_io",
-                    &[&e.to_string(), &max_retries.to_string()],
+                    &[&e.to_string(), &opts.retry.to_string()],
                 );
-                return record_failure(pair, pair_index, error_msg, start.elapsed(), progress);
+                return failure(pair, pair_index, error_msg, start.elapsed(), attempt);
             }
         }
     }
 
     unreachable!("retry loop should always return")
+}
+
+fn failure(
+    pair: &FilePair,
+    pair_index: usize,
+    error_msg: String,
+    duration: Duration,
+    retries: usize,
+) -> MergeResult {
+    MergeResult {
+        pair_index,
+        pair_name: pair.stem.clone(),
+        success: false,
+        error: Some(error_msg),
+        duration,
+        was_interrupted: false,
+        retries,
+    }
+}
+
+/// Display for one finished result — lives in the orchestration layer so the
+/// merge core stays silent.
+fn announce(result: &MergeResult, progress: Option<&MergeProgress>, verbose: bool) {
+    if result.was_interrupted {
+        return;
+    }
+    match progress {
+        Some(p) => p.record(
+            &result.pair_name,
+            result.success,
+            result.duration,
+            result.error.as_deref(),
+            (result.retries > 0).then_some(result.retries),
+        ),
+        None => {
+            if verbose && result.retries > 0 {
+                println!(
+                    "{} {}",
+                    "↻".yellow(),
+                    tf(
+                        "verbose_retry",
+                        &[&result.pair_name, &result.retries.to_string()]
+                    )
+                );
+            }
+            if result.success {
+                println!("{} {}", t("checkmark").green(), result.pair_name);
+            } else {
+                println!(
+                    "{} {}: {}",
+                    t("cross").red(),
+                    result.pair_name,
+                    result.error.as_deref().unwrap_or("")
+                );
+            }
+        }
+    }
 }
 
 fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus> {
@@ -378,15 +276,11 @@ fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Resul
 /// record outcomes in the tracker, remove partial outputs after a cancel,
 /// delete sources when asked, and fold the results into a single summary.
 /// Callers bring pairs and get facts back — no save protocol to know.
-#[allow(clippy::too_many_arguments)]
 pub fn run_batch(
     pairs: &[FilePair],
     stats: &ScanStats,
-    output_dir: &Path,
-    format: OutputFormat,
+    opts: &MergeOptions,
     sdel: bool,
-    verbose: bool,
-    retry: usize,
     progress: Option<&MergeProgress>,
     tracker: &StateTracker,
     cancel: &Cancel,
@@ -395,9 +289,8 @@ pub fn run_batch(
         .par_iter()
         .enumerate()
         .map(|(idx, pair)| {
-            let result = merge_pair(
-                pair, idx, output_dir, format, progress, verbose, retry, cancel,
-            );
+            let result = merge_pair(pair, idx, opts, cancel);
+            announce(&result, progress, opts.verbose);
 
             if let Err(e) = tracker.record(&pair.stem, result.success, result.was_interrupted) {
                 eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
@@ -422,10 +315,12 @@ pub fn run_batch(
                 continue;
             }
             let pair = &pairs[result.pair_index];
-            let output_path = output_dir.join(format!("{}.{}", pair.stem, format.extension()));
-            remove_quiet(&output_path, verbose);
+            let output_path =
+                opts.output_dir
+                    .join(format!("{}.{}", pair.stem, opts.format.extension()));
+            remove_quiet(&output_path, opts.verbose);
             if sdel && pair.audio.exists() {
-                remove_quiet(&pair.audio, verbose);
+                remove_quiet(&pair.audio, opts.verbose);
             }
         }
     }
@@ -589,6 +484,7 @@ mod tests {
 
     #[test]
     fn test_format_duration() {
+        use crate::progress::format_duration;
         assert!(format_duration(Duration::from_millis(50)).contains("ms"));
         assert!(format_duration(Duration::from_millis(500)).contains("ms"));
         assert!(format_duration(Duration::from_secs(5)).contains("s"));
@@ -687,9 +583,19 @@ mod merge_tests {
             error: None,
             duration: Duration::from_millis(123),
             was_interrupted: false,
+            retries: 0,
         };
         let debug_str = format!("{:?}", result);
         assert!(debug_str.contains("video"));
+    }
+
+    fn opts_for<'a>(dir: &'a Path) -> MergeOptions<'a> {
+        MergeOptions {
+            output_dir: dir,
+            format: OutputFormat::Mkv,
+            verbose: false,
+            retry: 0,
+        }
     }
 
     #[test]
@@ -704,16 +610,7 @@ mod merge_tests {
             stem: "does-not-exist".to_string(),
         };
 
-        let result = merge_pair(
-            &pair,
-            0,
-            std::path::Path::new("."),
-            OutputFormat::Mkv,
-            None,
-            false,
-            0,
-            &cancel,
-        );
+        let result = merge_pair(&pair, 0, &opts_for(std::path::Path::new(".")), &cancel);
 
         assert!(!result.success);
         assert!(result.was_interrupted);
@@ -731,16 +628,7 @@ mod merge_tests {
             stem: "missing".to_string(),
         };
 
-        let result = merge_pair(
-            &pair,
-            0,
-            dir.path(),
-            OutputFormat::Mkv,
-            None,
-            false,
-            0,
-            &cancel,
-        );
+        let result = merge_pair(&pair, 0, &opts_for(dir.path()), &cancel);
 
         assert!(!result.was_interrupted);
     }
@@ -754,6 +642,7 @@ mod merge_tests {
             error: Some("test error".to_string()),
             duration: Duration::from_secs(1),
             was_interrupted: false,
+            retries: 0,
         };
         assert!(!result.success);
         assert!(result.error.is_some());
@@ -778,6 +667,15 @@ mod exec_tests {
         StateTracker::new(MergeState::new(dir, dir), dir, 5)
     }
 
+    fn opts_for<'a>(dir: &'a Path) -> MergeOptions<'a> {
+        MergeOptions {
+            output_dir: dir,
+            format: OutputFormat::Mkv,
+            verbose: false,
+            retry: 0,
+        }
+    }
+
     #[test]
     fn run_batch_empty_passes_stats_through() {
         let dir = tempdir().unwrap();
@@ -788,11 +686,8 @@ mod exec_tests {
                 skipped: 5,
                 orphaned: 3,
             },
-            dir.path(),
-            OutputFormat::Mkv,
+            &opts_for(dir.path()),
             false,
-            false,
-            0,
             None,
             &tracker_for(dir.path()),
             &Cancel::new(),
@@ -812,11 +707,8 @@ mod exec_tests {
         let summary = run_batch(
             &pairs,
             &ScanStats::default(),
-            dir.path(),
-            OutputFormat::Mkv,
+            &opts_for(dir.path()),
             false,
-            false,
-            0,
             None,
             &tracker,
             &Cancel::new(),
@@ -839,11 +731,8 @@ mod exec_tests {
         let summary = run_batch(
             &pairs,
             &ScanStats::default(),
-            dir.path(),
-            OutputFormat::Mkv,
+            &opts_for(dir.path()),
             false,
-            false,
-            0,
             None,
             &tracker_for(dir.path()),
             &cancel,

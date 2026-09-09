@@ -234,7 +234,13 @@ fn run() -> Result<()> {
 
     // Phase 3: merge, tracking outcomes for resume
     let tracker = state::StateTracker::new(merge_state, &args.source, STATE_SAVE_INTERVAL);
-    let summary = execute(&args, &scan, format, &cancel, &tracker)?;
+    let opts = merger::MergeOptions {
+        output_dir: &args.output,
+        format,
+        verbose: args.verbose,
+        retry: args.retry,
+    };
+    let summary = execute(&args, &scan, &opts, &cancel, &tracker)?;
 
     // Phase 4: Update state and report. On interrupt the flushed state is
     // exactly what --resume needs, so leave it alone.
@@ -242,7 +248,7 @@ fn run() -> Result<()> {
         finalize(&args, &summary)?;
     }
 
-    summary.print_report(args.quiet);
+    render_report(&summary, args.quiet);
 
     if cancel.is_cancelled() {
         println!("{}", t("interrupted_cleanup").yellow());
@@ -288,16 +294,13 @@ fn run_once(
         stem: stem.to_string(),
     };
 
-    let result = merger::merge_pair(
-        &pair,
-        0,
-        &args.output,
+    let opts = merger::MergeOptions {
+        output_dir: &args.output,
         format,
-        None,
-        args.verbose,
-        args.retry,
-        cancel,
-    );
+        verbose: args.verbose,
+        retry: args.retry,
+    };
+    let result = merger::merge_pair(&pair, 0, &opts, cancel);
 
     if result.success {
         if args.sdel {
@@ -319,7 +322,7 @@ const STATE_SAVE_INTERVAL: usize = 5;
 fn execute(
     args: &Args,
     scan: &scanner::ScanResult,
-    format: cli::OutputFormat,
+    opts: &merger::MergeOptions,
     cancel: &merger::Cancel,
     tracker: &state::StateTracker,
 ) -> Result<merger::MergeSummary> {
@@ -340,15 +343,132 @@ fn execute(
     Ok(merger::run_batch(
         &scan.pairs,
         &scan.stats,
-        &args.output,
-        format,
+        opts,
         args.sdel,
-        args.verbose,
-        args.retry,
         progress.as_ref(),
         tracker,
         cancel,
     ))
+}
+
+/// Print the merge report. Display lives here, beside the CLI — the merger
+/// module only produces facts.
+fn render_report(summary: &merger::MergeSummary, quiet: bool) {
+    use merger::MergeSummary;
+
+    fn line(text: String) {
+        println!("{text}");
+    }
+
+    if quiet {
+        let total = summary.success_count + summary.failed_count;
+        let key = if summary.failed_count > 0 {
+            "merged_summary_fail"
+        } else {
+            "merged_summary_ok"
+        };
+        line(tf(
+            key,
+            &[
+                &summary.success_count.to_string(),
+                &total.to_string(),
+                &summary.failed_count.to_string(),
+            ],
+        ));
+        return;
+    }
+
+    let MergeSummary {
+        success_count,
+        failed_count,
+        skipped_count,
+        orphaned_count,
+        failures,
+        deletion_failures,
+        total_duration,
+        merge_count: _,
+    } = summary;
+
+    line(t("separator").bright_black().to_string());
+    line(t("merge_report").cyan().bold().to_string());
+    line(t("separator").bright_black().to_string());
+
+    let success_str = format!(
+        "{} {}",
+        t("checkmark").green(),
+        tf("succeeded_fmt", &[&success_count.to_string()])
+    );
+    let fail_str = if *failed_count > 0 {
+        format!(
+            "{} {}",
+            t("cross").red(),
+            tf("failed_fmt", &[&failed_count.to_string()])
+        )
+        .red()
+        .to_string()
+    } else {
+        format!(
+            "{} {}",
+            t("cross"),
+            tf("failed_fmt", &[&failed_count.to_string()])
+        )
+    };
+    line(format!("  {success_str}    {fail_str}"));
+
+    if *skipped_count > 0 {
+        line(format!(
+            "  {} {}",
+            tf("skipped_fmt", &[&skipped_count.to_string()]),
+            "(aria2)".bright_black()
+        ));
+    }
+    if *orphaned_count > 0 {
+        line(format!(
+            "  {} {}",
+            tf("orphaned_fmt", &[&orphaned_count.to_string()]),
+            "(orphan)".bright_black()
+        ));
+    }
+
+    if summary.merge_count > 0 {
+        line(format!(
+            "  {}: {}",
+            t("duration").bright_black(),
+            progress::format_duration(*total_duration)
+        ));
+        if let Some(avg) = summary.avg_duration() {
+            line(format!(
+                "  {}: {}",
+                t("avg").bright_black(),
+                progress::format_duration(avg)
+            ));
+        }
+        if let Some(tp) = summary.throughput() {
+            line(format!(
+                "  {}: {:.2} pairs/sec",
+                t("throughput").bright_black(),
+                tp
+            ));
+        }
+    }
+
+    if *deletion_failures > 0 {
+        line(format!(
+            "  {} {}",
+            tf("deletion_failures", &[&deletion_failures.to_string()]),
+            "(warn)".yellow()
+        ));
+    }
+
+    line(t("separator").bright_black().to_string());
+
+    if !failures.is_empty() {
+        line(format!("\n{}", t("failed_files").red().bold()));
+        for (name, error) in failures {
+            line(format!("  {} {}: {}", t("cross").red(), name, error));
+        }
+        line(String::new());
+    }
 }
 
 /// Finalize: drop the resume state once everything merged; a partial run

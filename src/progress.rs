@@ -43,13 +43,6 @@ impl Renderer {
         }
     }
 
-    fn update_message(&self, msg: &str) {
-        match self {
-            Self::Bar(bar) => bar.set_message(msg.to_string()),
-            Self::Text { .. } => {} // Text mode doesn't update mid-file
-        }
-    }
-
     fn finish(&self) {
         match self {
             Self::Bar(bar) => {
@@ -187,11 +180,6 @@ impl MergeProgress {
         retry: Option<usize>,
     ) {
         self.inner.record(stem, success, duration, error, retry);
-    }
-
-    /// Update the status message without advancing progress (for retries).
-    pub fn set_message(&self, msg: &str) {
-        self.inner.update_message(msg);
     }
 
     /// Finish the progress renderer.
