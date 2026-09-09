@@ -502,25 +502,31 @@ mod tests {
 
     #[test]
     fn test_merge_summary_avg_duration_some_when_merges_exist() {
-        let mut summary = MergeSummary::default();
-        summary.total_duration = Duration::from_secs(6);
-        summary.merge_count = 3;
+        let summary = MergeSummary {
+            total_duration: Duration::from_secs(6),
+            merge_count: 3,
+            ..Default::default()
+        };
         assert_eq!(summary.avg_duration(), Some(Duration::from_secs(2)));
     }
 
     #[test]
     fn test_merge_summary_throughput_none_when_zero_duration() {
-        let mut summary = MergeSummary::default();
-        summary.merge_count = 5;
-        summary.total_duration = Duration::ZERO;
+        let summary = MergeSummary {
+            merge_count: 5,
+            total_duration: Duration::ZERO,
+            ..Default::default()
+        };
         assert!(summary.throughput().is_none());
     }
 
     #[test]
     fn test_merge_summary_throughput_computes_rate() {
-        let mut summary = MergeSummary::default();
-        summary.merge_count = 10;
-        summary.total_duration = Duration::from_secs(2);
+        let summary = MergeSummary {
+            merge_count: 10,
+            total_duration: Duration::from_secs(2),
+            ..Default::default()
+        };
         let tp = summary.throughput().unwrap();
         assert!((tp - 5.0).abs() < f64::EPSILON);
     }
@@ -839,13 +845,13 @@ mod timeout_tests {
             .spawn()
             .expect("sleep command should be available");
 
+        // `timeout` refuses to run when stdin is redirected (as under cargo test),
+        // so ping is used as the portable delay on Windows.
         #[cfg(windows)]
-        let mut child = std::process::Command::new("timeout")
-            .arg("/T")
-            .arg("1")
-            .arg("/NOBREAK")
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "2", "127.0.0.1"])
             .spawn()
-            .expect("timeout command should be available");
+            .expect("ping command should be available");
 
         let result = child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL);
         assert!(result.is_ok());
@@ -862,12 +868,10 @@ mod timeout_tests {
             .expect("sleep command should be available");
 
         #[cfg(windows)]
-        let mut child = std::process::Command::new("timeout")
-            .arg("/T")
-            .arg("10")
-            .arg("/NOBREAK")
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "6", "127.0.0.1"])
             .spawn()
-            .expect("timeout command should be available");
+            .expect("ping command should be available");
 
         let result = child.wait_with_timeout(Duration::from_millis(50), POLL_INTERVAL);
         assert!(result.is_ok());

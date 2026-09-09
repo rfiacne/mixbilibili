@@ -132,7 +132,8 @@ mod tests {
     #[test]
     fn test_state_load_old_vec_format() {
         let dir = tempdir().unwrap();
-        let dir_str = dir.path().to_string_lossy().to_string();
+        // Escape backslashes so Windows temp paths embed validly in the JSON string.
+        let dir_str = dir.path().to_string_lossy().replace('\\', "\\\\");
         let json = format!(
             r#"{{
   "source_dir": "{dir_str}",
