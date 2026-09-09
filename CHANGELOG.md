@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--once <stem>` rejects stems containing path separators or `..`
 - Windows: old-format state test and timeout tests no longer fail under `cargo test`
 - resume source-dir mismatch message is now translated
+- aria2 hook no longer hardcodes a developer machine path; resolves `mixbilibili`
+  from `PATH` with a `MIXBILIBILI_BIN` override
 
 ### Changed
 - architecture: batch orchestration, save policy, interrupt cleanup, and summary
