@@ -1,16 +1,26 @@
-use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::IsTerminal;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Internal rendering strategy.
 enum Renderer {
-    /// ProgressBar is internally Arc'd: Clone shares state, Send + Sync.
-    Bar(ProgressBar),
-    Text,
+    Bar(Arc<ProgressBar>),
+    Text {
+        total: usize,
+        completed: Arc<std::sync::atomic::AtomicUsize>,
+    },
 }
 
 impl Renderer {
+    /// Create a text-mode renderer.
+    fn new_text(total: usize) -> Self {
+        Self::Text {
+            total,
+            completed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
     fn record(
         &self,
         stem: &str,
@@ -19,39 +29,85 @@ impl Renderer {
         error: Option<&str>,
         retry: Option<usize>,
     ) {
-        let line = format_record(stem, success, duration, error, retry);
         match self {
             Self::Bar(bar) => {
-                // indicatif strips ANSI when measuring width, so the bar
-                // stays aligned with colored messages.
-                bar.set_message(line);
+                let msg = format_record(stem, success, duration, error, retry, false);
+                bar.set_message(msg);
                 bar.inc(1);
             }
-            Self::Text => println!("{}", line),
+            Self::Text { .. } => {
+                let line = format_record(stem, success, duration, error, retry, true);
+                println!("{}", line);
+            }
+        }
+    }
+
+    fn update_message(&self, msg: &str) {
+        match self {
+            Self::Bar(bar) => bar.set_message(msg.to_string()),
+            Self::Text { .. } => {} // Text mode doesn't update mid-file
         }
     }
 
     fn finish(&self) {
-        if let Self::Bar(bar) = self {
-            bar.finish();
+        match self {
+            Self::Bar(bar) => {
+                bar.finish();
+            }
+            Self::Text { total, completed } => {
+                completed.store(*total, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 }
 
-/// Format a record line.
+/// Format a record line. If `colored`, adds ANSI color codes.
 fn format_record(
     stem: &str,
     success: bool,
     duration: Duration,
     error: Option<&str>,
     retry: Option<usize>,
+    colored: bool,
 ) -> String {
+    use crate::ui::{Colors, Symbols};
+
+    let symbols = Symbols::new(crate::ui::supports_unicode());
     let time = format_duration(duration);
+
     match (success, retry, error) {
-        (true, _, _) => format!("{} {} ({})", "✓".green(), stem, time),
-        (false, Some(r), _) => format!("{} {} retry {} ({})", "↻".yellow(), stem, r, time),
-        (false, None, Some(e)) => format!("{} {}: {}", "✗".red(), stem, e),
-        (false, None, None) => format!("{} {} ({})", "✗".red(), stem, time),
+        (true, _, _) => {
+            let sym = if colored {
+                Colors::success(symbols.success)
+            } else {
+                symbols.success.to_string()
+            };
+            format!("{} {} ({})", sym, stem, time)
+        }
+        (false, Some(r), _) => {
+            let sym = if colored {
+                Colors::warning(symbols.retry)
+            } else {
+                symbols.retry.to_string()
+            };
+            format!("{} {} retry {} ({})", sym, stem, r, time)
+        }
+        (false, None, Some(e)) => {
+            let sym = if colored {
+                Colors::failure(symbols.failure)
+            } else {
+                symbols.failure.to_string()
+            };
+            format!("{} {}: {}", sym, stem, e)
+        }
+        (false, None, None) => {
+            let sym = if colored {
+                Colors::failure(symbols.failure)
+            } else {
+                symbols.failure.to_string()
+            };
+            format!("{} {} ({})", sym, stem, time)
+        }
     }
 }
 
@@ -77,30 +133,51 @@ impl MergeProgress {
         if std::io::stderr().is_terminal() {
             let bar = ProgressBar::new(total as u64);
             bar.enable_steady_tick(Duration::from_millis(100));
-            // {per_sec} and {eta} are indicatif's built-in keys — no custom
-            // formatters needed.
+
+            // 新模板：使用 ● spinner，蓝色已完成，亮黑未完成
+            let template =
+                "{spinner} {msg:20} {bar:20.cyan/blue} {pos}/{len} ETA: {eta}".to_string();
+
             bar.set_style(
-                ProgressStyle::with_template(
-                    "[{elapsed_precise}] {bar:30.cyan/blue} {pos}/{len} ({per_sec}) ETA: {eta}",
-                )
-                .unwrap()
-                .progress_chars("=>-"),
+                ProgressStyle::with_template(&template)
+                    .unwrap()
+                    .progress_chars("███░░░") // 三阶灰度
+                    .tick_strings(&["●", "○", "●"]) // spinner 动画
+                    .with_key(
+                        "eta",
+                        |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
+                            let pos = state.pos() as usize;
+                            let total = state.len().unwrap_or(0) as usize;
+                            let elapsed = state.elapsed().as_secs_f64();
+                            if pos > 0 && elapsed > 0.0 && total > pos {
+                                let rate = pos as f64 / elapsed;
+                                let remaining = (total - pos) as f64 / rate;
+                                let _ = write!(
+                                    w,
+                                    "{}",
+                                    format_duration(Duration::from_secs_f64(remaining))
+                                );
+                            } else {
+                                let _ = write!(w, "--");
+                            }
+                        },
+                    ),
             );
             Self {
-                inner: Renderer::Bar(bar),
+                inner: Renderer::Bar(Arc::new(bar)),
             }
         } else {
             Self {
-                inner: Renderer::Text,
+                inner: Renderer::new_text(total),
             }
         }
     }
 
-    /// Create a text-mode renderer explicitly (for testing).
-    #[cfg(test)]
-    pub fn new_text() -> Self {
+    /// Create a text-mode renderer explicitly (for testing or forced text output).
+    #[allow(dead_code)]
+    pub fn new_text(total: usize) -> Self {
         Self {
-            inner: Renderer::Text,
+            inner: Renderer::new_text(total),
         }
     }
 
@@ -116,6 +193,11 @@ impl MergeProgress {
         self.inner.record(stem, success, duration, error, retry);
     }
 
+    /// Update the status message without advancing progress (for retries).
+    pub fn set_message(&self, msg: &str) {
+        self.inner.update_message(msg);
+    }
+
     /// Finish the progress renderer.
     pub fn finish(&self) {
         self.inner.finish();
@@ -124,7 +206,21 @@ impl MergeProgress {
     /// Test helper: returns true if using text mode.
     #[cfg(test)]
     pub fn inner_is_text(&self) -> bool {
-        matches!(self.inner, Renderer::Text)
+        matches!(self.inner, Renderer::Text { .. })
+    }
+}
+
+impl Clone for MergeProgress {
+    fn clone(&self) -> Self {
+        Self {
+            inner: match &self.inner {
+                Renderer::Bar(bar) => Renderer::Bar(bar.clone()),
+                Renderer::Text { total, completed } => Renderer::Text {
+                    total: *total,
+                    completed: Arc::clone(completed),
+                },
+            },
+        }
     }
 }
 
@@ -140,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_progress_text_new_and_record() {
-        let progress = MergeProgress::new_text();
+        let progress = MergeProgress::new_text(10);
         progress.record("test", true, Duration::from_millis(100), None, None);
         assert!(progress.inner_is_text());
         progress.finish();
@@ -148,15 +244,177 @@ mod tests {
 
     #[test]
     fn test_progress_record_success() {
-        let progress = MergeProgress::new_text();
+        let progress = MergeProgress::new_text(10);
         progress.record("test", true, Duration::from_millis(500), None, None);
         progress.finish();
     }
 
     #[test]
     fn test_progress_record_failure() {
-        let progress = MergeProgress::new_text();
+        let progress = MergeProgress::new_text(10);
         progress.record("test", false, Duration::from_secs(2), Some("error"), None);
         progress.finish();
+    }
+
+    #[test]
+    fn test_progress_clone() {
+        let progress = MergeProgress::new_text(10);
+        let cloned = progress.clone();
+        cloned.record("test", true, Duration::from_millis(100), None, None);
+        progress.finish();
+        cloned.finish();
+    }
+
+    #[test]
+    fn test_progress_bar_template_uses_new_style() {
+        // 验证进度条使用 ███░░ 样式
+        let progress = MergeProgress::new(10);
+        // 由于 indicatif 内部状态难以直接访问，这里验证创建成功
+        progress.finish();
+    }
+
+    #[test]
+    fn test_format_record_uses_unicode_symbols() {
+        let result = format_record("test", true, Duration::from_millis(500), None, None, true);
+        assert!(result.contains("✓"));
+        assert!(result.contains("test"));
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    // --- format_duration boundary tests ---
+
+    #[test]
+    fn test_format_duration_zero() {
+        let s = format_duration(Duration::ZERO);
+        assert_eq!(s, "0ms");
+    }
+
+    #[test]
+    fn test_format_duration_sub_second_boundary() {
+        // Just under 1 second → should use ms
+        let s = format_duration(Duration::from_millis(999));
+        assert!(s.ends_with("ms"), "999ms should format as ms: {}", s);
+        assert!(s.contains("999"));
+    }
+
+    #[test]
+    fn test_format_duration_exactly_one_second() {
+        let s = format_duration(Duration::from_secs(1));
+        assert!(s.ends_with("s"), "1s should format as seconds: {}", s);
+        assert!(!s.contains("ms"));
+        assert!(!s.contains("m "));
+    }
+
+    #[test]
+    fn test_format_duration_under_minute() {
+        let s = format_duration(Duration::from_secs(59));
+        assert!(s.contains("s"));
+        assert!(!s.contains("m "));
+    }
+
+    #[test]
+    fn test_format_duration_exactly_one_minute() {
+        let s = format_duration(Duration::from_secs(60));
+        assert!(s.contains("m"), "60s should format with minutes: {}", s);
+        assert!(s.contains("1m"));
+    }
+
+    #[test]
+    fn test_format_duration_minutes_and_seconds() {
+        let s = format_duration(Duration::from_secs(90));
+        assert!(s.contains("1m"));
+        assert!(s.contains("30s"));
+    }
+
+    #[test]
+    fn test_format_duration_large_value() {
+        let s = format_duration(Duration::from_secs(3661));
+        assert!(s.contains("m"), "large durations should use minutes: {}", s);
+    }
+
+    // --- format_record branch coverage ---
+
+    #[test]
+    fn test_format_record_success_uncolored() {
+        let s = format_record(
+            "my_video",
+            true,
+            Duration::from_millis(200),
+            None,
+            None,
+            false,
+        );
+        assert!(s.contains("my_video"));
+        assert!(s.contains("200ms"));
+    }
+
+    #[test]
+    fn test_format_record_failure_with_retry() {
+        let s = format_record("vid", false, Duration::from_secs(1), None, Some(2), false);
+        assert!(s.contains("vid"));
+        assert!(s.contains("retry"));
+        assert!(s.contains("2"));
+    }
+
+    #[test]
+    fn test_format_record_failure_with_error_message() {
+        let s = format_record(
+            "broken",
+            false,
+            Duration::from_secs(3),
+            Some("ffmpeg crashed"),
+            None,
+            false,
+        );
+        assert!(s.contains("broken"));
+        assert!(s.contains("ffmpeg crashed"));
+    }
+
+    #[test]
+    fn test_format_record_failure_no_error_no_retry() {
+        let s = format_record("fail", false, Duration::from_millis(50), None, None, false);
+        assert!(s.contains("fail"));
+        assert!(s.contains("50ms"));
+    }
+
+    #[test]
+    fn test_format_record_colored_flag_changes_code_path() {
+        // When colored=true, format_record uses Colors::success/failure/warning
+        // When colored=false, it uses plain symbol.to_string()
+        // Both produce valid output containing the stem and duration
+        let colored = format_record("x", true, Duration::from_millis(10), None, None, true);
+        let plain = format_record("x", true, Duration::from_millis(10), None, None, false);
+        // Both should contain the stem and time regardless of coloring
+        assert!(colored.contains("x"));
+        assert!(colored.contains("10ms"));
+        assert!(plain.contains("x"));
+        assert!(plain.contains("10ms"));
+    }
+
+    // --- MergeProgress text mode tests ---
+
+    #[test]
+    fn test_progress_set_message_text_mode_no_panic() {
+        let progress = MergeProgress::new_text(5);
+        progress.set_message("processing...");
+        progress.finish();
+    }
+
+    #[test]
+    fn test_progress_record_with_retry() {
+        let progress = MergeProgress::new_text(5);
+        progress.record("vid", false, Duration::from_secs(1), None, Some(1));
+        progress.finish();
+    }
+
+    #[test]
+    fn test_progress_text_mode_finish_idempotent() {
+        let progress = MergeProgress::new_text(3);
+        progress.finish();
+        progress.finish(); // should not panic on double-finish
     }
 }

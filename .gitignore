@@ -1,8 +1,16 @@
 /target
-/Cargo.lock
 **/*.rs.bk
 *.pdb
 .DS_Store
 .worktrees/
+# Local Pi runtime state
+.atl/
 # CocoIndex Code (ccc)
 /.cocoindex_code/
+
+# Claude Code
+.mcp.json
+CLAUDE.md
+
+# Qoder agent workspace
+.qoder/

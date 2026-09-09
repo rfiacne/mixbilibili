@@ -1,10 +1,10 @@
 use anyhow::{bail, Result};
-use clap::{Arg, ArgAction, Command};
+use clap::{ArgAction, Parser, ValueEnum};
 use std::path::PathBuf;
 
 use crate::i18n::{t, tf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     Mkv,
     Mp4,
@@ -12,6 +12,16 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
+    #[cfg(test)]
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "mkv" => Ok(Self::Mkv),
+            "mp4" => Ok(Self::Mp4),
+            "mov" => Ok(Self::Mov),
+            _ => bail!("Invalid format '{}'. Supported: mkv, mp4, mov", s),
+        }
+    }
+
     pub fn extension(self) -> &'static str {
         match self {
             Self::Mkv => "mkv",
@@ -25,9 +35,36 @@ impl OutputFormat {
     }
 }
 
+impl std::fmt::Display for OutputFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.extension())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_valid_formats_lowercase() {
+        assert_eq!(OutputFormat::parse("mkv").unwrap(), OutputFormat::Mkv);
+        assert_eq!(OutputFormat::parse("mp4").unwrap(), OutputFormat::Mp4);
+        assert_eq!(OutputFormat::parse("mov").unwrap(), OutputFormat::Mov);
+    }
+
+    #[test]
+    fn test_parse_valid_formats_case_insensitive() {
+        assert_eq!(OutputFormat::parse("MKV").unwrap(), OutputFormat::Mkv);
+        assert_eq!(OutputFormat::parse("Mp4").unwrap(), OutputFormat::Mp4);
+        assert_eq!(OutputFormat::parse("MOV").unwrap(), OutputFormat::Mov);
+    }
+
+    #[test]
+    fn test_parse_invalid_format() {
+        let result = OutputFormat::parse("avi");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid format"));
+    }
 
     #[test]
     fn test_extension() {
@@ -42,192 +79,110 @@ mod tests {
         assert!(OutputFormat::Mp4.needs_faststart());
         assert!(OutputFormat::Mov.needs_faststart());
     }
+
+    #[test]
+    fn test_output_format_display() {
+        assert_eq!(format!("{}", OutputFormat::Mkv), "mkv");
+        assert_eq!(format!("{}", OutputFormat::Mp4), "mp4");
+        assert_eq!(format!("{}", OutputFormat::Mov), "mov");
+    }
+
+    #[test]
+    fn test_output_format_all_variants_have_extension() {
+        let formats = [OutputFormat::Mkv, OutputFormat::Mp4, OutputFormat::Mov];
+        for fmt in &formats {
+            let ext = fmt.extension();
+            assert!(!ext.is_empty(), "{:?} has empty extension", fmt);
+            assert_eq!(ext, format!("{}", fmt));
+        }
+    }
 }
 
-/// What a run does. --once is a distinct mode, not an early-return flag.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Mode {
-    /// Scan the source directory and merge every pair found.
-    Batch,
-    /// Merge exactly one pair by stem, no scan, no state file.
-    Once(String),
-}
-
-#[derive(Debug)]
+/// The whole CLI interface: one field per flag, defaults declared once.
+#[derive(Debug, Clone, Parser)]
+#[command(name = "mixbilibili", version, about = t("cli_about"))]
 pub struct Args {
+    #[arg(short = 's', long, default_value = ".", help = t("cli_source"), value_name = "DIR")]
     pub source: PathBuf,
+
+    #[arg(short = 'o', long, default_value = ".", help = t("cli_output"), value_name = "DIR")]
     pub output: PathBuf,
+
+    #[arg(
+        short = 'd',
+        long,
+        help = t("cli_sdel"),
+        default_value_t = true,
+        action = ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_name = "BOOL"
+    )]
     pub sdel: bool,
+
+    #[arg(short = 'f', long, default_value = "mkv", help = t("cli_format"), value_name = "FMT")]
     pub format: OutputFormat,
+
+    #[arg(short = 'j', long, default_value_t = default_jobs(), help = t("cli_jobs"), value_name = "N")]
     pub jobs: usize,
+
+    #[arg(
+        short = 'p',
+        long,
+        help = t("cli_progress"),
+        default_value_t = true,
+        action = ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_name = "BOOL"
+    )]
     pub progress: bool,
+
+    #[arg(short = 'n', long, help = t("cli_dry_run"))]
     pub dry_run: bool,
+
+    #[arg(short = 'i', long, help = t("cli_interactive"))]
     pub interactive: bool,
+
+    #[arg(short = 'v', long, help = t("cli_verbose"))]
     pub verbose: bool,
+
+    #[arg(short = 'q', long, help = t("cli_quiet"))]
     pub quiet: bool,
+
+    #[arg(short = 'r', long, help = t("cli_resume"))]
     pub resume: bool,
+
+    #[arg(long, default_value_t = 0, help = t("cli_retry"), value_name = "N")]
     pub retry: usize,
+
+    #[arg(short = 'R', long, help = t("cli_recursive"))]
     pub recursive: bool,
-    pub mode: Mode,
+
+    #[arg(long, help = t("cli_once"), value_name = "STEM")]
+    pub once: Option<String>,
+
+    #[arg(long, help = t("cli_ascii"))]
+    pub ascii: bool,
 }
 
+/// Defaults to the machine's parallelism; validate() clamps it.
 fn default_jobs() -> usize {
     std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(1)
 }
 
-/// Build the CLI command with translated help text.
-pub fn build_cli() -> Command {
-    Command::new("mixbilibili")
-        .version(env!("CARGO_PKG_VERSION"))
-        .about(t("cli_about"))
-        .arg(
-            Arg::new("source")
-                .short('s')
-                .long("source")
-                .help(t("cli_source"))
-                .default_value("."),
-        )
-        .arg(
-            Arg::new("output")
-                .short('o')
-                .long("output")
-                .help(t("cli_output"))
-                .default_value("."),
-        )
-        .arg(
-            Arg::new("sdel")
-                .short('d')
-                .long("sdel")
-                .help(t("cli_sdel"))
-                .default_value("true")
-                .action(ArgAction::Set)
-                .num_args(0..=1)
-                .default_missing_value("true"),
-        )
-        .arg(
-            Arg::new("format")
-                .short('f')
-                .long("format")
-                .help(t("cli_format"))
-                .default_value("mkv")
-                .value_parser(["mkv", "mp4", "mov"]),
-        )
-        .arg(
-            Arg::new("jobs")
-                .short('j')
-                .long("jobs")
-                .help(t("cli_jobs"))
-                .value_parser(clap::value_parser!(usize)),
-        )
-        .arg(
-            Arg::new("progress")
-                .short('p')
-                .long("progress")
-                .help(t("cli_progress"))
-                .default_value("true")
-                .action(ArgAction::Set)
-                .num_args(0..=1)
-                .default_missing_value("true"),
-        )
-        .arg(
-            Arg::new("dry_run")
-                .short('n')
-                .long("dry-run")
-                .help(t("cli_dry_run"))
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("interactive")
-                .short('i')
-                .long("interactive")
-                .help(t("cli_interactive"))
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("verbose")
-                .short('v')
-                .long("verbose")
-                .help(t("cli_verbose"))
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("quiet")
-                .short('q')
-                .long("quiet")
-                .help(t("cli_quiet"))
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("resume")
-                .short('r')
-                .long("resume")
-                .help(t("cli_resume"))
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("retry")
-                .long("retry")
-                .help(t("cli_retry"))
-                .default_value("0")
-                .value_parser(clap::value_parser!(usize)),
-        )
-        .arg(
-            Arg::new("recursive")
-                .short('R')
-                .long("recursive")
-                .help(t("cli_recursive"))
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("once")
-                .long("once")
-                .help(t("cli_once"))
-                .value_name("STEM"),
-        )
-}
-
-/// Parse ArgMatches into Args struct.
-pub fn parse_args(matches: &clap::ArgMatches) -> Args {
-    // The builder sets default_value for every option below, so get_one is
-    // Some by construction; a None here would be a builder bug, not user input.
-    let string = |key: &str| {
-        matches
-            .get_one::<String>(key)
-            .expect("builder default")
-            .clone()
-    };
-    let enabled = |key: &str| string(key) != "false";
-
-    let format = match string("format").as_str() {
-        "mp4" => OutputFormat::Mp4,
-        "mov" => OutputFormat::Mov,
-        _ => OutputFormat::Mkv,
-    };
-
-    Args {
-        source: string("source").into(),
-        output: string("output").into(),
-        sdel: enabled("sdel"),
-        format,
-        jobs: matches
-            .get_one::<usize>("jobs")
-            .copied()
-            .unwrap_or_else(default_jobs),
-        progress: enabled("progress"),
-        dry_run: matches.get_flag("dry_run"),
-        interactive: matches.get_flag("interactive"),
-        verbose: matches.get_flag("verbose"),
-        quiet: matches.get_flag("quiet"),
-        resume: matches.get_flag("resume"),
-        retry: *matches.get_one::<usize>("retry").expect("builder default"),
-        recursive: matches.get_flag("recursive"),
-        mode: match matches.get_one::<String>("once") {
-            Some(stem) => Mode::Once(stem.clone()),
-            None => Mode::Batch,
-        },
+/// A `--once` stem becomes a filename, so it must not carry a path, a null
+/// byte, or a directory shorthand.
+fn is_plain_stem(stem: &str) -> bool {
+    if stem.contains('\0') {
+        return false;
     }
+    if stem.trim().is_empty() || stem == "." || stem == ".." {
+        return false;
+    }
+    !stem.contains('/') && !stem.contains('\\')
 }
 
 impl Args {
@@ -235,15 +190,11 @@ impl Args {
         self.jobs = self.jobs.clamp(1, 32);
 
         if self.interactive && self.dry_run {
-            bail!("{}", t("conflict_interactive_dry_run"));
+            bail!("Cannot use --interactive with --dry-run");
         }
 
-        if let Mode::Once(ref stem) = self.mode {
-            // Trust boundary: the stem becomes a path component; reject
-            // anything that could escape the source directory.
-            if stem.is_empty() || stem.contains('/') || stem.contains('\\') || stem.contains("..") {
-                bail!("{}", tf("invalid_stem", &[stem]));
-            }
+        if self.verbose && self.quiet {
+            bail!("{}", t("verbose_quiet_conflict"));
         }
 
         if !self.source.is_dir() {
@@ -260,12 +211,33 @@ impl Args {
             );
         }
 
+        // Prevent source==output + mp4/mov format from overwriting source video files
+        if self.format == OutputFormat::Mp4 || self.format == OutputFormat::Mov {
+            let src = std::fs::canonicalize(&self.source).ok();
+            let out = self
+                .output
+                .exists()
+                .then(|| std::fs::canonicalize(&self.output).ok())
+                .flatten();
+            if let (Some(s), Some(o)) = (src, out) {
+                if s == o {
+                    bail!("{}", tf("same_source_output", &[&self.format.to_string()]));
+                }
+            }
+        }
+
+        if let Some(stem) = &self.once {
+            if !is_plain_stem(stem) {
+                bail!("{}", tf("invalid_stem", &[stem]));
+            }
+        }
+
         Ok(())
     }
 }
 
 #[cfg(test)]
-pub(crate) fn make_args() -> Args {
+fn make_args() -> Args {
     Args {
         source: PathBuf::from("."),
         output: PathBuf::from("."),
@@ -280,7 +252,8 @@ pub(crate) fn make_args() -> Args {
         resume: false,
         retry: 0,
         recursive: false,
-        mode: Mode::Batch,
+        once: None,
+        ascii: false,
     }
 }
 
@@ -289,63 +262,134 @@ mod args_tests {
     use super::*;
 
     #[test]
-    fn test_validate_jobs_clamps_out_of_range_only() {
+    fn test_validate_jobs_clamp_to_min() {
         let mut args = make_args();
         args.jobs = 0;
         args.validate().unwrap();
         assert_eq!(args.jobs, 1);
+    }
 
+    #[test]
+    fn test_validate_jobs_clamp_to_max() {
         let mut args = make_args();
         args.jobs = 100;
         args.validate().unwrap();
         assert_eq!(args.jobs, 32);
+    }
 
-        // In-range values pass through untouched (make_args uses jobs = 4).
+    #[test]
+    fn test_validate_jobs_in_range() {
         let mut args = make_args();
         args.validate().unwrap();
         assert_eq!(args.jobs, 4);
     }
 
     #[test]
-    fn parse_once_builds_once_mode() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "--once", "ep01"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert_eq!(args.mode, Mode::Once("ep01".to_string()));
+    fn test_dry_run_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.dry_run);
     }
 
     #[test]
-    fn validate_rejects_stem_that_escapes_source() {
-        for stem in ["../evil", "a/b", "a\\b", ".."] {
-            let mut args = make_args();
-            args.mode = Mode::Once(stem.to_string());
-            assert!(
-                args.validate().is_err(),
-                "stem {stem:?} must be rejected before it becomes a path"
-            );
-        }
+    fn test_dry_run_flag_enabled() {
+        let args = Args::try_parse_from(["mixbilibili", "--dry-run"]).unwrap();
+        assert!(args.dry_run);
     }
 
     #[test]
-    fn validate_accepts_plain_stem() {
-        let mut args = make_args();
-        args.mode = Mode::Once("ep01".to_string());
-        args.validate().unwrap();
+    fn test_verbose_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.verbose);
     }
 
-    // Flag defaults and explicit long flags are covered by builder_tests
-    // (test_build_cli_defaults / test_build_cli_long_flags). What remains
-    // unique here is the bare-flag `default_missing_value` path.
     #[test]
-    fn bare_optional_flags_enable_their_switch() {
-        for flag in ["--sdel", "-d", "--progress", "-p"] {
-            let matches = build_cli()
-                .try_get_matches_from(["mixbilibili", flag])
-                .unwrap();
-            let args = parse_args(&matches);
-            assert!(args.sdel && args.progress, "{flag} bare form must enable");
-        }
+    fn test_verbose_flag_enabled() {
+        let args = Args::try_parse_from(["mixbilibili", "--verbose"]).unwrap();
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn test_resume_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.resume);
+    }
+
+    #[test]
+    fn test_resume_flag_enabled() {
+        let args = Args::try_parse_from(["mixbilibili", "--resume"]).unwrap();
+        assert!(args.resume);
+    }
+
+    #[test]
+    fn test_retry_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert_eq!(args.retry, 0);
+    }
+
+    #[test]
+    fn test_retry_custom() {
+        let args = Args::try_parse_from(["mixbilibili", "--retry", "3"]).unwrap();
+        assert_eq!(args.retry, 3);
+    }
+
+    #[test]
+    fn test_quiet_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.quiet);
+    }
+
+    #[test]
+    fn test_quiet_flag_enabled() {
+        let args = Args::try_parse_from(["mixbilibili", "-q"]).unwrap();
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_quiet_flag_long() {
+        let args = Args::try_parse_from(["mixbilibili", "--quiet"]).unwrap();
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_sdel_bare() {
+        let args = Args::try_parse_from(["mixbilibili", "--sdel"]).unwrap();
+        assert!(args.sdel); // bare --sdel uses default_missing_value("true")
+    }
+
+    #[test]
+    fn test_sdel_bare_short() {
+        let args = Args::try_parse_from(["mixbilibili", "-d"]).unwrap();
+        assert!(args.sdel); // bare -d uses default_missing_value("true")
+    }
+
+    #[test]
+    fn test_sdel_explicit_true() {
+        let args = Args::try_parse_from(["mixbilibili", "--sdel", "true"]).unwrap();
+        assert!(args.sdel);
+    }
+
+    #[test]
+    fn test_progress_bare() {
+        let args = Args::try_parse_from(["mixbilibili", "--progress"]).unwrap();
+        assert!(args.progress);
+    }
+
+    #[test]
+    fn test_progress_bare_short() {
+        let args = Args::try_parse_from(["mixbilibili", "-p"]).unwrap();
+        assert!(args.progress);
+    }
+
+    #[test]
+    fn test_ascii_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.ascii);
+    }
+
+    #[test]
+    fn test_ascii_flag_enabled() {
+        let args = Args::try_parse_from(["mixbilibili", "--ascii"]).unwrap();
+        assert!(args.ascii);
     }
 }
 
@@ -355,8 +399,7 @@ mod builder_tests {
 
     #[test]
     fn test_build_cli_defaults() {
-        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
-        let args = parse_args(&matches);
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
         assert_eq!(args.source, PathBuf::from("."));
         assert_eq!(args.output, PathBuf::from("."));
         assert!(args.sdel);
@@ -369,20 +412,18 @@ mod builder_tests {
 
     #[test]
     fn test_build_cli_short_flags() {
-        let matches = build_cli()
-            .try_get_matches_from([
-                "mixbilibili",
-                "-s",
-                "/tmp",
-                "-o",
-                "/out",
-                "-j",
-                "4",
-                "-f",
-                "mp4",
-            ])
-            .unwrap();
-        let args = parse_args(&matches);
+        let args = Args::try_parse_from([
+            "mixbilibili",
+            "-s",
+            "/tmp",
+            "-o",
+            "/out",
+            "-j",
+            "4",
+            "-f",
+            "mp4",
+        ])
+        .unwrap();
         assert_eq!(args.source, PathBuf::from("/tmp"));
         assert_eq!(args.output, PathBuf::from("/out"));
         assert_eq!(args.jobs, 4);
@@ -391,22 +432,20 @@ mod builder_tests {
 
     #[test]
     fn test_build_cli_long_flags() {
-        let matches = build_cli()
-            .try_get_matches_from([
-                "mixbilibili",
-                "--dry-run",
-                "--quiet",
-                "--verbose",
-                "--resume",
-                "--retry",
-                "3",
-                "--sdel",
-                "false",
-                "--progress",
-                "false",
-            ])
-            .unwrap();
-        let args = parse_args(&matches);
+        let args = Args::try_parse_from([
+            "mixbilibili",
+            "--dry-run",
+            "--quiet",
+            "--verbose",
+            "--resume",
+            "--retry",
+            "3",
+            "--sdel",
+            "false",
+            "--progress",
+            "false",
+        ])
+        .unwrap();
         assert!(args.dry_run);
         assert!(args.quiet);
         assert!(args.verbose);
@@ -418,9 +457,9 @@ mod builder_tests {
 
     #[test]
     fn test_help_contains_translated_text() {
+        use clap::CommandFactory;
         let l = crate::i18n::lang();
-        let mut cmd = build_cli();
-        let help = cmd.render_help().to_string();
+        let help = Args::command().render_help().to_string();
         if matches!(l, crate::i18n::Lang::Cn) {
             assert!(help.contains("批量合并"));
         } else {
@@ -486,9 +525,73 @@ mod validation_tests {
     }
 
     #[test]
-    fn test_validate_rejects_nonexistent_source() {
+    fn test_args_validate_rejects_nonexistent_source() {
         let mut args = make_args();
         args.source = PathBuf::from("/nonexistent/path/that/does/not/exist");
-        assert!(args.validate().is_err());
+        let result = args.validate();
+        assert!(result.is_err(), "validate should reject nonexistent source");
+    }
+
+    #[test]
+    fn test_validate_rejects_mp4_same_source_output() {
+        let dir = tempdir().unwrap();
+        let mut args = make_args();
+        args.source = dir.path().to_path_buf();
+        args.output = dir.path().to_path_buf();
+        args.format = OutputFormat::Mp4;
+        let result = args.validate();
+        assert!(result.is_err(), "should reject mp4 when source == output");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("overwrite") || err_msg.contains("覆盖"));
+    }
+
+    #[test]
+    fn test_validate_allows_mkv_same_source_output() {
+        let dir = tempdir().unwrap();
+        let mut args = make_args();
+        args.source = dir.path().to_path_buf();
+        args.output = dir.path().to_path_buf();
+        args.format = OutputFormat::Mkv;
+        // mkv extension differs from mp4 input, so no overwrite risk
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_allows_mp4_different_dirs() {
+        let dir1 = tempdir().unwrap();
+        let dir2 = tempdir().unwrap();
+        let mut args = make_args();
+        args.source = dir1.path().to_path_buf();
+        args.output = dir2.path().to_path_buf();
+        args.format = OutputFormat::Mp4;
+        assert!(
+            args.validate().is_ok(),
+            "mp4 with different dirs should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_verbose_with_quiet() {
+        let mut args = make_args();
+        args.verbose = true;
+        args.quiet = true;
+        let result = args.validate();
+        assert!(result.is_err(), "should reject --verbose with --quiet");
+    }
+
+    #[test]
+    fn test_validate_accepts_verbose_alone() {
+        let mut args = make_args();
+        args.verbose = true;
+        args.quiet = false;
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_quiet_alone() {
+        let mut args = make_args();
+        args.verbose = false;
+        args.quiet = true;
+        assert!(args.validate().is_ok());
     }
 }

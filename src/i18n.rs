@@ -1,7 +1,8 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Lang {
     Cn,
     En,
@@ -84,8 +85,6 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "cli_interactive"), "Interactive mode: show preview and wait for confirmation"),
     ((Lang::Cn, "interactive_preview_header"), "预览合并操作："),
     ((Lang::En, "interactive_preview_header"), "Preview merge operations:"),
-    ((Lang::Cn, "interactive_confirm"), "是否继续？(y/N)"),
-    ((Lang::En, "interactive_confirm"), "Continue? (y/N)"),
     ((Lang::Cn, "interactive_cancelled"), "操作已取消"),
     ((Lang::En, "interactive_cancelled"), "Operation cancelled"),
     // Interrupt / resume
@@ -121,20 +120,18 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::Cn, "failed_files"), "失败的文件："),
     ((Lang::En, "failed_files"), "Failed files:"),
     // Retry / markers
+    ((Lang::Cn, "retry_marker"), "重试 {0} {1}"),
+    ((Lang::En, "retry_marker"), "retry {0} {1}"),
     ((Lang::Cn, "verbose_retry"), "正在重试 {0}（第 {1} 次）"),
     ((Lang::En, "verbose_retry"), "Retrying {0} (attempt {1})"),
     // Symbols
-    ((Lang::Cn, "separator"), "================================"),
-    ((Lang::En, "separator"), "================================"),
     ((Lang::Cn, "checkmark"), "✓"),
     ((Lang::En, "checkmark"), "✓"),
-    ((Lang::Cn, "cross"), "✗"),
-    ((Lang::En, "cross"), "✗"),
     // ffmpeg install
-    ((Lang::Cn, "install_success"), "ffmpeg 安装成功！"),
-    ((Lang::En, "install_success"), "ffmpeg installed successfully!"),
-    ((Lang::Cn, "install_failed_notfound"), "安装完成但 PATH 中未找到 ffmpeg。可能需要重启终端。"),
-    ((Lang::En, "install_failed_notfound"), "Installation completed but ffmpeg not found in PATH. You may need to restart your terminal."),
+    ((Lang::Cn, "ffmpeg_installed"), "ffmpeg 安装成功！"),
+    ((Lang::En, "ffmpeg_installed"), "ffmpeg installed successfully!"),
+    ((Lang::Cn, "ffmpeg_not_found_path"), "安装完成但 PATH 中未找到 ffmpeg。可能需要重启终端。"),
+    ((Lang::En, "ffmpeg_not_found_path"), "Installation completed but ffmpeg not found in PATH. You may need to restart your terminal."),
     ((Lang::Cn, "install_failed_exit"), "安装失败，退出码：{0}"),
     ((Lang::En, "install_failed_exit"), "Installation failed with exit code: {0}"),
     ((Lang::Cn, "install_failed_run"), "无法运行安装程序：{0}"),
@@ -191,8 +188,6 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "unreadable_source"), "source directory is not readable: {0}"),
     ((Lang::Cn, "timed_out"), "ffmpeg 进程超时（5 分钟）"),
     ((Lang::En, "timed_out"), "ffmpeg process timed out after 5 minutes"),
-    ((Lang::Cn, "failed_delete"), "无法删除 {0}"),
-    ((Lang::En, "failed_delete"), "Failed to delete {0}"),
     ((Lang::Cn, "failed_create_output"), "无法创建输出目录"),
     ((Lang::En, "failed_create_output"), "Failed to create output directory"),
     ((Lang::Cn, "failed_set_signal"), "无法设置信号处理器"),
@@ -213,8 +208,20 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "failed_write_state"), "Failed to write state file"),
     ((Lang::Cn, "failed_remove_state"), "无法删除状态文件"),
     ((Lang::En, "failed_remove_state"), "Failed to remove state file"),
-    ((Lang::Cn, "state_source_mismatch"), "恢复状态的源目录不匹配：状态记录为 '{0}'，加载自 '{1}'"),
-    ((Lang::En, "state_source_mismatch"), "Resume state source_dir mismatch: state has '{0}', loaded from '{1}'"),
+    ((Lang::Cn, "failed_create_output_file"), "输出文件未创建：{0}"),
+    ((Lang::En, "failed_create_output_file"), "Output file was not created: {0}"),
+    ((Lang::Cn, "output_file_empty"), "输出文件为空：{0}"),
+    ((Lang::En, "output_file_empty"), "Output file is empty: {0}"),
+    ((Lang::Cn, "source_missing"), "无法删除源文件：{0} '{1}' 不存在"),
+    ((Lang::En, "source_missing"), "Cannot delete source files: {0} '{1}' is missing"),
+    ((Lang::Cn, "failed_delete_audio"), "无法删除音频 '{0}'：{1}。视频保留于 '{2}'"),
+    ((Lang::En, "failed_delete_audio"), "Failed to delete audio '{0}': {1}. Video preserved at '{2}'"),
+    ((Lang::Cn, "failed_delete_video_audio_gone"), "无法删除视频 '{0}'：音频已从 '{1}' 删除"),
+    ((Lang::En, "failed_delete_video_audio_gone"), "Failed to delete video '{0}': Audio already deleted from '{1}'"),
+    ((Lang::Cn, "failed_delete_video"), "无法删除视频 '{0}'：{1}。音频已从 '{2}' 删除"),
+    ((Lang::En, "failed_delete_video"), "Failed to delete video '{0}': {1}. Audio already deleted from '{2}'"),
+    ((Lang::Cn, "failed_build_pool"), "无法创建线程池: {0}"),
+    ((Lang::En, "failed_build_pool"), "Failed to build thread pool: {0}"),
     ((Lang::Cn, "merge_failed_exit"), "ffmpeg 退出码 {0}，已重试 {1} 次"),
     ((Lang::En, "merge_failed_exit"), "ffmpeg exited with code {0} after {1} retries"),
     ((Lang::Cn, "merge_failed_io"), "{0}，已重试 {1} 次"),
@@ -248,44 +255,73 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "cli_recursive"), "Scan subdirectories recursively"),
     ((Lang::Cn, "cli_once"), "仅合并指定 stem 的文件对（跳过扫描）"),
     ((Lang::En, "cli_once"), "Merge only the specified stem (skip scanning)"),
-    ((Lang::Cn, "invalid_stem"), "无效的 stem：'{0}'（不得包含路径分隔符或 ..）"),
-    ((Lang::En, "invalid_stem"), "Invalid stem: '{0}' (must not contain path separators or ..)"),
-    ((Lang::Cn, "conflict_interactive_dry_run"), "不能同时使用 --interactive 与 --dry-run"),
-    ((Lang::En, "conflict_interactive_dry_run"), "Cannot use --interactive with --dry-run"),
-    ((Lang::Cn, "once_missing_video"), "未找到视频文件：{0}"),
-    ((Lang::En, "once_missing_video"), "Video file not found: {0}"),
-    ((Lang::Cn, "once_missing_audio"), "未找到音频文件：{0}"),
-    ((Lang::En, "once_missing_audio"), "Audio file not found: {0}"),
+    ((Lang::Cn, "cli_ascii"), "强制使用 ASCII 符号（禁用 Unicode 字符）"),
+    ((Lang::En, "cli_ascii"), "Force ASCII mode (disable Unicode characters)"),
+    ((Lang::Cn, "missing_video"), "未找到视频文件：{0}"),
+    ((Lang::En, "missing_video"), "Video file not found: {0}"),
+    ((Lang::Cn, "missing_audio"), "未找到音频文件：{0}"),
+    ((Lang::En, "missing_audio"), "Audio file not found: {0}"),
+    // UI 组件 - 报告头部
+    ((Lang::Cn, "report_border_top"), "┌"),
+    ((Lang::En, "report_border_top"), "┌"),
+    ((Lang::Cn, "report_border_bottom"), "└"),
+    ((Lang::En, "report_border_bottom"), "└"),
+    // UI 组件 - 预览列表
+    ((Lang::Cn, "preview_list_title"), "预览列表 ({} 项)"),
+    ((Lang::En, "preview_list_title"), "Preview ({} items)"),
+    // UI 组件 - 交互确认
+    ((Lang::Cn, "prompt_continue"), "继续吗？"),
+    ((Lang::En, "prompt_continue"), "Continue?"),
+    ((Lang::Cn, "prompt_default_yes"), "Y"),
+    ((Lang::En, "prompt_default_yes"), "Y"),
+    ((Lang::Cn, "prompt_default_no"), "n"),
+    ((Lang::En, "prompt_default_no"), "n"),
+    // UI 组件 - 错误消息
+    // 路径安全检查
+    ((Lang::Cn, "same_source_output"), "源目录和输出目录相同且格式为 {0} 时，输出文件会覆盖源视频。请使用不同的输出目录。"),
+    ((Lang::En, "same_source_output"), "Output directory is the same as source and format is {0}; output would overwrite source video. Use a different output directory."),
+    ((Lang::Cn, "same_source_output_runtime"), "输出路径与输入视频路径相同，跳过以防止覆盖"),
+    ((Lang::En, "same_source_output_runtime"), "Output path identical to input video, skipping to prevent overwrite"),
+    // 参数冲突
+    ((Lang::Cn, "verbose_quiet_conflict"), "不能同时使用 --verbose 和 --quiet"),
+    ((Lang::En, "verbose_quiet_conflict"), "Cannot use --verbose with --quiet"),
 ];
 
+static TRANSLATION_MAP: OnceLock<HashMap<TranslationKey, &'static str>> = OnceLock::new();
+
+fn translation_map() -> &'static HashMap<TranslationKey, &'static str> {
+    TRANSLATION_MAP.get_or_init(|| TRANSLATIONS.iter().map(|&(k, v)| (k, v)).collect())
+}
+
 fn translate(lang: Lang, key: &str) -> Cow<'static, str> {
-    // Linear scan over ~130 entries at print time: cheaper than a HashMap
-    // the process would build once and barely save on.
-    TRANSLATIONS
-        .iter()
-        .find(|&&((entry_lang, entry_key), _)| entry_lang == lang && entry_key == key)
-        .map(|&(_, text)| Cow::Borrowed(text))
-        .unwrap_or_else(|| Cow::Owned(key.to_string()))
+    let found = translation_map().get(&(lang, key));
+    debug_assert!(found.is_some(), "unknown translation key: {key} ({lang:?})");
+    match found {
+        Some(s) => Cow::Borrowed(*s),
+        // Release builds keep working, but the key name is the tell.
+        None => Cow::Owned(key.to_string()),
+    }
 }
 
 pub fn t(key: &str) -> Cow<'static, str> {
     translate(lang(), key)
 }
 
-#[cfg(test)]
+/// `t_for` with `{0}`-style placeholders filled.
+pub fn tf_for(for_lang: Lang, key: &str, args: &[&str]) -> String {
+    let mut result = translate(for_lang, key).into_owned();
+    for (i, arg) in args.iter().enumerate() {
+        result = result.replace(&format!("{{{i}}}"), arg);
+    }
+    result
+}
+
 pub fn t_for(for_lang: Lang, key: &str) -> Cow<'static, str> {
     translate(for_lang, key)
 }
 
 pub fn tf(key: &str, args: &[&str]) -> String {
-    if args.is_empty() {
-        return t(key).into_owned();
-    }
-    let mut result = t(key).into_owned();
-    for (i, arg) in args.iter().enumerate() {
-        result = result.replace(&format!("{{{i}}}"), arg);
-    }
-    result
+    tf_for(lang(), key, args)
 }
 
 #[cfg(test)]
@@ -304,9 +340,29 @@ mod tests {
         assert_eq!(translate(Lang::En, "checkmark"), "✓");
     }
 
+    /// A key missing in one language is how a half-translated release ships.
     #[test]
-    fn test_translate_fallback() {
-        assert_eq!(translate(Lang::En, "nonexistent_key"), "nonexistent_key");
+    fn every_key_exists_in_both_languages() {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for ((lang, key), _) in TRANSLATIONS {
+            let _ = lang;
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        let one_sided: Vec<&&str> = counts
+            .iter()
+            .filter(|(_, n)| **n != 2)
+            .map(|(k, _)| k)
+            .collect();
+        assert!(
+            one_sided.is_empty(),
+            "keys missing a translation in one language: {one_sided:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown translation key")]
+    fn unknown_key_is_a_bug_not_a_fallback() {
+        let _ = t_for(Lang::En, "totally_nonexistent_key_xyz");
     }
 
     #[test]
@@ -346,10 +402,11 @@ mod tests {
     }
 
     #[test]
-    fn test_translation_table_completeness() {
-        assert!(!TRANSLATIONS.is_empty());
-        assert_eq!(t_for(Lang::Cn, "error_prefix"), "错误：");
-        assert_eq!(t_for(Lang::En, "error_prefix"), "Error:");
+    fn test_translation_map_completeness() {
+        let map = translation_map();
+        assert!(!map.is_empty());
+        assert!(map.contains_key(&(Lang::Cn, "error_prefix")));
+        assert!(map.contains_key(&(Lang::En, "error_prefix")));
     }
 
     #[test]
@@ -381,12 +438,6 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_unknown_key_returns_key_name() {
-        let result = t_for(Lang::En, "totally_nonexistent_key_xyz");
-        assert_eq!(result.as_ref(), "totally_nonexistent_key_xyz");
-    }
-
-    #[test]
     fn test_dry_run_time_estimate_en() {
         let result = t_for(Lang::En, "dry_run_time_estimate");
         assert_eq!(result.as_ref(), "Estimated time: {0}");
@@ -396,5 +447,48 @@ mod tests {
     fn test_dry_run_time_estimate_cn() {
         let result = t_for(Lang::Cn, "dry_run_time_estimate");
         assert_eq!(result.as_ref(), "预计时间：{0}");
+    }
+
+    #[test]
+    fn test_new_ui_keys_exist_cn() {
+        assert_eq!(t_for(Lang::Cn, "report_border_top").as_ref(), "┌");
+        assert_eq!(t_for(Lang::Cn, "report_border_bottom").as_ref(), "└");
+        assert_eq!(
+            t_for(Lang::Cn, "preview_list_title").as_ref(),
+            "预览列表 ({} 项)"
+        );
+        assert_eq!(t_for(Lang::Cn, "prompt_continue").as_ref(), "继续吗？");
+    }
+
+    #[test]
+    fn test_new_ui_keys_exist_en() {
+        assert_eq!(t_for(Lang::En, "report_border_top").as_ref(), "┌");
+        assert_eq!(t_for(Lang::En, "report_border_bottom").as_ref(), "└");
+        assert_eq!(
+            t_for(Lang::En, "preview_list_title").as_ref(),
+            "Preview ({} items)"
+        );
+        assert_eq!(t_for(Lang::En, "prompt_continue").as_ref(), "Continue?");
+    }
+
+    #[test]
+    fn test_ffmpeg_i18n_keys_cn() {
+        assert_eq!(
+            t_for(Lang::Cn, "ffmpeg_installed").as_ref(),
+            "ffmpeg 安装成功！"
+        );
+        assert_eq!(
+            t_for(Lang::Cn, "ffmpeg_not_found_path").as_ref(),
+            "安装完成但 PATH 中未找到 ffmpeg。可能需要重启终端。"
+        );
+    }
+
+    #[test]
+    fn test_ffmpeg_i18n_keys_en() {
+        assert_eq!(
+            t_for(Lang::En, "ffmpeg_installed").as_ref(),
+            "ffmpeg installed successfully!"
+        );
+        assert_eq!(t_for(Lang::En, "ffmpeg_not_found_path").as_ref(), "Installation completed but ffmpeg not found in PATH. You may need to restart your terminal.");
     }
 }

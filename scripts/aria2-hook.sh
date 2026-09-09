@@ -45,9 +45,12 @@ fi
 # --once: 只合并指定的 stem
 # --sdel true: 合并后删除源文件
 # --quiet: 静默模式，不显示进度
-# 默认从 PATH 查找 mixbilibili；安装位置不同时设置 MIXBILIBILI_BIN 覆盖
-MIXBILIBILI_BIN="${MIXBILIBILI_BIN:-mixbilibili}"
-"$MIXBILIBILI_BIN" --once "$STEM" -s "$DIR" -o "$DIR" --sdel true --quiet
+MIXBILIBILI="${MIXBILIBILI_BIN:-mixbilibili}"
+if ! command -v "$MIXBILIBILI" >/dev/null 2>&1; then
+echo "[$(date)] mixbilibili not found: $MIXBILIBILI" >&2
+exit 1
+fi
+"$MIXBILIBILI" --once "$STEM" -s "$DIR" -o "$DIR" --sdel true --quiet
 
 # 可选：记录日志
 # echo "[$(date)] 合并完成: $STEM" >> "$DIR/.mixbilibili.log"

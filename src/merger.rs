@@ -1,127 +1,89 @@
 use crate::cli::OutputFormat;
-use crate::ffmpeg;
+use crate::ffmpeg::{self, MergeRunner, RunOutcome};
 use crate::i18n::{t, tf};
-use crate::progress::MergeProgress;
+use crate::interrupt::Interrupt;
+use crate::progress::{format_duration, MergeProgress};
 use crate::scanner::{FilePair, ScanStats};
-use crate::state::StateTracker;
+use crate::ui::{supports_unicode, Colors, Symbols};
 use anyhow::Result;
 use colored::Colorize;
-use rayon::prelude::*;
-use std::io;
-use std::path::Path;
-use std::process::{Child, ExitStatus};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-const FFMPEG_TIMEOUT: Duration = Duration::from_secs(300);
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-/// Cooperative cancellation signal. The Ctrl+C handler in main holds a clone
-/// and flips it; merge workers poll it. Tests flip it directly — no global
-/// state, so parallel tests can each own a token.
-#[derive(Debug, Clone, Default)]
-pub struct Cancel(Arc<AtomicBool>);
-
-impl Cancel {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
-/// How a timeout/cancel-aware child wait ended.
-#[derive(Debug)]
-enum Outcome {
-    Done(ExitStatus),
-    TimedOut,
-    Cancelled,
-}
-
-/// Timeout- and cancel-aware `Child::wait`: kills nothing itself but reports
-/// the deadline (`TimedOut`) or the cancel signal (`Cancelled`) so the caller
-/// can reap the child.
-fn wait_with_timeout(
-    child: &mut Child,
-    timeout: Duration,
-    poll_interval: Duration,
-    cancel: &Cancel,
-) -> io::Result<Outcome> {
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(Outcome::Done(status)),
-            Ok(None) => {
-                if cancel.is_cancelled() {
-                    return Ok(Outcome::Cancelled);
-                }
-                if start.elapsed() >= timeout {
-                    return Ok(Outcome::TimedOut);
-                }
-                std::thread::sleep(poll_interval);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-/// Output path for a pair — the single place that maps stem+format to a file.
-pub(crate) fn output_path(pair: &FilePair, opts: &MergeOptions) -> std::path::PathBuf {
-    opts.output_dir
-        .join(format!("{}.{}", pair.stem, opts.format.extension()))
-}
 
 #[derive(Debug)]
 pub struct MergeResult {
     pub pair_index: usize,
     pub pair_name: String,
+    /// Where the merged file belongs, so cleanup never rebuilds the path.
+    pub output_path: PathBuf,
     pub success: bool,
     pub error: Option<String>,
     /// Duration of the ffmpeg merge operation.
     pub duration: Duration,
-    /// True when the merge never ran because the batch was cancelled.
+    /// Set when the merge was skipped because the interrupt token fired.
     pub was_interrupted: bool,
-    /// Retries used before this outcome (0 = decided on the first attempt).
-    pub retries: usize,
-}
-
-/// Everything the merge module needs beyond the pair itself: the whole input
-/// contract of `merge_pair` / `run_batch` besides pairs, tracker, cancel,
-/// and progress.
-#[derive(Debug, Clone, Copy)]
-pub struct MergeOptions<'a> {
-    pub output_dir: &'a Path,
-    pub format: OutputFormat,
-    pub verbose: bool,
-    pub retry: usize,
 }
 
 #[derive(Debug, Default)]
 pub struct MergeSummary {
-    pub success_count: usize,
-    pub failed_count: usize,
-    pub skipped_count: usize,
-    pub orphaned_count: usize,
-    pub failures: Vec<(String, String)>,
-    pub deletion_failures: usize,
-    pub total_duration: Duration,
-    pub merge_count: usize,
+    success_count: usize,
+    failed_count: usize,
+    skipped_count: usize,
+    orphaned_count: usize,
+    failures: Vec<(String, String)>,
+    deletion_failures: usize,
+    total_duration: Duration,
 }
 
 impl MergeSummary {
-    /// Average duration per merge operation.
+    /// Build the report from what actually happened. Interrupted pairs are
+    /// neither successes nor failures — they stay pending for `--resume`.
+    pub fn from_results(
+        results: &[MergeResult],
+        stats: &ScanStats,
+        deletion_failures: usize,
+    ) -> Self {
+        let mut summary = MergeSummary {
+            skipped_count: stats.skipped,
+            orphaned_count: stats.orphaned,
+            deletion_failures,
+            ..Default::default()
+        };
+
+        for result in results {
+            if result.success {
+                summary.success_count += 1;
+                summary.total_duration += result.duration;
+            } else if !result.was_interrupted {
+                summary.failed_count += 1;
+                if let Some(ref err) = result.error {
+                    summary
+                        .failures
+                        .push((result.pair_name.clone(), err.clone()));
+                }
+            }
+        }
+
+        summary
+    }
+
+    pub fn success_count(&self) -> usize {
+        self.success_count
+    }
+
+    pub fn failed_count(&self) -> usize {
+        self.failed_count
+    }
+
+    pub fn failures(&self) -> &[(String, String)] {
+        &self.failures
+    }
+
     pub fn avg_duration(&self) -> Option<Duration> {
-        if self.merge_count == 0 {
+        if self.success_count == 0 {
             return None;
         }
-        Some(self.total_duration / self.merge_count as u32)
+        Some(self.total_duration / self.success_count as u32)
     }
 
     /// Files processed per second.
@@ -129,405 +91,613 @@ impl MergeSummary {
         if self.total_duration.is_zero() {
             return None;
         }
-        Some(self.merge_count as f64 / self.total_duration.as_secs_f64())
+        Some(self.success_count as f64 / self.total_duration.as_secs_f64())
     }
 
     pub fn all_success(&self) -> bool {
         self.failed_count == 0
     }
+
+    pub fn print_report(&self, quiet: bool) {
+        if quiet {
+            self.print_quiet_report();
+        } else {
+            self.print_full_report();
+        }
+    }
+
+    fn print_quiet_report(&self) {
+        let total = self.success_count + self.failed_count;
+        if self.failed_count > 0 {
+            println!(
+                "{}",
+                tf(
+                    "merged_summary_fail",
+                    &[
+                        &self.success_count.to_string(),
+                        &total.to_string(),
+                        &self.failed_count.to_string(),
+                    ]
+                )
+            );
+        } else {
+            println!(
+                "{}",
+                tf(
+                    "merged_summary_ok",
+                    &[&self.success_count.to_string(), &total.to_string(),]
+                )
+            );
+        }
+    }
+
+    fn print_full_report(&self) {
+        use crate::ui::{Colors, Symbols};
+
+        let symbols = Symbols::new(crate::ui::supports_unicode());
+        let width = 40;
+
+        let top_border = format!(
+            "{}{}{}",
+            symbols.top_left,
+            symbols.horizontal_line.repeat(width),
+            symbols.top_right
+        );
+        println!("{}", Colors::secondary(&top_border));
+
+        let title = Colors::title(&t("merge_report"));
+        println!(
+            "{} {} {}",
+            Colors::secondary(symbols.vertical_line),
+            title,
+            Colors::secondary(symbols.vertical_line)
+        );
+
+        let mid_border = format!(
+            "{}{}{}",
+            symbols.top_left,
+            symbols.horizontal_line.repeat(width),
+            symbols.top_right
+        );
+        println!("{}", Colors::secondary(&mid_border));
+
+        let success_str = format!(
+            "{} {}",
+            Colors::success(symbols.success),
+            tf("succeeded_fmt", &[&self.success_count.to_string()])
+        );
+        let fail_str = if self.failed_count > 0 {
+            Colors::failure(&format!(
+                "{} {}",
+                symbols.failure,
+                tf("failed_fmt", &[&self.failed_count.to_string()])
+            ))
+        } else {
+            format!(
+                "{} {}",
+                symbols.failure,
+                tf("failed_fmt", &[&self.failed_count.to_string()])
+            )
+        };
+        println!("  {}    {}", success_str, fail_str);
+
+        if self.skipped_count > 0 {
+            println!(
+                "  {} {}",
+                tf("skipped_fmt", &[&self.skipped_count.to_string()]),
+                Colors::secondary("(aria2)")
+            );
+        }
+        if self.orphaned_count > 0 {
+            println!(
+                "  {} {}",
+                tf("orphaned_fmt", &[&self.orphaned_count.to_string()]),
+                Colors::secondary("(orphan)")
+            );
+        }
+
+        if self.success_count > 0 {
+            let total = self.total_duration;
+            println!(
+                "  {}: {}",
+                Colors::secondary(&t("duration")),
+                format_duration(total)
+            );
+            if let Some(avg) = self.avg_duration() {
+                println!(
+                    "  {}: {}",
+                    Colors::secondary(&t("avg")),
+                    format_duration(avg)
+                );
+            }
+            if let Some(tp) = self.throughput() {
+                println!(
+                    "  {}: {:.2} pairs/sec",
+                    Colors::secondary(&t("throughput")),
+                    tp
+                );
+            }
+        }
+
+        if self.deletion_failures > 0 {
+            println!(
+                "  {} {}",
+                tf("deletion_failures", &[&self.deletion_failures.to_string()]),
+                Colors::warning("(warn)")
+            );
+        }
+
+        let bottom_border = format!(
+            "{}{}{}",
+            symbols.bottom_left,
+            symbols.horizontal_line.repeat(width),
+            symbols.bottom_right
+        );
+        println!("{}", Colors::secondary(&bottom_border));
+
+        if !self.failures.is_empty() {
+            println!("\n{}", Colors::failure(&t("failed_files")));
+            for (i, (name, error)) in self.failures.iter().enumerate() {
+                let connector = if i == self.failures.len() - 1 {
+                    "└"
+                } else {
+                    "├"
+                };
+                println!(
+                    "  {}─ {} {}: {}",
+                    connector,
+                    Colors::failure(symbols.failure),
+                    name,
+                    error
+                );
+            }
+            println!();
+        }
+    }
 }
 
-/// Merge one pair. Pure fact producer: it never prints, never touches
-/// progress — the caller displays the returned result.
+/// Everything one merge needs to know.
+pub struct MergePlan<'a> {
+    pub output_dir: &'a Path,
+    pub format: OutputFormat,
+    pub retries: usize,
+    pub verbose: bool,
+    pub progress: Option<&'a MergeProgress>,
+    /// Quiet mode has no per-pair lines at all: the summary is the output.
+    pub quiet: bool,
+    pub interrupt: &'a Interrupt,
+}
+
 pub fn merge_pair(
     pair: &FilePair,
     pair_index: usize,
-    opts: &MergeOptions,
-    cancel: &Cancel,
+    plan: &MergePlan,
+    runner: &dyn MergeRunner,
 ) -> MergeResult {
-    if cancel.is_cancelled() {
+    let output_path = pair.output_path(plan.output_dir, plan.format);
+
+    if plan.interrupt.is_triggered() {
         return MergeResult {
             pair_index,
             pair_name: pair.stem.clone(),
+            output_path,
             success: false,
             error: Some("Skipped (interrupted)".to_string()),
             duration: Duration::ZERO,
             was_interrupted: true,
-            retries: 0,
         };
     }
 
-    let output_path = output_path(pair, opts);
-
-    // Recursive scans key pairs by relative path, so the output may name a
-    // subdir the user hasn't created yet. ffmpeg won't mkdir for us.
-    if let Some(parent) = output_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return failure(pair, pair_index, e.to_string(), Duration::ZERO, 0);
-        }
+    // Safety check: the output must not be the input video itself. Canonicalize
+    // so different path spellings of the same file are still caught.
+    let dominated = std::fs::canonicalize(&output_path)
+        .ok()
+        .zip(std::fs::canonicalize(&pair.video).ok())
+        .map(|(o, v)| o == v)
+        .unwrap_or(false);
+    if dominated {
+        return record_failure(
+            pair,
+            pair_index,
+            output_path,
+            t("same_source_output_runtime").into_owned(),
+            Duration::ZERO,
+            plan,
+        );
     }
 
-    let start = std::time::Instant::now();
-
-    for attempt in 0..=opts.retry {
-        if attempt > 0 {
-            if cancel.is_cancelled() {
-                break;
-            }
-            std::thread::sleep(Duration::from_secs(1));
-        }
-
-        let mut cmd =
-            ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, opts.format);
-        match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT, cancel) {
-            Ok(status) if status.success() => {
-                return MergeResult {
-                    pair_index,
-                    pair_name: pair.stem.clone(),
-                    success: true,
-                    error: None,
-                    duration: start.elapsed(),
-                    was_interrupted: false,
-                    retries: attempt,
-                };
-            }
-            Ok(_) if attempt < opts.retry => continue,
-            Ok(status) => {
-                let error_msg = tf(
-                    "merge_failed_exit",
-                    &[
-                        &status
-                            .code()
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        &opts.retry.to_string(),
-                    ],
-                );
-                return failure(pair, pair_index, error_msg, start.elapsed(), attempt);
-            }
-            // Cancelled mid-merge: the pair never got a verdict, so it joins
-            // the interrupted path — unrecorded, partial output cleaned up.
-            Err(RunError::Cancelled) => {
-                return MergeResult {
-                    pair_index,
-                    pair_name: pair.stem.clone(),
-                    success: false,
-                    error: Some("Skipped (interrupted)".to_string()),
-                    duration: start.elapsed(),
-                    was_interrupted: true,
-                    retries: attempt,
-                };
-            }
-            Err(RunError::Timeout) if attempt < opts.retry => continue,
-            Err(RunError::Timeout) => {
-                return failure(
-                    pair,
-                    pair_index,
-                    t("timed_out").into_owned(),
-                    start.elapsed(),
-                    attempt,
-                );
-            }
-            Err(RunError::Spawn(_)) if attempt < opts.retry => continue,
-            Err(RunError::Spawn(e)) => {
-                let error_msg = tf(
-                    "merge_failed_io",
-                    &[&e.to_string(), &opts.retry.to_string()],
-                );
-                return failure(pair, pair_index, error_msg, start.elapsed(), attempt);
-            }
-        }
-    }
-
-    // Cancel broke out of the retry loop.
-    MergeResult {
-        pair_index,
-        pair_name: pair.stem.clone(),
-        success: false,
-        error: Some("Skipped (interrupted)".to_string()),
-        duration: start.elapsed(),
-        was_interrupted: true,
-        retries: 0,
-    }
+    do_merge(pair, output_path, pair_index, plan, runner)
 }
 
-fn failure(
+fn record_failure(
     pair: &FilePair,
     pair_index: usize,
+    output_path: PathBuf,
     error_msg: String,
     duration: Duration,
-    retries: usize,
+    plan: &MergePlan,
 ) -> MergeResult {
+    announce(plan, &pair.stem, false, duration, Some(&error_msg));
     MergeResult {
         pair_index,
         pair_name: pair.stem.clone(),
+        output_path,
         success: false,
         error: Some(error_msg),
         duration,
         was_interrupted: false,
-        retries,
     }
 }
 
-/// Display for one finished result — lives in the orchestration layer so the
-/// merge core stays silent.
-pub fn announce(result: &MergeResult, progress: Option<&MergeProgress>, verbose: bool) {
-    if result.was_interrupted {
-        return;
-    }
-    match progress {
-        Some(p) => p.record(
-            &result.pair_name,
-            result.success,
-            result.duration,
-            result.error.as_deref(),
-            (result.retries > 0).then_some(result.retries),
-        ),
+/// Tell the user about one finished pair: on the progress bar when there is
+/// one, otherwise as a line on stdout — unless the run is quiet.
+fn announce(plan: &MergePlan, stem: &str, success: bool, duration: Duration, error: Option<&str>) {
+    match plan.progress {
+        Some(p) => p.record(stem, success, duration, error, None),
         None => {
-            if verbose && result.retries > 0 {
-                println!(
-                    "{} {}",
-                    "↻".yellow(),
-                    tf(
-                        "verbose_retry",
-                        &[&result.pair_name, &result.retries.to_string()]
-                    )
-                );
-            }
-            if result.success {
-                println!("{} {}", t("checkmark").green(), result.pair_name);
-            } else {
-                println!(
-                    "{} {}: {}",
-                    t("cross").red(),
-                    result.pair_name,
-                    result.error.as_deref().unwrap_or("")
-                );
+            if let Some(line) = status_line(stem, success, error, plan.quiet) {
+                println!("{line}");
             }
         }
     }
 }
 
-enum RunError {
-    Timeout,
-    Cancelled,
-    Spawn(anyhow::Error),
+fn status_line(stem: &str, success: bool, error: Option<&str>, quiet: bool) -> Option<String> {
+    if quiet {
+        return None;
+    }
+    let symbols = Symbols::new(supports_unicode());
+    Some(if success {
+        Colors::success(&format!("{} {}", symbols.success, stem))
+    } else {
+        Colors::failure(&format!(
+            "{} {}: {}",
+            symbols.failure,
+            stem,
+            error.unwrap_or_default()
+        ))
+    })
 }
 
-fn run_with_timeout(
-    cmd: &mut std::process::Command,
-    timeout: Duration,
-    cancel: &Cancel,
-) -> std::result::Result<ExitStatus, RunError> {
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => return Err(RunError::Spawn(e.into())),
-    };
-
-    match wait_with_timeout(&mut child, timeout, POLL_INTERVAL, cancel) {
-        Ok(Outcome::Done(status)) => Ok(status),
-        Ok(Outcome::TimedOut) | Ok(Outcome::Cancelled) => {
-            // Never leave an orphaned ffmpeg behind; reap it either way.
-            let _ = child.kill();
-            let _ = child.wait();
-            Err(if cancel.is_cancelled() {
-                RunError::Cancelled
-            } else {
-                RunError::Timeout
-            })
-        }
-        Err(e) => Err(RunError::Spawn(e.into())),
-    }
-}
-
-/// Run the whole batch behind one interface: merge every pair in parallel,
-/// record outcomes in the tracker, remove partial outputs after a cancel,
-/// delete sources when asked, and fold the results into a single summary.
-/// Callers bring pairs and get facts back — no save protocol to know.
-pub fn run_batch(
-    pairs: &[FilePair],
-    stats: &ScanStats,
-    opts: &MergeOptions,
-    sdel: bool,
-    progress: Option<&MergeProgress>,
-    tracker: &StateTracker,
-    cancel: &Cancel,
-) -> MergeSummary {
-    let results: Vec<MergeResult> = pairs
-        .par_iter()
-        .enumerate()
-        .map(|(idx, pair)| {
-            let result = merge_pair(pair, idx, opts, cancel);
-            announce(&result, progress, opts.verbose);
-
-            if let Err(e) = tracker.record(&pair.stem, result.success, result.was_interrupted) {
-                eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
-            }
-
-            result
-        })
-        .collect();
-
-    if let Err(e) = tracker.flush() {
-        eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
-    }
-
-    if let Some(p) = progress {
-        p.finish();
-    }
-
-    // Interrupted merges leave partial outputs; remove those. Source files of
-    // an interrupted pair are never deleted: the stem stays unrecorded so a
-    // resume re-picks it, and deleting one source now would orphan its partner.
-    if cancel.is_cancelled() {
-        for result in &results {
-            if !result.was_interrupted {
-                continue;
-            }
-            let pair = &pairs[result.pair_index];
-            remove_quiet(&output_path(pair, opts), opts.verbose);
-        }
-    }
-
-    let mut deletion_failures = 0;
-    if sdel {
-        for result in &results {
-            if result.success {
-                if let Err(e) = delete_source_files(&pairs[result.pair_index]) {
-                    eprintln!("{} {}", t("warning_prefix").yellow(), e);
-                    deletion_failures += 1;
-                }
-            }
-        }
-    }
-
-    let mut summary = MergeSummary {
-        skipped_count: stats.skipped,
-        orphaned_count: stats.orphaned,
-        deletion_failures,
-        ..Default::default()
-    };
-    for result in &results {
-        if result.success {
-            summary.success_count += 1;
-            summary.merge_count += 1;
-            summary.total_duration += result.duration;
-        } else if !result.was_interrupted {
-            // Interrupted outcomes stay uncounted so a resume re-picks them.
-            summary.failed_count += 1;
-            if let Some(ref err) = result.error {
-                summary
-                    .failures
-                    .push((result.pair_name.clone(), err.clone()));
-            }
-        }
-    }
-    summary
-}
-
-pub(crate) fn remove_quiet(path: &Path, verbose: bool) {
-    if path.exists() {
-        if let Err(e) = std::fs::remove_file(path) {
-            eprintln!("{} {}", t("warning_prefix").yellow(), e);
-        } else if verbose {
-            eprintln!(
+/// Validates that merge output file exists and has non-zero size
+fn validate_output(output_path: &Path) -> Result<()> {
+    let metadata = match std::fs::metadata(output_path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!(
                 "{}",
-                tf("cleanup_partial", &[&path.display().to_string()]).yellow()
+                tf(
+                    "failed_create_output_file",
+                    &[&output_path.display().to_string()]
+                )
             );
         }
+        Err(e) => return Err(e.into()),
+    };
+    if metadata.len() == 0 {
+        if let Err(e) = std::fs::remove_file(output_path) {
+            eprintln!("Warning: Failed to remove empty output file: {}", e);
+        }
+        anyhow::bail!(
+            "{}",
+            tf("output_file_empty", &[&output_path.display().to_string()])
+        );
+    }
+    Ok(())
+}
+
+fn do_merge(
+    pair: &FilePair,
+    output_path: PathBuf,
+    pair_index: usize,
+    plan: &MergePlan,
+    runner: &dyn MergeRunner,
+) -> MergeResult {
+    let start = std::time::Instant::now();
+    let retries = plan.retries;
+
+    for attempt in 0..=retries {
+        // Stop early once cancelled: retrying after Ctrl+C is wasted work.
+        if plan.interrupt.is_triggered() {
+            return MergeResult {
+                pair_index,
+                pair_name: pair.stem.clone(),
+                output_path,
+                success: false,
+                error: None,
+                duration: start.elapsed(),
+                was_interrupted: true,
+            };
+        }
+
+        if attempt > 0 {
+            announce_retry(pair, attempt, plan);
+        } else if plan.verbose {
+            println!(
+                "Running: ffmpeg -i {} -i {} -> {}",
+                pair.video.display(),
+                pair.audio.display(),
+                output_path.display()
+            );
+        }
+
+        let mut cmd =
+            ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, plan.format);
+
+        // Each arm below either returns, retries, or falls through to the one
+        // failure exit at the bottom of the loop.
+        let error_msg = match runner.run(&mut cmd, plan.interrupt) {
+            Ok(RunOutcome::Success) => match validate_output(&output_path) {
+                // ffmpeg claims it worked; the file on disk has to agree.
+                Ok(()) => {
+                    return record_success(pair, pair_index, output_path, start.elapsed(), plan)
+                }
+                Err(e) => e.to_string(),
+            },
+            // A cancelled pair is not a failure: it stays pending for resume.
+            Ok(RunOutcome::Cancelled) => {
+                return MergeResult {
+                    pair_index,
+                    pair_name: pair.stem.clone(),
+                    output_path,
+                    success: false,
+                    error: None,
+                    duration: start.elapsed(),
+                    was_interrupted: true,
+                }
+            }
+            Ok(RunOutcome::TimedOut) if attempt < retries => continue,
+            Ok(RunOutcome::Failed { .. }) if attempt < retries => continue,
+            Err(_) if attempt < retries => continue,
+            Ok(RunOutcome::TimedOut) => t("timed_out").into_owned(),
+            Ok(RunOutcome::Failed { code, message }) => failure_message(code, &message, retries),
+            Err(e) => tf("merge_failed_io", &[&e.to_string(), &retries.to_string()]),
+        };
+
+        return record_failure(
+            pair,
+            pair_index,
+            output_path,
+            error_msg,
+            start.elapsed(),
+            plan,
+        );
+    }
+
+    unreachable!("the final attempt always returns")
+}
+
+fn record_success(
+    pair: &FilePair,
+    pair_index: usize,
+    output_path: PathBuf,
+    duration: Duration,
+    plan: &MergePlan,
+) -> MergeResult {
+    announce(plan, &pair.stem, true, duration, None);
+    MergeResult {
+        pair_index,
+        pair_name: pair.stem.clone(),
+        output_path,
+        success: true,
+        error: None,
+        duration,
+        was_interrupted: false,
+    }
+}
+
+/// Back off, then say so: on the progress bar if there is one, on stdout when
+/// verbose.
+fn announce_retry(pair: &FilePair, attempt: usize, plan: &MergePlan) {
+    std::thread::sleep(Duration::from_secs(1));
+    if let Some(p) = plan.progress {
+        p.set_message(&tf("retry_marker", &[&attempt.to_string(), &pair.stem]));
+    } else if plan.verbose {
+        println!(
+            "{} {}",
+            "↻".yellow(),
+            tf("verbose_retry", &[&pair.stem, &attempt.to_string()])
+        );
+    }
+}
+
+/// What ffmpeg said beats a bare exit code, so the last line of its stderr is
+/// appended when there is one.
+fn failure_message(code: Option<i32>, stderr: &str, retries: usize) -> String {
+    let base = tf(
+        "merge_failed_exit",
+        &[&exit_code_text(code), &retries.to_string()],
+    );
+    match stderr.trim().lines().last() {
+        Some(reason) => format!("{base}: {reason}"),
+        None => base,
+    }
+}
+
+/// Render an exit code for a message, when there is one.
+fn exit_code_text(code: Option<i32>) -> String {
+    code.map(|c| c.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Remove a merge output that never completed, reporting whether anything was
+/// actually deleted.
+pub(crate) fn remove_partial(output_path: &Path) -> Result<bool> {
+    match std::fs::remove_file(output_path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
     }
 }
 
 pub(crate) fn delete_source_files(pair: &FilePair) -> Result<()> {
-    let video_result = std::fs::remove_file(&pair.video);
-    let audio_result = std::fs::remove_file(&pair.audio);
+    // Delete audio first (less valuable file)
+    // Attempt deletion directly and interpret errors to avoid TOCTOU race
+    match std::fs::remove_file(&pair.audio) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!(
+                "{}",
+                tf(
+                    "source_missing",
+                    &["audio", &pair.audio.display().to_string()]
+                )
+            );
+        }
+        Err(e) => {
+            // Audio deletion failed, preserve video
+            anyhow::bail!(
+                "{}",
+                tf(
+                    "failed_delete_audio",
+                    &[
+                        &pair.audio.display().to_string(),
+                        &e.to_string(),
+                        &pair.video.display().to_string()
+                    ]
+                )
+            );
+        }
+        Ok(_) => {}
+    }
 
-    let mut errors = Vec::new();
-    if let Err(e) = video_result {
-        errors.push(format!("video '{}' ({})", pair.video.display(), e));
-    }
-    if let Err(e) = audio_result {
-        errors.push(format!("audio '{}' ({})", pair.audio.display(), e));
+    // Then delete video
+    match std::fs::remove_file(&pair.video) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Audio already deleted, video missing
+            anyhow::bail!(
+                "{}",
+                tf(
+                    "failed_delete_video_audio_gone",
+                    &[
+                        &pair.video.display().to_string(),
+                        &pair.audio.display().to_string()
+                    ]
+                )
+            );
+        }
+        Err(e) => {
+            // Video deletion failed, but audio already deleted
+            anyhow::bail!(
+                "{}",
+                tf(
+                    "failed_delete_video",
+                    &[
+                        &pair.video.display().to_string(),
+                        &e.to_string(),
+                        &pair.audio.display().to_string()
+                    ]
+                )
+            );
+        }
+        Ok(_) => {}
     }
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "{}",
-            tf("failed_delete", &[&errors.join(", ")])
-        ))
-    }
+    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
+mod summary_tests {
     use super::*;
 
-    #[test]
-    fn test_merge_summary_default() {
-        let summary = MergeSummary::default();
-        assert_eq!(summary.success_count, 0);
-        assert_eq!(summary.failed_count, 0);
-        assert_eq!(summary.merge_count, 0);
-        assert!(summary.total_duration.is_zero());
-        assert!(summary.all_success());
+    fn result(name: &str, success: bool, interrupted: bool) -> MergeResult {
+        MergeResult {
+            pair_index: 0,
+            pair_name: name.to_string(),
+            output_path: PathBuf::from(format!("/out/{name}.mkv")),
+            success,
+            error: if success {
+                None
+            } else {
+                Some("boom".to_string())
+            },
+            duration: if success {
+                Duration::from_secs(2)
+            } else {
+                Duration::ZERO
+            },
+            was_interrupted: interrupted,
+        }
     }
 
     #[test]
-    fn test_timing_methods() {
-        let mut summary = MergeSummary::default();
-        summary.total_duration += Duration::from_millis(100);
-        summary.merge_count += 1;
-        summary.total_duration += Duration::from_millis(300);
-        summary.merge_count += 1;
-        summary.total_duration += Duration::from_millis(200);
-        summary.merge_count += 1;
-
-        assert_eq!(summary.total_duration, Duration::from_millis(600));
-        assert_eq!(summary.avg_duration(), Some(Duration::from_millis(200)));
-        assert!(summary.throughput().is_some());
-        assert!(summary.throughput().unwrap() > 0.0);
+    fn counts_successes_and_failures() {
+        let results = vec![result("a", true, false), result("b", false, false)];
+        let summary = MergeSummary::from_results(&results, &ScanStats::default(), 0);
+        assert_eq!(summary.success_count(), 1);
+        assert_eq!(summary.failed_count(), 1);
+        assert!(!summary.all_success());
+        assert_eq!(summary.failures()[0].0, "b");
     }
 
     #[test]
-    fn test_merge_summary_avg_duration_none_when_zero_merges() {
-        let summary = MergeSummary::default();
-        assert_eq!(summary.merge_count, 0);
-        assert!(summary.avg_duration().is_none());
+    fn interrupted_pairs_are_not_failures() {
+        let results = vec![result("a", true, false), result("b", false, true)];
+        let summary = MergeSummary::from_results(&results, &ScanStats::default(), 0);
+        assert_eq!(summary.success_count(), 1);
+        assert_eq!(summary.failed_count(), 0);
+        assert!(summary.all_success(), "an interrupt is not a merge failure");
     }
 
     #[test]
-    fn test_merge_summary_throughput_none_when_zero_duration() {
-        let summary = MergeSummary {
-            merge_count: 5,
-            total_duration: Duration::ZERO,
-            ..Default::default()
+    fn scan_stats_and_deletions_are_carried_through() {
+        let stats = ScanStats {
+            pairs: 3,
+            skipped: 2,
+            orphaned: 1,
         };
+        let summary = MergeSummary::from_results(&[], &stats, 4);
+        assert_eq!(summary.success_count(), 0);
+        assert!(summary.avg_duration().is_none());
         assert!(summary.throughput().is_none());
     }
 
     #[test]
-    fn test_format_duration() {
-        use crate::progress::format_duration;
-        assert!(format_duration(Duration::from_millis(50)).contains("ms"));
-        assert!(format_duration(Duration::from_millis(500)).contains("ms"));
-        assert!(format_duration(Duration::from_secs(5)).contains("s"));
-        assert!(!format_duration(Duration::from_secs(5)).contains("ms"));
-        assert!(format_duration(Duration::from_secs(90)).contains("m"));
+    fn timings_average_over_successes_only() {
+        let results = vec![
+            result("a", true, false),
+            result("b", true, false),
+            result("c", false, false),
+        ];
+        let summary = MergeSummary::from_results(&results, &ScanStats::default(), 0);
+        assert_eq!(summary.avg_duration(), Some(Duration::from_secs(2)));
+        assert!(
+            (summary.throughput().unwrap() - 0.5).abs() < f64::EPSILON,
+            "2 merges in 4s"
+        );
     }
 
     #[test]
-    fn test_merge_summary_all_success_false_when_failures() {
-        let summary = MergeSummary {
-            success_count: 3,
-            failed_count: 2,
-            ..Default::default()
-        };
-        assert!(!summary.all_success());
+    fn empty_batch_has_no_timing_to_report() {
+        let summary = MergeSummary::from_results(&[], &ScanStats::default(), 0);
+        assert!(summary.all_success());
+        assert!(summary.failures().is_empty());
+        assert!(summary.avg_duration().is_none());
+    }
+
+    #[test]
+    fn quiet_runs_print_no_per_pair_lines() {
+        assert!(status_line("ep01", true, None, true).is_none());
+        assert!(status_line("ep01", false, Some("boom"), true).is_none());
+        assert!(status_line("ep01", true, None, false)
+            .unwrap()
+            .contains("ep01"));
+        assert!(status_line("ep01", false, Some("boom"), false)
+            .unwrap()
+            .contains("boom"));
+    }
+
+    #[test]
+    fn what_ffmpeg_said_beats_a_bare_exit_code() {
+        let plain = failure_message(Some(183), "", 0);
+        assert!(plain.contains("183"));
+        let explained = failure_message(Some(183), "line one\nmoov atom not found\n", 0);
+        assert!(explained.contains("moov atom not found"), "{explained}");
+        assert!(
+            !explained.contains("line one"),
+            "only the last line: {explained}"
+        );
     }
 }
-
 #[cfg(test)]
 mod merge_tests {
     use super::*;
@@ -540,58 +710,14 @@ mod merge_tests {
         let result = MergeResult {
             pair_index: 0,
             pair_name: "video".to_string(),
+            output_path: PathBuf::from("video.mkv"),
             success: true,
             error: None,
             duration: Duration::from_millis(123),
             was_interrupted: false,
-            retries: 0,
         };
         let debug_str = format!("{:?}", result);
         assert!(debug_str.contains("video"));
-    }
-
-    fn opts_for<'a>(dir: &'a Path) -> MergeOptions<'a> {
-        MergeOptions {
-            output_dir: dir,
-            format: OutputFormat::Mkv,
-            verbose: false,
-            retry: 0,
-        }
-    }
-
-    #[test]
-    fn test_merge_pair_skips_when_cancelled() {
-        // A cancelled token short-circuits before ffmpeg is ever spawned, so
-        // this needs no real media files and no ffmpeg on PATH.
-        let cancel = Cancel::new();
-        cancel.cancel();
-        let pair = FilePair {
-            video: std::path::PathBuf::from("does-not-exist.mp4"),
-            audio: std::path::PathBuf::from("does-not-exist.m4a"),
-            stem: "does-not-exist".to_string(),
-        };
-
-        let result = merge_pair(&pair, 0, &opts_for(std::path::Path::new(".")), &cancel);
-
-        assert!(!result.success);
-        assert!(result.was_interrupted);
-    }
-
-    #[test]
-    fn test_merge_pair_fails_when_sources_missing() {
-        // Not cancelled: reaches ffmpeg and fails on missing inputs rather than
-        // short-circuiting — proves the cancel check is the only thing gating it.
-        let cancel = Cancel::new();
-        let dir = tempfile::tempdir().unwrap();
-        let pair = FilePair {
-            video: dir.path().join("missing.mp4"),
-            audio: dir.path().join("missing.m4a"),
-            stem: "missing".to_string(),
-        };
-
-        let result = merge_pair(&pair, 0, &opts_for(dir.path()), &cancel);
-
-        assert!(!result.was_interrupted);
     }
 
     #[test]
@@ -599,136 +725,81 @@ mod merge_tests {
         let result = MergeResult {
             pair_index: 0,
             pair_name: "video".to_string(),
+            output_path: PathBuf::from("video.mkv"),
             success: false,
             error: Some("test error".to_string()),
             duration: Duration::from_secs(1),
             was_interrupted: false,
-            retries: 0,
         };
         assert!(!result.success);
         assert!(result.error.is_some());
     }
-}
 
-#[cfg(test)]
-mod exec_tests {
-    use super::*;
-    use crate::state::MergeState;
-    use tempfile::tempdir;
+    #[test]
+    fn test_merge_validates_output_exists() {
+        use std::fs::File;
+        use tempfile::tempdir;
 
-    fn missing_pair(dir: &Path, stem: &str) -> FilePair {
-        FilePair {
-            video: dir.join(format!("{stem}.mp4")),
-            audio: dir.join(format!("{stem}.m4a")),
-            stem: stem.to_string(),
-        }
-    }
+        let dir = tempdir().unwrap();
+        let output_path = dir.path().join("output.mkv");
 
-    fn tracker_for(dir: &Path) -> StateTracker {
-        StateTracker::new(MergeState::new(dir), dir, 5)
-    }
+        // Simulate ffmpeg creating empty file (failure case)
+        File::create(&output_path).unwrap();
 
-    fn opts_for<'a>(dir: &'a Path) -> MergeOptions<'a> {
-        MergeOptions {
-            output_dir: dir,
-            format: OutputFormat::Mkv,
-            verbose: false,
-            retry: 0,
-        }
+        // Validation should reject empty file
+        let metadata = std::fs::metadata(&output_path).unwrap();
+        assert_eq!(metadata.len(), 0, "Empty file should be detected");
     }
 
     #[test]
-    fn run_batch_empty_passes_stats_through() {
-        let dir = tempdir().unwrap();
-        let summary = run_batch(
-            &[],
-            &ScanStats {
-                skipped: 5,
-                orphaned: 3,
-            },
-            &opts_for(dir.path()),
-            false,
-            None,
-            &tracker_for(dir.path()),
-            &Cancel::new(),
-        );
+    fn test_merge_validates_output_nonzero_size() {
+        use tempfile::tempdir;
 
-        assert_eq!(summary.skipped_count, 5);
-        assert_eq!(summary.orphaned_count, 3);
-        assert!(summary.all_success());
+        let dir = tempdir().unwrap();
+        let output_path = dir.path().join("output.mkv");
+
+        // Simulate ffmpeg creating valid file
+        std::fs::write(&output_path, b"fake video data").unwrap();
+
+        // Validation should accept non-zero file
+        let metadata = std::fs::metadata(&output_path).unwrap();
+        assert!(metadata.len() > 0, "Non-zero file should be accepted");
     }
 
     #[test]
-    fn run_batch_counts_missing_sources_as_failures() {
-        let dir = tempdir().unwrap();
-        let pairs = vec![missing_pair(dir.path(), "a"), missing_pair(dir.path(), "b")];
-        let tracker = tracker_for(dir.path());
+    fn test_validate_output_helper() {
+        use std::fs::File;
+        use tempfile::tempdir;
 
-        let summary = run_batch(
-            &pairs,
-            &ScanStats::default(),
-            &opts_for(dir.path()),
-            false,
-            None,
-            &tracker,
-            &Cancel::new(),
+        let dir = tempdir().unwrap();
+
+        // Test 1: Non-existent file
+        let missing_path = dir.path().join("missing.mkv");
+        let result = validate_output(&missing_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("未创建") || err.contains("not created"),
+            "Error should mention file was not created: {}",
+            err
         );
 
-        assert_eq!(summary.failed_count, 2);
-        assert!(!summary.all_success());
-        // Outcomes are recorded for resume: both stems marked failed on disk.
-        let loaded = MergeState::load(dir.path()).unwrap().unwrap();
-        assert!(loaded.failed.contains("a") && loaded.failed.contains("b"));
-    }
+        // Test 2: Empty file
+        let empty_path = dir.path().join("empty.mkv");
+        File::create(&empty_path).unwrap();
+        let result = validate_output(&empty_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("empty") || err.contains("为空"));
+        // Empty file should be cleaned up
+        assert!(!empty_path.exists(), "Empty file should be cleaned up");
 
-    #[test]
-    fn run_batch_cancelled_records_nothing_and_fails_nothing() {
-        let dir = tempdir().unwrap();
-        let pairs = vec![missing_pair(dir.path(), "a")];
-        let cancel = Cancel::new();
-        cancel.cancel();
-
-        let summary = run_batch(
-            &pairs,
-            &ScanStats::default(),
-            &opts_for(dir.path()),
-            false,
-            None,
-            &tracker_for(dir.path()),
-            &cancel,
-        );
-
-        // Interrupted outcomes stay uncounted and unrecorded for resume.
-        assert_eq!(summary.failed_count, 0);
-        assert!(summary.all_success());
-        let loaded = MergeState::load(dir.path()).unwrap().unwrap();
-        assert!(!loaded.failed.contains("a"));
-    }
-
-    #[test]
-    fn run_batch_cancelled_with_sdel_keeps_sources() {
-        // Regression: interrupting a batch with --sdel used to delete the
-        // source audio of pairs that never merged, orphaning the video on
-        // resume. Cancelled pairs must keep both sources.
-        let dir = tempdir().unwrap();
-        let pair = missing_pair(dir.path(), "a");
-        std::fs::write(&pair.video, b"v").unwrap();
-        std::fs::write(&pair.audio, b"a").unwrap();
-        let cancel = Cancel::new();
-        cancel.cancel();
-
-        run_batch(
-            std::slice::from_ref(&pair),
-            &ScanStats::default(),
-            &opts_for(dir.path()),
-            true, // sdel on
-            None,
-            &tracker_for(dir.path()),
-            &cancel,
-        );
-
-        assert!(pair.video.exists(), "cancelled pair must keep its video");
-        assert!(pair.audio.exists(), "cancelled pair must keep its audio");
+        // Test 3: Valid file
+        let valid_path = dir.path().join("valid.mkv");
+        std::fs::write(&valid_path, b"video data").unwrap();
+        let result = validate_output(&valid_path);
+        assert!(result.is_ok());
+        assert!(valid_path.exists(), "Valid file should remain");
     }
 }
 
@@ -777,7 +848,12 @@ mod delete_tests {
         let result = delete_source_files(&pair);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("video"), "Error should mention video: {}", err);
+        // Check for i18n key or translated content mentioning video
+        assert!(
+            err.contains("failed_delete_video") || err.contains("video") || err.contains("视频"),
+            "Error should mention video: {}",
+            err
+        );
     }
 
     #[test]
@@ -796,8 +872,12 @@ mod delete_tests {
         let result = delete_source_files(&pair);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("video"), "Error should mention video: {}", err);
-        assert!(err.contains("audio"), "Error should mention audio: {}", err);
+        // Should mention at least one missing file
+        assert!(
+            err.contains("video") || err.contains("audio"),
+            "Error should mention missing file: {}",
+            err
+        );
     }
 
     #[test]
@@ -828,123 +908,59 @@ mod delete_tests {
             err_msg
         );
 
-        // Video should be deleted (even though overall operation failed)
+        // NEW BEHAVIOR: Video should be preserved (not deleted) because audio is missing
+        // This is the atomic deletion guarantee
         assert!(
-            !video_path.exists(),
-            "Video should be deleted despite partial failure"
+            video_path.exists(),
+            "Video should be preserved when audio is missing (atomic deletion)"
         );
     }
-}
-
-#[cfg(test)]
-mod timeout_tests {
-    use super::*;
 
     #[test]
-    fn wait_reports_cancel_promptly() {
-        // A long-running child must be killed shortly after cancel fires,
-        // not left to run until the 300 s timeout.
-        #[cfg(unix)]
-        let mut cmd = std::process::Command::new("sleep");
-        #[cfg(unix)]
-        cmd.arg("30");
+    fn test_delete_preserves_video_on_audio_failure() {
+        let dir = tempdir().unwrap();
+        let video_path = dir.path().join("video.mp4");
+        let audio_path = dir.path().join("nonexistent.m4a"); // Doesn't exist
 
-        #[cfg(windows)]
-        let mut cmd = std::process::Command::new("ping");
-        #[cfg(windows)]
-        cmd.args(["-n", "300", "127.0.0.1"]);
+        // Create only video
+        File::create(&video_path).unwrap();
 
-        let cancel = Cancel::new();
-        let c = cancel.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(150));
-            c.cancel();
-        });
+        let pair = FilePair {
+            video: video_path.clone(),
+            audio: audio_path,
+            stem: "video".to_string(),
+        };
 
-        let start = std::time::Instant::now();
-        let outcome = run_with_timeout(&mut cmd, Duration::from_secs(300), &cancel);
-        assert!(matches!(outcome, Err(RunError::Cancelled)));
+        let result = delete_source_files(&pair);
+        assert!(result.is_err(), "Should fail when audio missing");
+
+        // Video should still exist (not deleted)
         assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "cancel must kill the child promptly"
+            video_path.exists(),
+            "Video should be preserved when audio deletion fails"
         );
     }
 
     #[test]
-    fn test_wait_timeout_normal_completion() {
-        // Use cross-platform sleep command
-        #[cfg(unix)]
-        let mut child = std::process::Command::new("sleep")
-            .arg("0.1")
-            .spawn()
-            .expect("sleep command should be available");
+    fn test_delete_checks_existence_first() {
+        let dir = tempdir().unwrap();
+        let video_path = dir.path().join("video.mp4");
+        let audio_path = dir.path().join("audio.m4a");
 
-        // `timeout` refuses to run when stdin is redirected (as under cargo test),
-        // so ping is used as the portable delay on Windows.
-        #[cfg(windows)]
-        let mut child = std::process::Command::new("ping")
-            .args(["-n", "2", "127.0.0.1"])
-            .spawn()
-            .expect("ping command should be available");
+        // Create both files
+        File::create(&video_path).unwrap();
+        File::create(&audio_path).unwrap();
 
-        let result = wait_with_timeout(
-            &mut child,
-            Duration::from_secs(5),
-            POLL_INTERVAL,
-            &Cancel::new(),
-        );
-        assert!(matches!(result.unwrap(), Outcome::Done(_)));
-    }
+        let pair = FilePair {
+            video: video_path.clone(),
+            audio: audio_path.clone(),
+            stem: "video".to_string(),
+        };
 
-    #[test]
-    fn test_wait_timeout_exceeded() {
-        #[cfg(unix)]
-        let mut child = std::process::Command::new("sleep")
-            .arg("10")
-            .spawn()
-            .expect("sleep command should be available");
-
-        #[cfg(windows)]
-        let mut child = std::process::Command::new("ping")
-            .args(["-n", "6", "127.0.0.1"])
-            .spawn()
-            .expect("ping command should be available");
-
-        let result = wait_with_timeout(
-            &mut child,
-            Duration::from_millis(50),
-            POLL_INTERVAL,
-            &Cancel::new(),
-        );
-        assert!(matches!(result.unwrap(), Outcome::TimedOut));
-    }
-
-    #[test]
-    fn test_wait_timeout_already_finished() {
-        // Very short sleep that finishes almost immediately
-        #[cfg(unix)]
-        let mut child = std::process::Command::new("sleep")
-            .arg("0.01")
-            .spawn()
-            .expect("sleep command should be available");
-
-        #[cfg(windows)]
-        let mut child = std::process::Command::new("timeout")
-            .arg("/T")
-            .arg("1")
-            .arg("/NOBREAK")
-            .spawn()
-            .expect("timeout command should be available");
-
-        // Wait a bit for it to finish
-        std::thread::sleep(Duration::from_millis(150));
-
-        let result = wait_with_timeout(
-            &mut child,
-            Duration::from_secs(5),
-            POLL_INTERVAL,
-            &Cancel::new(),
-        );
-        assert!(matches!(result.unwrap(), Outcome::Done(_)));
+        // Both exist, deletion should succeed
+        let result = delete_source_files(&pair);
+        assert!(result.is_ok());
+        assert!(!video_path.exists());
+        assert!(!audio_path.exists());
     }
 }

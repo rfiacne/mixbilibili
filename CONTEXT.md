@@ -1,37 +1,62 @@
-# CONTEXT
+# mixbilibili — domain glossary
 
-Domain vocabulary for mixbilibili — a CLI that muxes Bilibili's separately
-downloaded `.mp4` video and `.m4a` audio into one container via ffmpeg.
+The names below are the ones to use when reading or changing this codebase.
+They name the seams; the modules behind them are in `src/`.
 
-## Domain
+**Pair** — one Bilibili download: `X.mp4` (video) + `X.m4a` (audio). Owned by
+`FilePair` (`scanner`), which owns the whole naming convention: the suffixes,
+the aria2 control-file suffix, where merged output belongs
+(`FilePair::output_path`), and how a composite key flattens into one file name.
+Nothing else formats a filename.
 
-- **Pair** — a video+audio file sharing a stem. `scanner` produces pairs, the merge module consumes them.
-- **Stem** — filename without extension; under `-R` it is the pair's path
-  relative to the source dir, `/`-separated (`season1/ep01`). The primary key
-  across the whole pipeline: state tracking, progress lines, `--once`, and
-  output naming (recursive stems mirror into output subdirs).
-- **Batch** — the set of pairs one run merges after scan/resume filtering; executed in parallel.
-- **Resume state** — `.mixbilibili_state.json` in the source dir; survives an interrupted batch so `--resume` skips what finished.
-- **Cancel signal** — a `Cancel` token, set once by the Ctrl+C handler. An interrupted pair stays unrecorded in the resume state: its sources are never deleted and its partial output is removed.
-- **Orphan** — an mp4 or m4a with no partner. Reported, never merged.
-- **Downloading** — a pair whose `.aria2` control file still exists. Skipped, not an orphan. (aria2 integration: `scripts/aria2-hook.sh` invokes `--once`.)
+**Stem** — a pair's identity. Bare (`ep01`) in a flat scan; a composite
+`subdir/ep01` when `--recursive`, so same-named files in different directories
+stay distinct. As a `--once` argument it must never carry a path separator or a
+null byte; `Args::validate` enforces that at the CLI boundary.
 
-## Architecture (refactor shape agreed 2026-09-09)
+**Batch** — the set of pairs one run will merge. `--once <stem>` is a batch of
+one, not a separate code path.
 
-- **Merge module** (`src/merger.rs`) — the deep module.
-  `run_batch(&[FilePair], &ScanStats, &MergeOptions, sdel, Option<&MergeProgress>, &StateTracker, &Cancel) -> MergeSummary`
-  plus the single-pair `merge_pair` that `--once` shares. Behind that
-  interface: rayon parallelism, retry, timeout, periodic state saves,
-  interrupt cleanup of partial outputs, source deletion (`--sdel`), summary
-  aggregation. `Mode::{Batch, Once(stem)}` in `cli.rs` selects the path.
-- **MergeOptions** — `{ output_dir, format, retry, verbose }`: the merge module's whole input contract. `Args` (cli) is not split further.
-- **StateTracker** (`src/state.rs`) — thread-safe resume-state module: owns the file path, throttled atomic saves (temp+rename), mark/clear policy. Callers never see HashSets or save intervals.
-- **Cancel** (`src/merger.rs`) — newtype over `Arc<AtomicBool>`; main's ctrl-c handler holds the handle, tests flip it directly. Replaces the `INTERRUPTED` static.
-- **Display is outside the merge module** — progress recording and report printing read `MergeResult`/`MergeSummary` facts; `render_report` is a private fn in `main.rs`. The merge module never prints.
+**Pipeline** (`pipeline::process`) — the whole life cycle of a batch: merge
+each pair, record the outcome, save resume state every few pairs, remove
+partial outputs, delete sources when `--sdel`, and build the report. One place
+decides what happens to a pair after ffmpeg returns.
 
-## Invariants
+**Merge runner** (`ffmpeg::MergeRunner`) — the seam at the ffmpeg process
+boundary. `FfmpegRunner` is the production adapter; the tests use a scripted
+one. Merge *policy* (retry, timeout, validate the output) lives above the seam
+in `merger`; spawning, stderr capture and killing live behind it.
 
-- Interrupted ⇒ sources untouched, partial output deleted, stem left unrecorded so a resume re-picks it.
-- `--dry-run` previews in *both* modes (batch and `--once`); it never merges or deletes.
-- Resume state writes are atomic; a torn file must never be left behind.
-- aria2 hook contract: flags and exit codes are frozen; stdout prose is not.
+**Interrupt token** (`interrupt::Interrupt`) — cooperative cancellation. The
+Ctrl+C handler is one adapter that triggers it; the pipeline and `merge_pair`
+observe it. A cancelled pair stays *pending* and keeps both sources, so
+`--resume` can finish it.
+
+**Skipped** — a pair with a live `.aria2` control file; aria2 is still
+downloading it. Not an error, not a candidate.
+
+**Orphan** — a `.mp4` or `.m4a` with no partner. Reported, never touched.
+
+**Resume state** (`state::MergeState`, written through `pipeline::StateSink`) —
+`.mixbilibili_state.json` in the source directory: completed / failed / pending
+stems, plus a schema version. Cleared only when a batch finishes without being
+cancelled.
+
+**Report** (`merger::MergeSummary`) — built from the batch's results by
+`from_results`. Its counting rules (an interrupted pair is neither success nor
+failure) belong to it, not to the caller.
+
+**Quiet** (`-q`) — no progress bar, no per-pair lines, and no ffmpeg
+diagnostics, only the final summary. It is part of the merge plan, not of the
+progress bar; this is what `scripts/aria2-hook.sh` relies on.
+
+**Symbols / Colors** (`ui`) — how output looks. Everything else says what
+happened; `ui` decides which glyphs and colours say it, honouring `--ascii`.
+
+## Decisions not to re-litigate
+
+- `docs/adr/0001` — ffmpeg runs behind an injected `MergeRunner`; merge
+  behaviour is tested through that seam, never by spawning a process, and
+  ffmpeg's stderr is captured rather than inherited.
+- `docs/adr/0002` — `--once` is a batch of one pair through the shared
+  pipeline; mode differences are `BatchOpts` values, not a second entry point.
