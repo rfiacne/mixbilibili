@@ -10,8 +10,6 @@ mod state;
 use anyhow::{Context, Result};
 use cli::Args;
 use colored::Colorize;
-use rayon::prelude::*;
-use std::time::Duration;
 use thiserror::Error;
 
 mod exit_codes {
@@ -89,32 +87,22 @@ fn init() -> Result<(Args, cli::OutputFormat)> {
     Ok((args, format))
 }
 
-/// Result of the scan-and-filter phase.
-struct ScanContext {
-    /// Pairs ready for merging (filtered by resume state).
-    pairs: Vec<scanner::FilePair>,
-    /// Original scan statistics (skipped, orphaned, etc.).
-    stats: scanner::ScanStats,
-    /// Estimated total merge duration.
-    estimated_duration: Duration,
-}
-
-impl ScanContext {
-    fn format_time_estimate(&self) -> Option<String> {
-        if self.estimated_duration.is_zero() {
-            None
-        } else {
-            Some(tf(
-                "dry_run_time_estimate",
-                &[&progress::format_duration(self.estimated_duration)],
-            ))
-        }
+/// Render the scan's time estimate, or None when the scan produced nothing
+/// measurable to estimate from.
+fn format_time_estimate(scan: &scanner::ScanResult) -> Option<String> {
+    if scan.estimated_duration.is_zero() {
+        None
+    } else {
+        Some(tf(
+            "dry_run_time_estimate",
+            &[&progress::format_duration(scan.estimated_duration)],
+        ))
     }
 }
 
 /// Scan source directory and filter pairs based on resume state.
-/// Returns the scan context and initialized merge state.
-fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState)>> {
+/// Returns the surviving scan result and the resume state to extend.
+fn scan_and_filter(args: &Args) -> Result<Option<(scanner::ScanResult, state::MergeState)>> {
     // Check for resume state
     let existing_state = if args.resume {
         state::MergeState::load(&args.source)?
@@ -122,24 +110,18 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
         None
     };
 
-    let scan_result = scanner::scan_directory(&args.source, args.recursive).map_err(|_| {
+    let mut scan_result = scanner::scan_directory(&args.source, args.recursive).map_err(|_| {
         AppError::UnreadableSource {
             path: args.source.display().to_string(),
         }
     })?;
 
     // Filter out already completed if resuming
-    let pairs_to_process: Vec<_> = if let Some(ref state) = existing_state {
-        scan_result
-            .pairs
-            .into_iter()
-            .filter(|p| !state.is_completed(&p.stem))
-            .collect()
-    } else {
-        scan_result.pairs
-    };
+    if let Some(ref state) = existing_state {
+        scan_result.pairs.retain(|p| !state.is_completed(&p.stem));
+    }
 
-    if pairs_to_process.is_empty() {
+    if scan_result.pairs.is_empty() {
         if existing_state.is_some() {
             println!("{}", t("all_merged").green());
         } else {
@@ -151,19 +133,13 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
     let merge_state =
         existing_state.unwrap_or_else(|| state::MergeState::new(&args.source, &args.output));
 
-    let ctx = ScanContext {
-        pairs: pairs_to_process,
-        stats: scan_result.stats.clone(),
-        estimated_duration: scan_result.estimated_duration,
-    };
-
-    Ok(Some((ctx, merge_state)))
+    Ok(Some((scan_result, merge_state)))
 }
 
 /// Print preview of pairs to be processed, including header and time estimate.
-fn print_preview_pairs(ctx: &ScanContext, format: &cli::OutputFormat, header: &str) {
+fn print_preview_pairs(scan: &scanner::ScanResult, format: &cli::OutputFormat, header: &str) {
     println!("{}", header.cyan().bold());
-    for pair in &ctx.pairs {
+    for pair in &scan.pairs {
         println!(
             "  {} + {} -> {}.{}",
             pair.video.display(),
@@ -172,7 +148,7 @@ fn print_preview_pairs(ctx: &ScanContext, format: &cli::OutputFormat, header: &s
             format.extension()
         );
     }
-    if let Some(msg) = ctx.format_time_estimate() {
+    if let Some(msg) = format_time_estimate(scan) {
         println!("{}", msg);
     }
 }
@@ -210,13 +186,13 @@ fn run() -> Result<()> {
         .ok();
 
     // Phase 2: Scan and filter
-    let Some((ctx, merge_state)) = scan_and_filter(&args)? else {
+    let Some((scan, merge_state)) = scan_and_filter(&args)? else {
         return Ok(());
     };
 
     // Phase 2.5: Interactive preview + confirmation
     if args.interactive {
-        print_preview_pairs(&ctx, &format, &t("interactive_preview_header"));
+        print_preview_pairs(&scan, &format, &t("interactive_preview_header"));
         if args.sdel {
             println!("{}", t("dry_run_sdel_header").yellow().bold());
         }
@@ -236,10 +212,10 @@ fn run() -> Result<()> {
     // Phase 3: Dry-run preview or execute merges
     if args.dry_run {
         if !args.quiet {
-            print_preview_pairs(&ctx, &format, &t("dry_run_header"));
+            print_preview_pairs(&scan, &format, &t("dry_run_header"));
             if args.sdel {
                 println!("\n{}", t("dry_run_sdel_header").yellow().bold());
-                for pair in &ctx.pairs {
+                for pair in &scan.pairs {
                     println!(
                         "  {} (video)\n  {} (audio)",
                         pair.video.display(),
@@ -249,7 +225,7 @@ fn run() -> Result<()> {
             }
             println!(
                 "\n{}",
-                tf("dry_run_summary", &[&ctx.pairs.len().to_string()])
+                tf("dry_run_summary", &[&scan.pairs.len().to_string()])
             );
             println!("{}", t("dry_run_complete").cyan());
         }
@@ -258,7 +234,7 @@ fn run() -> Result<()> {
 
     // Phase 3: merge, tracking outcomes for resume
     let tracker = state::StateTracker::new(merge_state, &args.source, STATE_SAVE_INTERVAL);
-    let summary = execute(&args, ctx, format, &cancel, &tracker)?;
+    let summary = execute(&args, &scan, format, &cancel, &tracker)?;
 
     // Phase 4: Update state and report. On interrupt the flushed state is
     // exactly what --resume needs, so leave it alone.
@@ -338,134 +314,41 @@ fn run_once(
 /// Merges between incremental state saves to limit progress loss on interrupt.
 const STATE_SAVE_INTERVAL: usize = 5;
 
-/// Execute the actual merge operations for all filtered pairs.
+/// Run the merge batch: announce it, build the progress renderer, and hand
+/// everything to merger::run_batch, which owns the parallel execution.
 fn execute(
     args: &Args,
-    ctx: ScanContext,
+    scan: &scanner::ScanResult,
     format: cli::OutputFormat,
     cancel: &merger::Cancel,
     tracker: &state::StateTracker,
 ) -> Result<merger::MergeSummary> {
     if !args.quiet {
-        if let Some(msg) = ctx.format_time_estimate() {
+        if let Some(msg) = format_time_estimate(scan) {
             println!("{}", msg);
         } else {
-            println!("{}", tf("processing", &[&ctx.pairs.len().to_string()]));
+            println!("{}", tf("processing", &[&scan.pairs.len().to_string()]));
         }
     }
 
     let progress = if args.progress && !args.quiet {
-        Some(progress::MergeProgress::new(ctx.pairs.len()))
+        Some(progress::MergeProgress::new(scan.pairs.len()))
     } else {
         None
     };
 
-    let mut final_summary = merger::MergeSummary::default();
-
-    // Run all pairs in one parallel batch; the tracker saves periodically
-    let results: Vec<merger::MergeResult> = ctx
-        .pairs
-        .par_iter()
-        .enumerate()
-        .map(|(idx, pair)| {
-            let result = merger::merge_pair(
-                pair,
-                idx,
-                &args.output,
-                format,
-                progress.as_ref(),
-                args.verbose,
-                args.retry,
-                cancel,
-            );
-
-            if let Err(e) = tracker.record(&pair.stem, result.success, result.was_interrupted) {
-                eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
-            }
-
-            result
-        })
-        .collect();
-
-    // Final state save
-    if let Err(e) = tracker.flush() {
-        eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
-    }
-
-    // Finish progress bar
-    if let Some(p) = &progress {
-        p.finish();
-    }
-
-    // Cleanup partial output files on interrupt
-    if cancel.is_cancelled() {
-        for result in &results {
-            if result.was_interrupted {
-                let pair = &ctx.pairs[result.pair_index];
-                let output_path = args
-                    .output
-                    .join(format!("{}.{}", pair.stem, format.extension()));
-                if output_path.exists() {
-                    if let Err(e) = std::fs::remove_file(&output_path) {
-                        eprintln!("{} {}", t("warning_prefix").yellow(), e);
-                    } else if args.verbose {
-                        eprintln!(
-                            "{}",
-                            tf("cleanup_partial", &[&output_path.display().to_string()]).yellow()
-                        );
-                    }
-                }
-                // Also clean up source audio file when --sdel is active
-                if args.sdel && pair.audio.exists() {
-                    if let Err(e) = std::fs::remove_file(&pair.audio) {
-                        eprintln!("{} {}", t("warning_prefix").yellow(), e);
-                    } else if args.verbose {
-                        eprintln!(
-                            "{}",
-                            tf("cleanup_partial", &[&pair.audio.display().to_string()]).yellow()
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // Handle source file deletion if requested
-    let mut deletion_failures = 0;
-    if args.sdel {
-        for result in &results {
-            if result.success {
-                let pair = &ctx.pairs[result.pair_index];
-                if let Err(e) = merger::delete_source_files(pair) {
-                    eprintln!("{} {}", t("warning_prefix").yellow(), e);
-                    deletion_failures += 1;
-                }
-            }
-        }
-    }
-
-    // Accumulate results into final_summary
-    for result in &results {
-        if result.success {
-            final_summary.success_count += 1;
-            final_summary.merge_count += 1;
-            final_summary.total_duration += result.duration;
-        } else if !result.was_interrupted {
-            // Only count non-interrupted failures; interrupted items stay pending for resume
-            final_summary.failed_count += 1;
-            if let Some(ref err) = result.error {
-                final_summary
-                    .failures
-                    .push((result.pair_name.clone(), err.clone()));
-            }
-        }
-    }
-    final_summary.deletion_failures = deletion_failures;
-
-    final_summary.skipped_count = ctx.stats.skipped;
-    final_summary.orphaned_count = ctx.stats.orphaned;
-
-    Ok(final_summary)
+    Ok(merger::run_batch(
+        &scan.pairs,
+        &scan.stats,
+        &args.output,
+        format,
+        args.sdel,
+        args.verbose,
+        args.retry,
+        progress.as_ref(),
+        tracker,
+        cancel,
+    ))
 }
 
 /// Finalize: drop the resume state once everything merged; a partial run

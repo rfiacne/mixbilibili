@@ -2,7 +2,8 @@ use crate::cli::OutputFormat;
 use crate::ffmpeg;
 use crate::i18n::{t, tf};
 use crate::progress::{format_duration, MergeProgress};
-use crate::scanner::{FilePair, ScanResult};
+use crate::scanner::{FilePair, ScanStats};
+use crate::state::StateTracker;
 use anyhow::{Context, Result};
 use colored::Colorize;
 use rayon::prelude::*;
@@ -373,86 +374,109 @@ fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Resul
     }
 }
 
-#[allow(dead_code)]
+/// Run the whole batch behind one interface: merge every pair in parallel,
+/// record outcomes in the tracker, remove partial outputs after a cancel,
+/// delete sources when asked, and fold the results into a single summary.
+/// Callers bring pairs and get facts back — no save protocol to know.
 #[allow(clippy::too_many_arguments)]
-pub fn execute_merges(
-    scan_result: ScanResult,
+pub fn run_batch(
+    pairs: &[FilePair],
+    stats: &ScanStats,
     output_dir: &Path,
     format: OutputFormat,
-    jobs: usize,
-    delete_source: bool,
-    progress: Option<MergeProgress>,
+    sdel: bool,
     verbose: bool,
     retry: usize,
-) -> Result<MergeSummary> {
-    let output_dir = output_dir.to_path_buf();
-    let pairs = scan_result.pairs;
-
-    let progress_ref = progress.as_ref();
-
-    let _ = jobs; // pool is configured at app startup in main.rs
-
+    progress: Option<&MergeProgress>,
+    tracker: &StateTracker,
+    cancel: &Cancel,
+) -> MergeSummary {
     let results: Vec<MergeResult> = pairs
         .par_iter()
         .enumerate()
         .map(|(idx, pair)| {
-            merge_pair(
-                pair,
-                idx,
-                &output_dir,
-                format,
-                progress_ref,
-                verbose,
-                retry,
-                &Cancel::new(),
-            )
+            let result = merge_pair(
+                pair, idx, output_dir, format, progress, verbose, retry, cancel,
+            );
+
+            if let Err(e) = tracker.record(&pair.stem, result.success, result.was_interrupted) {
+                eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
+            }
+
+            result
         })
         .collect();
 
-    // Note: progress.finish() is NOT called here because execute_merges may be
-    // called multiple times for different chunks (see STATE_SAVE_INTERVAL in main.rs).
-    // The caller (main.rs:execute) is responsible for calling finish() once after
-    // all chunks are processed.
-
-    let mut summary = MergeSummary {
-        skipped_count: scan_result.stats.skipped,
-        orphaned_count: scan_result.stats.orphaned,
-        ..Default::default()
-    };
-
-    if delete_source {
-        let deletion_failures: usize = results
-            .iter()
-            .filter(|r| r.success)
-            .map(|result| {
-                let pair = &pairs[result.pair_index];
-                if let Err(e) = delete_source_files(pair) {
-                    eprintln!("{} {}", t("warning_prefix").yellow(), e);
-                    1
-                } else {
-                    0
-                }
-            })
-            .sum();
-        summary.deletion_failures = deletion_failures;
+    if let Err(e) = tracker.flush() {
+        eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
     }
 
-    for result in &results {
-        summary.total_duration += result.duration;
-        summary.merge_count += 1;
-        if result.success {
-            summary.success_count += 1;
-        } else {
-            summary.failed_count += 1;
-            if let Some(error) = &result.error {
-                summary
-                    .failures
-                    .push((result.pair_name.clone(), error.clone()));
+    if let Some(p) = progress {
+        p.finish();
+    }
+
+    // Interrupted merges leave partial outputs; remove them.
+    if cancel.is_cancelled() {
+        for result in &results {
+            if !result.was_interrupted {
+                continue;
+            }
+            let pair = &pairs[result.pair_index];
+            let output_path = output_dir.join(format!("{}.{}", pair.stem, format.extension()));
+            remove_quiet(&output_path, verbose);
+            if sdel && pair.audio.exists() {
+                remove_quiet(&pair.audio, verbose);
             }
         }
     }
 
-    Ok(summary)
+    let mut deletion_failures = 0;
+    if sdel {
+        for result in &results {
+            if result.success {
+                if let Err(e) = delete_source_files(&pairs[result.pair_index]) {
+                    eprintln!("{} {}", t("warning_prefix").yellow(), e);
+                    deletion_failures += 1;
+                }
+            }
+        }
+    }
+
+    let mut summary = MergeSummary {
+        skipped_count: stats.skipped,
+        orphaned_count: stats.orphaned,
+        deletion_failures,
+        ..Default::default()
+    };
+    for result in &results {
+        if result.success {
+            summary.success_count += 1;
+            summary.merge_count += 1;
+            summary.total_duration += result.duration;
+        } else if !result.was_interrupted {
+            // Interrupted outcomes stay uncounted so a resume re-picks them.
+            summary.failed_count += 1;
+            if let Some(ref err) = result.error {
+                summary
+                    .failures
+                    .push((result.pair_name.clone(), err.clone()));
+            }
+        }
+    }
+    summary
+}
+
+fn remove_quiet(path: &Path, verbose: bool) {
+    if path.exists() {
+        if let Err(e) = std::fs::remove_file(path) {
+            eprintln!("{} {}", t("warning_prefix").yellow(), e);
+        } else if verbose {
+            eprintln!(
+                "{}",
+                tf("cleanup_partial", &[&path.display().to_string()]).yellow()
+            );
+        }
+    }
 }
 
 pub(crate) fn delete_source_files(pair: &FilePair) -> Result<()> {
@@ -739,62 +763,97 @@ mod merge_tests {
 #[cfg(test)]
 mod exec_tests {
     use super::*;
-    use crate::scanner::ScanStats;
+    use crate::state::MergeState;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_execute_merges_empty_pairs() {
-        let dir = tempdir().unwrap();
-        let scan_result = ScanResult {
-            pairs: vec![],
-            stats: ScanStats::default(),
-            estimated_duration: std::time::Duration::ZERO,
-        };
+    fn missing_pair(dir: &Path, stem: &str) -> FilePair {
+        FilePair {
+            video: dir.join(format!("{stem}.mp4")),
+            audio: dir.join(format!("{stem}.m4a")),
+            stem: stem.to_string(),
+        }
+    }
 
-        let summary = execute_merges(
-            scan_result,
-            dir.path(),
-            OutputFormat::Mkv,
-            1,
-            false,
-            None,
-            false,
-            0,
-        )
-        .unwrap();
-
-        assert_eq!(summary.success_count, 0);
-        assert_eq!(summary.failed_count, 0);
-        assert!(summary.all_success());
+    fn tracker_for(dir: &Path) -> StateTracker {
+        StateTracker::new(MergeState::new(dir, dir), dir, 5)
     }
 
     #[test]
-    fn test_execute_merges_with_skipped_stats() {
+    fn run_batch_empty_passes_stats_through() {
         let dir = tempdir().unwrap();
-        let scan_result = ScanResult {
-            pairs: vec![],
-            stats: ScanStats {
+        let summary = run_batch(
+            &[],
+            &ScanStats {
                 pairs: 0,
                 skipped: 5,
                 orphaned: 3,
             },
-            estimated_duration: std::time::Duration::ZERO,
-        };
-
-        let summary = execute_merges(
-            scan_result,
             dir.path(),
             OutputFormat::Mkv,
-            1,
             false,
-            None,
             false,
             0,
-        )
-        .unwrap();
+            None,
+            &tracker_for(dir.path()),
+            &Cancel::new(),
+        );
 
         assert_eq!(summary.skipped_count, 5);
         assert_eq!(summary.orphaned_count, 3);
+        assert!(summary.all_success());
+    }
+
+    #[test]
+    fn run_batch_counts_missing_sources_as_failures() {
+        let dir = tempdir().unwrap();
+        let pairs = vec![missing_pair(dir.path(), "a"), missing_pair(dir.path(), "b")];
+        let tracker = tracker_for(dir.path());
+
+        let summary = run_batch(
+            &pairs,
+            &ScanStats::default(),
+            dir.path(),
+            OutputFormat::Mkv,
+            false,
+            false,
+            0,
+            None,
+            &tracker,
+            &Cancel::new(),
+        );
+
+        assert_eq!(summary.failed_count, 2);
+        assert!(!summary.all_success());
+        // Outcomes are recorded for resume: both stems marked failed on disk.
+        let loaded = MergeState::load(dir.path()).unwrap().unwrap();
+        assert!(loaded.failed.contains("a") && loaded.failed.contains("b"));
+    }
+
+    #[test]
+    fn run_batch_cancelled_records_nothing_and_fails_nothing() {
+        let dir = tempdir().unwrap();
+        let pairs = vec![missing_pair(dir.path(), "a")];
+        let cancel = Cancel::new();
+        cancel.cancel();
+
+        let summary = run_batch(
+            &pairs,
+            &ScanStats::default(),
+            dir.path(),
+            OutputFormat::Mkv,
+            false,
+            false,
+            0,
+            None,
+            &tracker_for(dir.path()),
+            &cancel,
+        );
+
+        // Interrupted outcomes stay uncounted and unrecorded for resume.
+        assert_eq!(summary.failed_count, 0);
+        assert!(summary.all_success());
+        let loaded = MergeState::load(dir.path()).unwrap().unwrap();
+        assert!(!loaded.failed.contains("a"));
     }
 
     #[test]
