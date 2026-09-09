@@ -328,8 +328,11 @@ fn test_once_rejects_path_traversal_stem() {
     );
 }
 
+// Same stem in two subdirs must produce two distinct outputs, never one
+// silently overwriting the other. Naming follows the documented contract:
+// the composite key flattens (season1/ep01 -> season1_ep01.mkv).
 #[test]
-fn test_recursive_merge_mirrors_subdirs() {
+fn test_recursive_same_stem_pairs_both_survive() {
     if !ffmpeg_available() {
         eprintln!("Skipping: ffmpeg not available");
         return;
@@ -337,9 +340,10 @@ fn test_recursive_merge_mirrors_subdirs() {
     let dir = tempdir().unwrap();
     let source = dir.path().join("source");
     let output = dir.path().join("output");
-    let season = source.join("season1");
-    fs::create_dir_all(&season).unwrap();
-    create_test_media(&season, "ep01");
+    fs::create_dir_all(source.join("season1")).unwrap();
+    fs::create_dir_all(source.join("season2")).unwrap();
+    create_test_media(&source.join("season1"), "ep01");
+    create_test_media(&source.join("season2"), "ep01");
 
     let result = Command::new(get_binary_path())
         .args([
@@ -356,8 +360,12 @@ fn test_recursive_merge_mirrors_subdirs() {
 
     assert!(result.status.success());
     assert!(
-        output.join("season1").join("ep01.mkv").exists(),
-        "recursive merge must mirror the source subdir into the output"
+        output.join("season1_ep01.mkv").exists(),
+        "season1/ep01 must merge to its own output"
+    );
+    assert!(
+        output.join("season2_ep01.mkv").exists(),
+        "season2/ep01 must merge to its own output"
     );
 }
 
@@ -507,7 +515,9 @@ fn test_resume_after_partial() {
     fs::remove_file(output.join("video1.mkv")).unwrap();
     fs::remove_file(output.join("video2.mkv")).unwrap();
 
-    // Create a state file marking video1 as completed (bare stem in non-recursive)
+    // Create a state file marking video1 as completed (bare stem in non-recursive).
+    // Escape backslashes so Windows temp paths embed validly in the JSON string.
+    let esc = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
     let state_content = format!(
         r#"{{
   "version": 1,
@@ -517,8 +527,8 @@ fn test_resume_after_partial() {
   "failed": [],
   "pending": []
 }}"#,
-        source.display(),
-        output.display()
+        esc(&source),
+        esc(&output)
     );
     fs::write(source.join(".mixbilibili_state.json"), state_content).unwrap();
 

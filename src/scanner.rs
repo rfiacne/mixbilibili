@@ -541,6 +541,13 @@ mod scan_tests {
         assert!(stems.iter().any(|s| s.ends_with("/deep")));
     }
 
+    /// Windows symlinks need developer mode / elevated privileges; skip
+    /// rather than fail when the OS refuses (error 1314).
+    #[cfg(windows)]
+    fn symlink_dir_supported(from: &std::path::Path, to: &std::path::Path) -> bool {
+        std::os::windows::fs::symlink_dir(from, to).is_ok()
+    }
+
     #[test]
     fn test_scan_symlink_loop_does_not_infinite_loop() {
         let dir = tempdir().unwrap();
@@ -555,7 +562,12 @@ mod scan_tests {
         std::os::unix::fs::symlink(path, path.join("loop_link")).unwrap();
 
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(path, path.join("loop_link")).unwrap();
+        {
+            if !symlink_dir_supported(path, &path.join("loop_link")) {
+                eprintln!("Skipping: Windows symlink creation needs developer mode");
+                return;
+            }
+        }
 
         // Should complete without hanging or stack overflow
         let result = scan_directory(path, true);
@@ -580,7 +592,12 @@ mod scan_tests {
         std::os::unix::fs::symlink(external.path(), path.join("external_link")).unwrap();
 
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(external.path(), path.join("external_link")).unwrap();
+        {
+            if !symlink_dir_supported(external.path(), &path.join("external_link")) {
+                eprintln!("Skipping: Windows symlink creation needs developer mode");
+                return;
+            }
+        }
 
         // Create valid pair in main directory
         File::create(path.join("video.mp4")).unwrap();

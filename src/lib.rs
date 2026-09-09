@@ -457,6 +457,12 @@ fn run_once(
     runner: &dyn ffmpeg::MergeRunner,
 ) -> Result<()> {
     let pair = scanner::FilePair::sources_in(&args.source, stem)?;
+
+    // A preview never merges or deletes — same contract as the batch path.
+    if args.dry_run {
+        return print_dry_run(args, std::slice::from_ref(&pair));
+    }
+
     let opts = pipeline::BatchOpts::from_args(args, interrupt);
 
     let summary = pipeline::process(

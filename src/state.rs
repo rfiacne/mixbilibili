@@ -176,7 +176,8 @@ mod tests {
     #[test]
     fn test_state_load_old_vec_format() {
         let dir = tempdir().unwrap();
-        let dir_str = dir.path().to_string_lossy().to_string();
+        // Escape backslashes so Windows temp paths embed validly in the JSON string.
+        let dir_str = dir.path().to_string_lossy().replace('\\', "\\\\");
         let json = format!(
             r#"{{
   "source_dir": "{dir_str}",
@@ -217,7 +218,8 @@ mod tests {
     #[test]
     fn test_state_load_missing_required_fields() {
         let dir = tempdir().unwrap();
-        let dir_str = dir.path().to_string_lossy().to_string();
+        // Escape backslashes so Windows temp paths embed validly in the JSON string.
+        let dir_str = dir.path().to_string_lossy().replace('\\', "\\\\");
         let path = MergeState::state_file_path(dir.path());
 
         // Write JSON missing required fields
@@ -243,7 +245,8 @@ mod tests {
     #[test]
     fn test_state_load_wrong_field_types() {
         let dir = tempdir().unwrap();
-        let dir_str = dir.path().to_string_lossy().to_string();
+        // Escape backslashes so Windows temp paths embed validly in the JSON string.
+        let dir_str = dir.path().to_string_lossy().replace('\\', "\\\\");
         let path = MergeState::state_file_path(dir.path());
 
         // Write JSON with wrong types (completed as string instead of array)
@@ -661,7 +664,8 @@ mod state_logic_tests {
     #[test]
     fn test_load_old_format_gets_default_version() {
         let dir = tempdir().unwrap();
-        let dir_str = dir.path().to_string_lossy().to_string();
+        // Escape backslashes so Windows temp paths embed validly in the JSON string.
+        let dir_str = dir.path().to_string_lossy().replace('\\', "\\\\");
         // Old format JSON without "version" field
         let json = format!(
             r#"{{
@@ -695,7 +699,8 @@ mod state_logic_tests {
     #[test]
     fn test_reject_future_version() {
         let dir = tempdir().unwrap();
-        let dir_str = dir.path().to_string_lossy().to_string();
+        // Escape backslashes so Windows temp paths embed validly in the JSON string.
+        let dir_str = dir.path().to_string_lossy().replace('\\', "\\\\");
         // Future format with version > 1
         let json = format!(
             r#"{{
