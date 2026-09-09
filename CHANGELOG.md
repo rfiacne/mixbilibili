@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-09
+
 ### Fixed
 - `--dry-run --once <stem>` no longer merges and deletes sources; it previews the pair
 - interrupting a batch with `--sdel` keeps the source files of never-merged pairs (previously the audio was deleted, orphaning the video and breaking `--resume`)
