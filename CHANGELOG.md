@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `--dry-run --once <stem>` no longer merges and deletes sources; it previews the
+  pair like the batch path does (regression introduced when `--once` became a
+  batch of one)
+- Windows: hand-written state-file tests escape path backslashes, symlink
+  scanner tests skip instead of failing without developer-mode privileges, and
+  the progress-record test accepts the ASCII symbol fallback
+
 ## [0.9.0] - 2026-08-30
 
 ### Fixed
