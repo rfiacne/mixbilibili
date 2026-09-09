@@ -4,3 +4,5 @@
 *.pdb
 .DS_Store
 .worktrees/
+# CocoIndex Code (ccc)
+/.cocoindex_code/
