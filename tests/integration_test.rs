@@ -239,6 +239,94 @@ fn test_merge_with_delete_source() {
 }
 
 #[test]
+fn test_dry_run_once_previews_without_touching_files() {
+    // Regression: --once used to bypass --dry-run entirely and really merge
+    // (and with default --sdel, really delete) the pair.
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("output");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&output).unwrap();
+    create_test_media(&source, "once_video");
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--dry-run",
+            "--once",
+            "once_video",
+        ])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(result.status.success());
+    assert!(
+        source.join("once_video.mp4").exists() && source.join("once_video.m4a").exists(),
+        "--dry-run --once must not delete sources"
+    );
+    assert!(
+        !output.join("once_video.mkv").exists(),
+        "--dry-run --once must not produce output"
+    );
+}
+
+#[test]
+fn test_once_merges_single_pair() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("output");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&output).unwrap();
+    create_test_media(&source, "one");
+    create_test_media(&source, "two");
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--sdel",
+            "false",
+            "--once",
+            "one",
+        ])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(result.status.success());
+    assert!(output.join("one.mkv").exists(), "--once merges its stem");
+    assert!(
+        !output.join("two.mkv").exists(),
+        "--once must not touch other pairs"
+    );
+}
+
+#[test]
+fn test_once_rejects_path_traversal_stem() {
+    let dir = tempdir().unwrap();
+    let result = Command::new(get_binary_path())
+        .args(["-s", &dir.path().display().to_string(), "--once", "../evil"])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(!result.status.success(), "traversal stem must fail");
+    assert!(
+        !result.stderr.is_empty(),
+        "traversal rejection should explain itself"
+    );
+}
+
+#[test]
 fn test_recursive_flag() {
     let dir = tempdir().unwrap();
     let source = dir.path().join("source");

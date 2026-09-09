@@ -173,10 +173,17 @@ fn run() -> Result<()> {
 
     // Phase 1: Initialize
     let (args, format) = init()?;
+    let opts = merger::MergeOptions {
+        output_dir: &args.output,
+        format,
+        verbose: args.verbose,
+        retry: args.retry,
+    };
 
-    // --once mode: merge a single pair by stem, skip scanning
-    if let Some(ref stem) = args.once {
-        return run_once(&args, format, stem, &cancel);
+    // --once mode: merge a single pair by stem. It honours --dry-run like
+    // every other mode — a preview never merges or deletes.
+    if let cli::Mode::Once(ref stem) = args.mode {
+        return run_once(&args, &opts, stem, &cancel);
     }
 
     // Configure rayon's global thread pool once at startup
@@ -234,12 +241,6 @@ fn run() -> Result<()> {
 
     // Phase 3: merge, tracking outcomes for resume
     let tracker = state::StateTracker::new(merge_state, &args.source, STATE_SAVE_INTERVAL);
-    let opts = merger::MergeOptions {
-        output_dir: &args.output,
-        format,
-        verbose: args.verbose,
-        retry: args.retry,
-    };
     let summary = execute(&args, &scan, &opts, &cancel, &tracker)?;
 
     // Phase 4: Update state and report. On interrupt the flushed state is
@@ -266,9 +267,10 @@ fn run() -> Result<()> {
 
 /// --once mode: merge a single pair identified by stem.
 /// No scanning, no state file, no progress bar — just merge and exit.
+/// --dry-run turns it into a pure preview: same checks, no side effects.
 fn run_once(
     args: &Args,
-    format: cli::OutputFormat,
+    opts: &merger::MergeOptions,
     stem: &str,
     cancel: &merger::Cancel,
 ) -> Result<()> {
@@ -294,13 +296,25 @@ fn run_once(
         stem: stem.to_string(),
     };
 
-    let opts = merger::MergeOptions {
-        output_dir: &args.output,
-        format,
-        verbose: args.verbose,
-        retry: args.retry,
-    };
-    let result = merger::merge_pair(&pair, 0, &opts, cancel);
+    if args.dry_run {
+        println!("{}", t("dry_run_header").cyan().bold());
+        println!(
+            "  {} + {} -> {}.{}",
+            pair.video.display(),
+            pair.audio.display(),
+            pair.stem,
+            opts.format.extension()
+        );
+        if args.sdel {
+            println!("{}", t("dry_run_sdel_header").yellow().bold());
+        }
+        println!("{}", tf("dry_run_summary", &["1"]));
+        println!("{}", t("dry_run_complete").cyan());
+        return Ok(());
+    }
+
+    let result = merger::merge_pair(&pair, 0, opts, cancel);
+    merger::announce(&result, None, args.verbose);
 
     if result.success {
         if args.sdel {
@@ -603,7 +617,7 @@ mod integration_tests {
             quiet: true,
             verbose: false,
             retry: 0,
-            once: None,
+            mode: cli::Mode::Batch,
         };
 
         let summary = merger::MergeSummary {
@@ -651,7 +665,7 @@ mod integration_tests {
             quiet: true,
             verbose: false,
             retry: 0,
-            once: None,
+            mode: cli::Mode::Batch,
         };
 
         state::MergeState::new(&source, &output)

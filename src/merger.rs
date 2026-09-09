@@ -221,7 +221,7 @@ fn failure(
 
 /// Display for one finished result — lives in the orchestration layer so the
 /// merge core stays silent.
-fn announce(result: &MergeResult, progress: Option<&MergeProgress>, verbose: bool) {
+pub fn announce(result: &MergeResult, progress: Option<&MergeProgress>, verbose: bool) {
     if result.was_interrupted {
         return;
     }
@@ -308,7 +308,9 @@ pub fn run_batch(
         p.finish();
     }
 
-    // Interrupted merges leave partial outputs; remove them.
+    // Interrupted merges leave partial outputs; remove those. Source files of
+    // an interrupted pair are never deleted: the stem stays unrecorded so a
+    // resume re-picks it, and deleting one source now would orphan its partner.
     if cancel.is_cancelled() {
         for result in &results {
             if !result.was_interrupted {
@@ -319,9 +321,6 @@ pub fn run_batch(
                 opts.output_dir
                     .join(format!("{}.{}", pair.stem, opts.format.extension()));
             remove_quiet(&output_path, opts.verbose);
-            if sdel && pair.audio.exists() {
-                remove_quiet(&pair.audio, opts.verbose);
-            }
         }
     }
 
@@ -743,6 +742,32 @@ mod exec_tests {
         assert!(summary.all_success());
         let loaded = MergeState::load(dir.path()).unwrap().unwrap();
         assert!(!loaded.failed.contains("a"));
+    }
+
+    #[test]
+    fn run_batch_cancelled_with_sdel_keeps_sources() {
+        // Regression: interrupting a batch with --sdel used to delete the
+        // source audio of pairs that never merged, orphaning the video on
+        // resume. Cancelled pairs must keep both sources.
+        let dir = tempdir().unwrap();
+        let pair = missing_pair(dir.path(), "a");
+        std::fs::write(&pair.video, b"v").unwrap();
+        std::fs::write(&pair.audio, b"a").unwrap();
+        let cancel = Cancel::new();
+        cancel.cancel();
+
+        run_batch(
+            std::slice::from_ref(&pair),
+            &ScanStats::default(),
+            &opts_for(dir.path()),
+            true, // sdel on
+            None,
+            &tracker_for(dir.path()),
+            &cancel,
+        );
+
+        assert!(pair.video.exists(), "cancelled pair must keep its video");
+        assert!(pair.audio.exists(), "cancelled pair must keep its audio");
     }
 
     #[test]

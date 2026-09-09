@@ -98,6 +98,15 @@ mod tests {
     }
 }
 
+/// What a run does. --once is a distinct mode, not an early-return flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mode {
+    /// Scan the source directory and merge every pair found.
+    Batch,
+    /// Merge exactly one pair by stem, no scan, no state file.
+    Once(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct Args {
     pub source: PathBuf,
@@ -113,7 +122,7 @@ pub struct Args {
     pub resume: bool,
     pub retry: usize,
     pub recursive: bool,
-    pub once: Option<String>,
+    pub mode: Mode,
 }
 
 fn default_jobs() -> usize {
@@ -277,7 +286,10 @@ pub fn parse_args(matches: &clap::ArgMatches) -> Args {
         resume: matches.get_flag("resume"),
         retry,
         recursive: matches.get_flag("recursive"),
-        once: matches.get_one::<String>("once").map(|s| s.to_string()),
+        mode: match matches.get_one::<String>("once") {
+            Some(stem) => Mode::Once(stem.clone()),
+            None => Mode::Batch,
+        },
     }
 }
 
@@ -286,7 +298,15 @@ impl Args {
         self.jobs = self.jobs.clamp(1, 32);
 
         if self.interactive && self.dry_run {
-            bail!("Cannot use --interactive with --dry-run");
+            bail!("{}", t("conflict_interactive_dry_run"));
+        }
+
+        if let Mode::Once(ref stem) = self.mode {
+            // Trust boundary: the stem becomes a path component; reject
+            // anything that could escape the source directory.
+            if stem.is_empty() || stem.contains('/') || stem.contains('\\') || stem.contains("..") {
+                bail!("{}", tf("invalid_stem", &[stem]));
+            }
         }
 
         if !self.source.is_dir() {
@@ -323,7 +343,7 @@ fn make_args() -> Args {
         resume: false,
         retry: 0,
         recursive: false,
-        once: None,
+        mode: Mode::Batch,
     }
 }
 
@@ -352,6 +372,34 @@ mod args_tests {
         let mut args = make_args();
         args.validate().unwrap();
         assert_eq!(args.jobs, 4);
+    }
+
+    #[test]
+    fn parse_once_builds_once_mode() {
+        let matches = build_cli()
+            .try_get_matches_from(["mixbilibili", "--once", "ep01"])
+            .unwrap();
+        let args = parse_args(&matches);
+        assert_eq!(args.mode, Mode::Once("ep01".to_string()));
+    }
+
+    #[test]
+    fn validate_rejects_stem_that_escapes_source() {
+        for stem in ["../evil", "a/b", "a\\b", ".."] {
+            let mut args = make_args();
+            args.mode = Mode::Once(stem.to_string());
+            assert!(
+                args.validate().is_err(),
+                "stem {stem:?} must be rejected before it becomes a path"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_plain_stem() {
+        let mut args = make_args();
+        args.mode = Mode::Once("ep01".to_string());
+        args.validate().unwrap();
     }
 
     #[test]
