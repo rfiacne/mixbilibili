@@ -10,8 +10,12 @@ use std::time::Duration;
 #[derive(Debug)]
 pub struct FilePair {
     pub video: PathBuf,
-    pub audio: PathBuf,
+    /// Key across the whole pipeline (state, progress, output naming). In
+    /// recursive mode this is the path relative to the source dir with `/`
+    /// separators (e.g. `season1/ep01`), so identical stems in different
+    /// subdirectories stay distinct and mirror into output subdirs.
     pub stem: String,
+    pub audio: PathBuf,
 }
 
 #[derive(Debug, Default)]
@@ -27,8 +31,12 @@ pub struct ScanResult {
     pub estimated_duration: Duration,
 }
 
+/// Collect mp4/m4a/aria2 files keyed by path relative to the scan root,
+/// always `/`-separated. A duplicate key (same relative path twice is only
+/// possible via case-insensitive collisions) keeps the first sighting.
 fn collect_files(
     dir: &Path,
+    prefix: &str,
     mp4_files: &mut HashMap<String, PathBuf>,
     m4a_files: &mut HashMap<String, PathBuf>,
     aria2_files: &mut HashSet<String>,
@@ -42,7 +50,18 @@ fn collect_files(
 
         if path.is_dir() {
             if recursive {
-                collect_files(&path, mp4_files, m4a_files, aria2_files, true)?;
+                let name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                collect_files(
+                    &path,
+                    &format!("{prefix}{name}/"),
+                    mp4_files,
+                    m4a_files,
+                    aria2_files,
+                    true,
+                )?;
             }
             continue;
         }
@@ -53,16 +72,16 @@ fn collect_files(
         };
 
         if let Some(stem) = filename.strip_suffix(".aria2") {
-            // Normalize: strip .mp4/.m4a suffix so is_downloading needs only one lookup
+            // Normalize: strip .mp4/.m4a suffix so the busy check needs only one lookup
             let bare = stem
                 .strip_suffix(".mp4")
                 .or_else(|| stem.strip_suffix(".m4a"))
                 .unwrap_or(stem);
-            aria2_files.insert(bare.to_string());
+            aria2_files.insert(format!("{prefix}{bare}"));
         } else if let Some(stem) = filename.strip_suffix(".mp4") {
-            mp4_files.insert(stem.to_string(), path);
+            mp4_files.insert(format!("{prefix}{stem}"), path);
         } else if let Some(stem) = filename.strip_suffix(".m4a") {
-            m4a_files.insert(stem.to_string(), path);
+            m4a_files.insert(format!("{prefix}{stem}"), path);
         }
     }
 
@@ -76,6 +95,7 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
 
     collect_files(
         source_dir,
+        "",
         &mut mp4_files,
         &mut m4a_files,
         &mut aria2_files,
@@ -202,6 +222,44 @@ mod scan_tests {
         }
     }
 
+    // Same stem in different subdirectories must produce two distinct pairs,
+    // keyed by their path relative to the source dir — never silently merged
+    // into one output file.
+    #[test]
+    fn test_scan_recursive_keeps_same_stem_from_different_dirs() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        let a = path.join("a");
+        let b = path.join("b");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        pair_paths(&a, "ep01");
+        pair_paths(&b, "ep01");
+
+        let result = scan_directory(path, true).unwrap();
+        assert_eq!(result.pairs.len(), 2, "same stem in two dirs = two pairs");
+        let mut keys: Vec<&str> = result.pairs.iter().map(|p| p.stem.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["a/ep01", "b/ep01"]);
+    }
+
+    #[test]
+    fn test_scan_recursive_aria2_keyed_by_relative_path() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("s");
+        fs::create_dir(&sub).unwrap();
+        pair_paths(&sub, "ep01");
+        File::create(sub.join("ep01.mp4.aria2")).unwrap();
+
+        let result = scan_directory(dir.path(), true).unwrap();
+        assert_eq!(result.pairs.len(), 0);
+        assert_eq!(
+            result.stats.skipped, 1,
+            "sentinel beside the file blocks it"
+        );
+    }
+
     #[test]
     fn test_scan_recursive_scans_subdirs_only_when_asked() {
         let dir = tempdir().unwrap();
@@ -220,7 +278,10 @@ mod scan_tests {
         assert_eq!(recursive.pairs.len(), 2, "recursive finds subdir pairs");
         let stems: Vec<&str> = recursive.pairs.iter().map(|p| p.stem.as_str()).collect();
         assert!(stems.contains(&"top"));
-        assert!(stems.contains(&"deep"));
+        assert!(
+            stems.contains(&"nested/deep"),
+            "subdir pairs key by relpath"
+        );
     }
 
     // Estimated duration scales with file size at a fixed 10 MB/s heuristic.

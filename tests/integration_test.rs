@@ -327,6 +327,39 @@ fn test_once_rejects_path_traversal_stem() {
 }
 
 #[test]
+fn test_recursive_merge_mirrors_subdirs() {
+    if !ffmpeg_available() {
+        eprintln!("Skipping: ffmpeg not available");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("output");
+    let season = source.join("season1");
+    fs::create_dir_all(&season).unwrap();
+    create_test_media(&season, "ep01");
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--sdel",
+            "false",
+            "--recursive",
+        ])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(result.status.success());
+    assert!(
+        output.join("season1").join("ep01.mkv").exists(),
+        "recursive merge must mirror the source subdir into the output"
+    );
+}
+
+#[test]
 fn test_recursive_flag() {
     let dir = tempdir().unwrap();
     let source = dir.path().join("source");

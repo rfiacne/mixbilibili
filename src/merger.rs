@@ -141,6 +141,14 @@ pub fn merge_pair(
         .output_dir
         .join(format!("{}.{}", pair.stem, opts.format.extension()));
 
+    // Recursive scans key pairs by relative path, so the output may name a
+    // subdir the user hasn't created yet. ffmpeg won't mkdir for us.
+    if let Some(parent) = output_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return failure(pair, pair_index, e.to_string(), Duration::ZERO, 0);
+        }
+    }
+
     let start = std::time::Instant::now();
 
     for attempt in 0..=opts.retry {

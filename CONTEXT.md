@@ -6,7 +6,10 @@ downloaded `.mp4` video and `.m4a` audio into one container via ffmpeg.
 ## Domain
 
 - **Pair** — a video+audio file sharing a stem. `scanner` produces pairs, the merge module consumes them.
-- **Stem** — filename without extension. The primary key across the whole pipeline: state tracking, progress lines, `--once`.
+- **Stem** — filename without extension; under `-R` it is the pair's path
+  relative to the source dir, `/`-separated (`season1/ep01`). The primary key
+  across the whole pipeline: state tracking, progress lines, `--once`, and
+  output naming (recursive stems mirror into output subdirs).
 - **Batch** — the set of pairs one run merges after scan/resume filtering; executed in parallel.
 - **Resume state** — `.mixbilibili_state.json` in the source dir; survives an interrupted batch so `--resume` skips what finished.
 - **Cancel signal** — a `Cancel` token, set once by the Ctrl+C handler. An interrupted pair stays unrecorded in the resume state: its sources are never deleted and its partial output is removed.
