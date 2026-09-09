@@ -4,7 +4,7 @@ use crate::i18n::{t, tf};
 use crate::progress::MergeProgress;
 use crate::scanner::{FilePair, ScanStats};
 use crate::state::StateTracker;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
 use rayon::prelude::*;
 use std::io;
@@ -37,25 +37,45 @@ impl Cancel {
     }
 }
 
-/// Timeout-aware `Child::wait`: returns `Ok(None)` when the deadline passes.
+/// How a timeout/cancel-aware child wait ended.
+#[derive(Debug)]
+enum Outcome {
+    Done(ExitStatus),
+    TimedOut,
+    Cancelled,
+}
+
+/// Timeout- and cancel-aware `Child::wait`: kills nothing itself but reports
+/// the deadline (`TimedOut`) or the cancel signal (`Cancelled`) so the caller
+/// can reap the child.
 fn wait_with_timeout(
     child: &mut Child,
     timeout: Duration,
     poll_interval: Duration,
-) -> io::Result<Option<ExitStatus>> {
+    cancel: &Cancel,
+) -> io::Result<Outcome> {
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(Some(status)) => return Ok(Outcome::Done(status)),
             Ok(None) => {
+                if cancel.is_cancelled() {
+                    return Ok(Outcome::Cancelled);
+                }
                 if start.elapsed() >= timeout {
-                    return Ok(None);
+                    return Ok(Outcome::TimedOut);
                 }
                 std::thread::sleep(poll_interval);
             }
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Output path for a pair — the single place that maps stem+format to a file.
+pub(crate) fn output_path(pair: &FilePair, opts: &MergeOptions) -> std::path::PathBuf {
+    opts.output_dir
+        .join(format!("{}.{}", pair.stem, opts.format.extension()))
 }
 
 #[derive(Debug)]
@@ -137,9 +157,7 @@ pub fn merge_pair(
         };
     }
 
-    let output_path = opts
-        .output_dir
-        .join(format!("{}.{}", pair.stem, opts.format.extension()));
+    let output_path = output_path(pair, opts);
 
     // Recursive scans key pairs by relative path, so the output may name a
     // subdir the user hasn't created yet. ffmpeg won't mkdir for us.
@@ -153,12 +171,15 @@ pub fn merge_pair(
 
     for attempt in 0..=opts.retry {
         if attempt > 0 {
+            if cancel.is_cancelled() {
+                break;
+            }
             std::thread::sleep(Duration::from_secs(1));
         }
 
         let mut cmd =
             ffmpeg::build_merge_command(&pair.video, &pair.audio, &output_path, opts.format);
-        match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT) {
+        match run_with_timeout(&mut cmd, FFMPEG_TIMEOUT, cancel) {
             Ok(status) if status.success() => {
                 return MergeResult {
                     pair_index,
@@ -184,8 +205,31 @@ pub fn merge_pair(
                 );
                 return failure(pair, pair_index, error_msg, start.elapsed(), attempt);
             }
-            Err(_) if attempt < opts.retry => continue,
-            Err(e) => {
+            // Cancelled mid-merge: the pair never got a verdict, so it joins
+            // the interrupted path — unrecorded, partial output cleaned up.
+            Err(RunError::Cancelled) => {
+                return MergeResult {
+                    pair_index,
+                    pair_name: pair.stem.clone(),
+                    success: false,
+                    error: Some("Skipped (interrupted)".to_string()),
+                    duration: start.elapsed(),
+                    was_interrupted: true,
+                    retries: attempt,
+                };
+            }
+            Err(RunError::Timeout) if attempt < opts.retry => continue,
+            Err(RunError::Timeout) => {
+                return failure(
+                    pair,
+                    pair_index,
+                    t("timed_out").into_owned(),
+                    start.elapsed(),
+                    attempt,
+                );
+            }
+            Err(RunError::Spawn(_)) if attempt < opts.retry => continue,
+            Err(RunError::Spawn(e)) => {
                 let error_msg = tf(
                     "merge_failed_io",
                     &[&e.to_string(), &opts.retry.to_string()],
@@ -195,7 +239,16 @@ pub fn merge_pair(
         }
     }
 
-    unreachable!("retry loop should always return")
+    // Cancel broke out of the retry loop.
+    MergeResult {
+        pair_index,
+        pair_name: pair.stem.clone(),
+        success: false,
+        error: Some("Skipped (interrupted)".to_string()),
+        duration: start.elapsed(),
+        was_interrupted: true,
+        retries: 0,
+    }
 }
 
 fn failure(
@@ -255,17 +308,35 @@ pub fn announce(result: &MergeResult, progress: Option<&MergeProgress>, verbose:
     }
 }
 
-fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus> {
-    let mut child = cmd.spawn().context(t("failed_to_spawn"))?;
+enum RunError {
+    Timeout,
+    Cancelled,
+    Spawn(anyhow::Error),
+}
 
-    match wait_with_timeout(&mut child, timeout, POLL_INTERVAL) {
-        Ok(Some(status)) => Ok(status),
-        Ok(None) => {
+fn run_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: Duration,
+    cancel: &Cancel,
+) -> std::result::Result<ExitStatus, RunError> {
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => return Err(RunError::Spawn(e.into())),
+    };
+
+    match wait_with_timeout(&mut child, timeout, POLL_INTERVAL, cancel) {
+        Ok(Outcome::Done(status)) => Ok(status),
+        Ok(Outcome::TimedOut) | Ok(Outcome::Cancelled) => {
+            // Never leave an orphaned ffmpeg behind; reap it either way.
             let _ = child.kill();
             let _ = child.wait();
-            anyhow::bail!("{}", t("timed_out"));
+            Err(if cancel.is_cancelled() {
+                RunError::Cancelled
+            } else {
+                RunError::Timeout
+            })
         }
-        Err(e) => Err(e).context(t("failed_to_wait")),
+        Err(e) => Err(RunError::Spawn(e.into())),
     }
 }
 
@@ -314,10 +385,7 @@ pub fn run_batch(
                 continue;
             }
             let pair = &pairs[result.pair_index];
-            let output_path =
-                opts.output_dir
-                    .join(format!("{}.{}", pair.stem, opts.format.extension()));
-            remove_quiet(&output_path, opts.verbose);
+            remove_quiet(&output_path(pair, opts), opts.verbose);
         }
     }
 
@@ -357,7 +425,7 @@ pub fn run_batch(
     summary
 }
 
-fn remove_quiet(path: &Path, verbose: bool) {
+pub(crate) fn remove_quiet(path: &Path, verbose: bool) {
     if path.exists() {
         if let Err(e) = std::fs::remove_file(path) {
             eprintln!("{} {}", t("warning_prefix").yellow(), e);
@@ -773,6 +841,36 @@ mod timeout_tests {
     use super::*;
 
     #[test]
+    fn wait_reports_cancel_promptly() {
+        // A long-running child must be killed shortly after cancel fires,
+        // not left to run until the 300 s timeout.
+        #[cfg(unix)]
+        let mut cmd = std::process::Command::new("sleep");
+        #[cfg(unix)]
+        cmd.arg("30");
+
+        #[cfg(windows)]
+        let mut cmd = std::process::Command::new("ping");
+        #[cfg(windows)]
+        cmd.args(["-n", "300", "127.0.0.1"]);
+
+        let cancel = Cancel::new();
+        let c = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            c.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let outcome = run_with_timeout(&mut cmd, Duration::from_secs(300), &cancel);
+        assert!(matches!(outcome, Err(RunError::Cancelled)));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "cancel must kill the child promptly"
+        );
+    }
+
+    #[test]
     fn test_wait_timeout_normal_completion() {
         // Use cross-platform sleep command
         #[cfg(unix)]
@@ -789,10 +887,13 @@ mod timeout_tests {
             .spawn()
             .expect("ping command should be available");
 
-        let result = wait_with_timeout(&mut child, Duration::from_secs(5), POLL_INTERVAL);
-        assert!(result.is_ok());
-        let status = result.unwrap();
-        assert!(status.is_some());
+        let result = wait_with_timeout(
+            &mut child,
+            Duration::from_secs(5),
+            POLL_INTERVAL,
+            &Cancel::new(),
+        );
+        assert!(matches!(result.unwrap(), Outcome::Done(_)));
     }
 
     #[test]
@@ -809,11 +910,13 @@ mod timeout_tests {
             .spawn()
             .expect("ping command should be available");
 
-        let result = wait_with_timeout(&mut child, Duration::from_millis(50), POLL_INTERVAL);
-        assert!(result.is_ok());
-        // Should return None indicating timeout
-        let status = result.unwrap();
-        assert!(status.is_none());
+        let result = wait_with_timeout(
+            &mut child,
+            Duration::from_millis(50),
+            POLL_INTERVAL,
+            &Cancel::new(),
+        );
+        assert!(matches!(result.unwrap(), Outcome::TimedOut));
     }
 
     #[test]
@@ -836,8 +939,12 @@ mod timeout_tests {
         // Wait a bit for it to finish
         std::thread::sleep(Duration::from_millis(150));
 
-        let result = wait_with_timeout(&mut child, Duration::from_secs(5), POLL_INTERVAL);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_some());
+        let result = wait_with_timeout(
+            &mut child,
+            Duration::from_secs(5),
+            POLL_INTERVAL,
+            &Cancel::new(),
+        );
+        assert!(matches!(result.unwrap(), Outcome::Done(_)));
     }
 }

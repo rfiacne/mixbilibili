@@ -311,6 +311,12 @@ fn run_once(
     let result = merger::merge_pair(&pair, 0, opts, cancel);
     merger::announce(&result, None, args.verbose);
 
+    // Same cleanup contract as a batch: an interrupted merge leaves a partial
+    // output that must not survive the run.
+    if result.was_interrupted {
+        merger::remove_quiet(&merger::output_path(&pair, opts), args.verbose);
+    }
+
     if result.success {
         if args.sdel {
             if let Err(e) = merger::delete_source_files(&pair) {

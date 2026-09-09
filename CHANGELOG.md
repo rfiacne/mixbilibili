@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--once <stem>` rejects stems containing path separators or `..`
 - Windows: old-format state test and timeout tests no longer fail under `cargo test`
 - resume source-dir mismatch message is now translated
+- `-R` no longer collapses same-stem pairs from different subdirectories into one
+  output; pairs key by source-relative path and mirror into output subdirs
+- Ctrl+C now interrupts a running ffmpeg (killed within the poll interval) instead
+  of waiting out the 5-minute timeout; `--once` cleans up its partial output on
+  interrupt like a batch run does
 - aria2 hook no longer hardcodes a developer machine path; resolves `mixbilibili`
   from `PATH` with a `MIXBILIBILI_BIN` override
 
