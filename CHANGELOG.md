@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `--dry-run --once <stem>` no longer merges and deletes sources; it previews the pair
+- interrupting a batch with `--sdel` keeps the source files of never-merged pairs (previously the audio was deleted, orphaning the video and breaking `--resume`)
+- `--resume --interactive` answering `n` no longer deletes an existing resume state
+- incremental resume-state saves are atomic (temp+rename); a torn or clobbered state file can no longer corrupt `--resume`
+- `--once <stem>` rejects stems containing path separators or `..`
+- Windows: old-format state test and timeout tests no longer fail under `cargo test`
+- resume source-dir mismatch message is now translated
+
+### Changed
+- architecture: batch orchestration, save policy, interrupt cleanup, and summary
+  folding now live behind `merger::run_batch` / `state::StateTracker`; the merge
+  core no longer prints or reads global interrupt state (injected `Cancel` token);
+  `--once` is a parsed `Mode` instead of an early return. CLI flags and exit codes
+  are unchanged (aria2 hook contract preserved)
+- CI runs the test job on windows-latest in addition to ubuntu-latest
+
+### Removed
+- dead `merger::execute_merges`; write-only `pending` set from the state file
+  (old state files still load); 7 orphaned translation keys
+
 ## [0.7.0] - 2026-06-24
 
 ### Added
