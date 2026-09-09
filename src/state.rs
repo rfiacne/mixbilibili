@@ -1,9 +1,12 @@
 use crate::i18n::t;
+use crate::i18n::tf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 fn set_as_vec<S: Serializer>(set: &HashSet<String>, s: S) -> Result<S::Ok, S::Error> {
     let mut vec: Vec<&String> = set.iter().collect();
@@ -16,7 +19,15 @@ fn vec_as_set<'de, D: Deserializer<'de>>(d: D) -> Result<HashSet<String>, D::Err
     Ok(vec.into_iter().collect())
 }
 
+/// Resume bookkeeping: which stems finished and which failed.
+///
+/// The `pending` set that older files carry is deliberately gone: its content
+/// is exactly `scan result − completed`, so a resume run recomputes it by
+/// rescanning. `#[serde(default)]` keeps pre-existing files loadable (old
+/// files carry `pending`, which serde ignores; rolled-back binaries meet the
+/// fields they know).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct MergeState {
     pub source_dir: String,
     pub output_dir: String,
@@ -24,8 +35,81 @@ pub struct MergeState {
     pub completed: HashSet<String>,
     #[serde(serialize_with = "set_as_vec", deserialize_with = "vec_as_set")]
     pub failed: HashSet<String>,
-    #[serde(serialize_with = "set_as_vec", deserialize_with = "vec_as_set")]
-    pub pending: HashSet<String>,
+}
+
+/// Thread-safe resume-state tracker shared by the merge workers.
+///
+/// Owns the state and the save policy: workers call `record` after each
+/// merge; the tracker flushes every `save_interval` outcomes and on `flush`.
+/// Saves go through a snapshot-then-write protocol: the state lock is held
+/// only for the clone, and a sequence guard keeps an older snapshot from
+/// overwriting a newer one when two workers race on the file.
+pub struct StateTracker {
+    state: Mutex<MergeState>,
+    source: PathBuf,
+    save_interval: usize,
+    outcomes: AtomicUsize,
+    seq: AtomicUsize,
+    /// Serializes snapshot writes; holds the last written sequence number.
+    save_lock: Mutex<usize>,
+}
+
+impl StateTracker {
+    pub fn new(state: MergeState, source: &Path, save_interval: usize) -> Self {
+        Self {
+            state: Mutex::new(state),
+            source: source.to_path_buf(),
+            save_interval: save_interval.max(1),
+            outcomes: AtomicUsize::new(0),
+            seq: AtomicUsize::new(0),
+            save_lock: Mutex::new(0),
+        }
+    }
+
+    /// Record one merge outcome; interrupted outcomes leave the state
+    /// untouched so the stem stays unrecorded and a resume re-picks it.
+    /// Returns an error when a cadence save failed — the batch should report
+    /// it and keep merging.
+    pub fn record(&self, stem: &str, success: bool, was_interrupted: bool) -> Result<()> {
+        let snapshot = {
+            let mut state = self.state.lock().unwrap();
+            if !was_interrupted {
+                if success {
+                    state.mark_completed(stem);
+                } else {
+                    state.mark_failed(stem);
+                }
+            }
+            let count = self.outcomes.fetch_add(1, Ordering::Relaxed) + 1;
+            if count.is_multiple_of(self.save_interval) {
+                Some((state.clone(), self.seq.fetch_add(1, Ordering::Relaxed) + 1))
+            } else {
+                None
+            }
+        }; // state lock dropped before file I/O so workers are never blocked
+        match snapshot {
+            Some((s, seq)) => self.save_snapshot(&s, seq),
+            None => Ok(()),
+        }
+    }
+
+    /// Flush the final state when the batch ends.
+    pub fn flush(&self) -> Result<()> {
+        let state = self.state.lock().unwrap();
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        self.save_snapshot(&state, seq)
+    }
+
+    fn save_snapshot(&self, state: &MergeState, seq: usize) -> Result<()> {
+        // Serialize writers and drop snapshots a newer one already superseded.
+        let mut last = self.save_lock.lock().unwrap();
+        if seq <= *last {
+            return Ok(());
+        }
+        state.save(&self.source)?;
+        *last = seq;
+        Ok(())
+    }
 }
 
 impl MergeState {
@@ -35,7 +119,6 @@ impl MergeState {
             output_dir: output.to_string_lossy().to_string(),
             completed: HashSet::new(),
             failed: HashSet::new(),
-            pending: HashSet::new(),
         }
     }
 
@@ -54,43 +137,38 @@ impl MergeState {
         let expected = source.to_string_lossy().to_string();
         if state.source_dir != expected {
             anyhow::bail!(
-                "Resume state source_dir mismatch: state has '{}', loaded from '{}'",
-                state.source_dir,
-                expected
+                "{}",
+                tf("state_source_mismatch", &[&state.source_dir, &expected])
             );
         }
         Ok(Some(state))
     }
 
+    /// Atomic save: write a sibling temp file, then rename over the target.
+    /// Readers never observe a torn file, and interrupted writes leave the
+    /// previous state intact.
     pub fn save(&self, source: &Path) -> Result<()> {
         let path = Self::state_file_path(source);
+        let tmp = path.with_extension("json.tmp");
         let content =
             serde_json::to_string_pretty(self).context(t("failed_serialize_state").into_owned())?;
-        fs::write(&path, content).context(t("failed_write_state").into_owned())?;
+        fs::write(&tmp, content).context(t("failed_write_state").into_owned())?;
+        fs::rename(&tmp, &path).context(t("failed_write_state").into_owned())?;
         Ok(())
     }
 
     pub fn mark_completed(&mut self, stem: &str) {
-        self.pending.remove(stem);
+        self.failed.remove(stem);
         self.completed.insert(stem.to_string());
     }
 
     pub fn mark_failed(&mut self, stem: &str) {
-        self.pending.remove(stem);
+        self.completed.remove(stem);
         self.failed.insert(stem.to_string());
     }
 
     pub fn is_completed(&self, stem: &str) -> bool {
         self.completed.contains(stem)
-    }
-
-    pub fn add_pending(&mut self, stem: &str) {
-        if !self.pending.contains(stem)
-            && !self.completed.contains(stem)
-            && !self.failed.contains(stem)
-        {
-            self.pending.insert(stem.to_string());
-        }
     }
 
     pub fn clear(source: &Path) -> Result<()> {
@@ -112,25 +190,24 @@ mod tests {
         let state = MergeState::new(Path::new("/source"), Path::new("/output"));
         assert!(state.completed.is_empty());
         assert!(state.failed.is_empty());
-        assert!(state.pending.is_empty());
     }
 
     #[test]
     fn test_state_save_load() {
         let dir = tempdir().unwrap();
         let mut state = MergeState::new(dir.path(), dir.path());
-        state.add_pending("test");
         state.mark_completed("test");
 
         state.save(dir.path()).unwrap();
         let loaded = MergeState::load(dir.path()).unwrap().unwrap();
 
         assert!(loaded.completed.contains("test"));
-        assert!(loaded.pending.is_empty());
     }
 
     #[test]
     fn test_state_load_old_vec_format() {
+        // Pre-refactor files carry "format" and "pending" keys: serde must
+        // ignore the unknown ones and still load the sets.
         let dir = tempdir().unwrap();
         // Escape backslashes so Windows temp paths embed validly in the JSON string.
         let dir_str = dir.path().to_string_lossy().replace('\\', "\\\\");
@@ -150,7 +227,16 @@ mod tests {
         let loaded = MergeState::load(dir.path()).unwrap().unwrap();
         assert!(loaded.completed.contains("video1"));
         assert!(loaded.completed.contains("video2"));
-        assert!(loaded.pending.contains("video3"));
+    }
+
+    #[test]
+    fn test_save_is_atomic_no_temp_leftover() {
+        let dir = tempdir().unwrap();
+        let state = MergeState::new(dir.path(), dir.path());
+        state.save(dir.path()).unwrap();
+        // The tmp sibling must be renamed away, not left behind.
+        let tmp = MergeState::state_file_path(dir.path()).with_extension("json.tmp");
+        assert!(!tmp.exists(), "temp file should be renamed over the target");
     }
 
     #[test]
@@ -164,26 +250,9 @@ mod tests {
     #[test]
     fn test_mark_failed() {
         let mut state = MergeState::new(Path::new("."), Path::new("."));
-        state.add_pending("video1");
         state.mark_failed("video1");
         assert!(state.failed.contains("video1"));
-        assert!(!state.pending.contains("video1"));
-    }
-
-    #[test]
-    fn test_add_pending_no_duplicates() {
-        let mut state = MergeState::new(Path::new("."), Path::new("."));
-        state.add_pending("video1");
-        state.add_pending("video1");
-        assert_eq!(state.pending.len(), 1);
-    }
-
-    #[test]
-    fn test_add_pending_not_in_completed() {
-        let mut state = MergeState::new(Path::new("."), Path::new("."));
-        state.completed.insert("video1".to_string());
-        state.add_pending("video1");
-        assert!(!state.pending.contains("video1"));
+        assert!(!state.completed.contains("video1"));
     }
 
     #[test]
@@ -253,69 +322,30 @@ mod tests {
             "Loading state with mismatched source_dir should error"
         );
         let err_msg = result.unwrap_err().to_string();
+        // Locale-independent: the message quotes both directories in any language.
         assert!(
-            err_msg.contains("source") || err_msg.contains("dir") || err_msg.contains("mismatch"),
-            "Error should mention source directory mismatch, got: {err_msg}"
+            err_msg.contains(&state.source_dir),
+            "Error should quote the recorded source dir, got: {err_msg}"
         );
     }
 
     #[test]
-    fn test_merge_state_mark_completed_moves_from_pending() {
+    fn test_mark_completed_clears_prior_failure() {
+        // A retried merge that now succeeds must not stay listed as failed.
         let mut state = MergeState::new(Path::new("."), Path::new("."));
-        state.add_pending("video1");
-        state.add_pending("video2");
-        assert!(state.pending.contains("video1"));
-
-        state.mark_completed("video1");
-
-        assert!(
-            !state.pending.contains("video1"),
-            "video1 should be removed from pending"
-        );
-        assert!(
-            state.completed.contains("video1"),
-            "video1 should be in completed"
-        );
-        assert!(
-            state.pending.contains("video2"),
-            "video2 should still be pending"
-        );
-    }
-
-    #[test]
-    fn test_merge_state_mark_failed_moves_from_pending() {
-        let mut state = MergeState::new(Path::new("."), Path::new("."));
-        state.add_pending("video1");
-        state.add_pending("video2");
-        assert!(state.pending.contains("video1"));
-
         state.mark_failed("video1");
-
-        assert!(
-            !state.pending.contains("video1"),
-            "video1 should be removed from pending"
-        );
-        assert!(
-            state.failed.contains("video1"),
-            "video1 should be in failed"
-        );
-        assert!(
-            state.pending.contains("video2"),
-            "video2 should still be pending"
-        );
+        state.mark_completed("video1");
+        assert!(state.completed.contains("video1"));
+        assert!(!state.failed.contains("video1"));
     }
 
     #[test]
-    fn test_merge_state_add_pending_skips_already_completed() {
+    fn test_mark_failed_clears_prior_completion() {
         let mut state = MergeState::new(Path::new("."), Path::new("."));
-        state.completed.insert("video1".to_string());
-
-        state.add_pending("video1");
-
-        assert!(
-            !state.pending.contains("video1"),
-            "completed items should not be added to pending"
-        );
+        state.mark_completed("video1");
+        state.mark_failed("video1");
+        assert!(state.failed.contains("video1"));
+        assert!(!state.completed.contains("video1"));
     }
 
     #[test]
@@ -323,8 +353,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let output_dir = dir.path().join("output");
         let mut state = MergeState::new(dir.path(), &output_dir);
-        state.add_pending("video1");
-        state.add_pending("video2");
         state.mark_completed("video1");
         state.mark_failed("video2");
 
@@ -341,6 +369,62 @@ mod tests {
         );
         assert!(loaded.completed.contains("video1"));
         assert!(loaded.failed.contains("video2"));
-        assert!(loaded.pending.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tracker_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn tracker_records_at_interval_and_flushes() {
+        let dir = tempdir().unwrap();
+        let tracker = StateTracker::new(MergeState::new(dir.path(), dir.path()), dir.path(), 2);
+
+        // First outcome: below interval, nothing on disk yet.
+        tracker.record("a", true, false).unwrap();
+        assert!(MergeState::load(dir.path()).unwrap().is_none());
+
+        // Second outcome hits the cadence and flushes both.
+        tracker.record("b", false, false).unwrap();
+        let loaded = MergeState::load(dir.path()).unwrap().unwrap();
+        assert!(loaded.is_completed("a"));
+        assert!(loaded.failed.contains("b"));
+
+        // Interrupted outcomes leave no trace; flush persists what exists.
+        tracker.record("c", false, true).unwrap();
+        tracker.flush().unwrap();
+        let loaded = MergeState::load(dir.path()).unwrap().unwrap();
+        assert!(!loaded.is_completed("c"));
+        assert!(!loaded.failed.contains("c"));
+    }
+
+    #[test]
+    fn tracker_is_shared_across_threads() {
+        let dir = tempdir().unwrap();
+        let tracker = std::sync::Arc::new(StateTracker::new(
+            MergeState::new(dir.path(), dir.path()),
+            dir.path(),
+            1,
+        ));
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let tracker = tracker.clone();
+                std::thread::spawn(move || {
+                    tracker.record(&format!("v{i}"), true, false).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        tracker.flush().unwrap();
+
+        let loaded = MergeState::load(dir.path()).unwrap().unwrap();
+        for i in 0..8 {
+            assert!(loaded.is_completed(&format!("v{i}")));
+        }
     }
 }

@@ -220,6 +220,8 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "failed_write_state"), "Failed to write state file"),
     ((Lang::Cn, "failed_remove_state"), "无法删除状态文件"),
     ((Lang::En, "failed_remove_state"), "Failed to remove state file"),
+    ((Lang::Cn, "state_source_mismatch"), "恢复状态的源目录不匹配：状态记录为 '{0}'，加载自 '{1}'"),
+    ((Lang::En, "state_source_mismatch"), "Resume state source_dir mismatch: state has '{0}', loaded from '{1}'"),
     ((Lang::Cn, "merge_failed_exit"), "ffmpeg 退出码 {0}，已重试 {1} 次"),
     ((Lang::En, "merge_failed_exit"), "ffmpeg exited with code {0} after {1} retries"),
     ((Lang::Cn, "merge_failed_io"), "{0}，已重试 {1} 次"),

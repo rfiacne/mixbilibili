@@ -148,19 +148,8 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
         return Ok(None);
     }
 
-    // Initialize state for tracking
-    let mut merge_state =
+    let merge_state =
         existing_state.unwrap_or_else(|| state::MergeState::new(&args.source, &args.output));
-
-    // Add pending items
-    for pair in &pairs_to_process {
-        merge_state.add_pending(&pair.stem);
-    }
-
-    // Save state before starting (in case of interruption)
-    if !args.dry_run {
-        merge_state.save(&args.source)?;
-    }
 
     let ctx = ScanContext {
         pairs: pairs_to_process,
@@ -221,7 +210,7 @@ fn run() -> Result<()> {
         .ok();
 
     // Phase 2: Scan and filter
-    let Some((ctx, mut merge_state)) = scan_and_filter(&args)? else {
+    let Some((ctx, merge_state)) = scan_and_filter(&args)? else {
         return Ok(());
     };
 
@@ -238,8 +227,8 @@ fn run() -> Result<()> {
         std::io::stdin().read_line(&mut input)?;
         let response = input.trim().to_lowercase();
         if response != "y" && response != "yes" {
+            // Cancel leaves an existing resume state untouched: nothing ran.
             println!("{}", t("interactive_cancelled").yellow());
-            state::MergeState::clear(&args.source)?;
             return Ok(());
         }
     }
@@ -267,10 +256,15 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let summary = execute(&args, ctx, &mut merge_state, format, &cancel)?;
+    // Phase 3: merge, tracking outcomes for resume
+    let tracker = state::StateTracker::new(merge_state, &args.source, STATE_SAVE_INTERVAL);
+    let summary = execute(&args, ctx, format, &cancel, &tracker)?;
 
-    // Phase 4: Update state and report
-    finalize(&args, merge_state, &summary)?;
+    // Phase 4: Update state and report. On interrupt the flushed state is
+    // exactly what --resume needs, so leave it alone.
+    if !cancel.is_cancelled() {
+        finalize(&args, &summary)?;
+    }
 
     summary.print_report(args.quiet);
 
@@ -348,9 +342,9 @@ const STATE_SAVE_INTERVAL: usize = 5;
 fn execute(
     args: &Args,
     ctx: ScanContext,
-    merge_state: &mut state::MergeState,
     format: cli::OutputFormat,
     cancel: &merger::Cancel,
+    tracker: &state::StateTracker,
 ) -> Result<merger::MergeSummary> {
     if !args.quiet {
         if let Some(msg) = ctx.format_time_estimate() {
@@ -368,12 +362,7 @@ fn execute(
 
     let mut final_summary = merger::MergeSummary::default();
 
-    // Run all pairs in one parallel batch with periodic state saves
-    let state_mutex = std::sync::Arc::new(std::sync::Mutex::new(merge_state));
-    let completed_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let save_interval = STATE_SAVE_INTERVAL;
-    let source = args.source.clone();
-
+    // Run all pairs in one parallel batch; the tracker saves periodically
     let results: Vec<merger::MergeResult> = ctx
         .pairs
         .par_iter()
@@ -390,29 +379,8 @@ fn execute(
                 cancel,
             );
 
-            // Update state and periodically save
-            let snapshot = {
-                let mut state = state_mutex.lock().unwrap();
-                if !result.was_interrupted {
-                    if result.success {
-                        state.mark_completed(&pair.stem);
-                    } else {
-                        state.mark_failed(&pair.stem);
-                    }
-                }
-                let count = completed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                if count.is_multiple_of(save_interval) {
-                    Some(state.clone())
-                } else {
-                    None
-                }
-            }; // lock dropped here
-
-            // Save outside the lock so parallel workers aren't blocked by file I/O
-            if let Some(s) = snapshot {
-                if let Err(e) = s.save(&source) {
-                    eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
-                }
+            if let Err(e) = tracker.record(&pair.stem, result.success, result.was_interrupted) {
+                eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
             }
 
             result
@@ -420,11 +388,8 @@ fn execute(
         .collect();
 
     // Final state save
-    {
-        let state = state_mutex.lock().unwrap();
-        if let Err(e) = state.save(&source) {
-            eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
-        }
+    if let Err(e) = tracker.flush() {
+        eprintln!("{}", tf("failed_save_state", &[&e.to_string()]));
     }
 
     // Finish progress bar
@@ -503,25 +468,11 @@ fn execute(
     Ok(final_summary)
 }
 
-/// Finalize: update state based on results, clear on full success or save otherwise.
-fn finalize(
-    args: &Args,
-    mut merge_state: state::MergeState,
-    summary: &merger::MergeSummary,
-) -> Result<()> {
-    if args.dry_run {
-        return Ok(());
-    }
-
-    // Mark all failures (interrupted items are already excluded from summary.failures)
-    for (name, _error) in &summary.failures {
-        merge_state.mark_failed(name);
-    }
-
+/// Finalize: drop the resume state once everything merged; a partial run
+/// leaves the state execute() already flushed to disk.
+fn finalize(args: &Args, summary: &merger::MergeSummary) -> Result<()> {
     if summary.all_success() {
         state::MergeState::clear(&args.source)?;
-    } else {
-        merge_state.save(&args.source)?;
     }
     Ok(())
 }
@@ -620,7 +571,7 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_finalize_does_not_create_dummy_filepair() {
+    fn test_finalize_keeps_state_on_partial_failure() {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
@@ -629,11 +580,8 @@ mod integration_tests {
         std::fs::create_dir(&source).unwrap();
         std::fs::create_dir(&output).unwrap();
 
+        // Simulate execute() having flushed state for video1/video2.
         let mut state = state::MergeState::new(&source, &output);
-        state.add_pending("video1");
-        state.add_pending("video2");
-        state.add_pending("video3");
-        // Simulate execute() having already processed video1 and video2
         state.mark_completed("video1");
         state.mark_failed("video2");
         state.save(&source).unwrap();
@@ -655,7 +603,6 @@ mod integration_tests {
             once: None,
         };
 
-        // video3 remains pending (never processed, e.g. interrupted)
         let summary = merger::MergeSummary {
             success_count: 1,
             failed_count: 1,
@@ -667,25 +614,54 @@ mod integration_tests {
             failures: vec![("video2".to_string(), "mock error".to_string())],
         };
 
-        finalize(&args, state.clone(), &summary).unwrap();
+        finalize(&args, &summary).unwrap();
 
-        // all_success() is false (1 failure), so state file is saved
+        // Partial failure: state file survives with execute()'s bookkeeping.
         let loaded = state::MergeState::load(&source)
             .unwrap()
             .expect("state should be saved");
+        assert!(loaded.is_completed("video1"));
+        assert!(loaded.failed.contains("video2"));
+    }
 
-        // video1 was completed by execute()
-        assert!(loaded.is_completed("video1"), "video1 should be completed");
-        // video2 was failed by execute()
-        assert!(
-            loaded.failed.contains("video2"),
-            "video2 should be in failed"
-        );
-        // video3 should NOT be completed — it was never actually merged
-        assert!(
-            !loaded.is_completed("video3"),
-            "finalize should not mark unprocessed pending items as completed"
-        );
+    #[test]
+    fn test_finalize_clears_state_on_full_success() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let output = dir.path().join("output");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&output).unwrap();
+
+        let args = cli::Args {
+            source: source.clone(),
+            output: output.clone(),
+            recursive: false,
+            format: cli::OutputFormat::Mkv,
+            jobs: 1,
+            sdel: false,
+            dry_run: false,
+            interactive: false,
+            resume: false,
+            progress: false,
+            quiet: true,
+            verbose: false,
+            retry: 0,
+            once: None,
+        };
+
+        state::MergeState::new(&source, &output)
+            .save(&source)
+            .unwrap();
+
+        let summary = merger::MergeSummary {
+            success_count: 2,
+            ..Default::default()
+        };
+        finalize(&args, &summary).unwrap();
+
+        assert!(state::MergeState::load(&source).unwrap().is_none());
     }
 
     #[test]
