@@ -7,16 +7,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FilePair {
     pub video: PathBuf,
     pub audio: PathBuf,
     pub stem: String,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct ScanStats {
-    pub pairs: usize,
     pub skipped: usize,
     pub orphaned: usize,
 }
@@ -25,12 +24,7 @@ pub struct ScanStats {
 pub struct ScanResult {
     pub pairs: Vec<FilePair>,
     pub stats: ScanStats,
-    #[allow(dead_code)]
     pub estimated_duration: Duration,
-}
-
-fn is_downloading(stem: &str, aria2_files: &HashSet<String>) -> bool {
-    aria2_files.contains(stem)
 }
 
 fn collect_files(
@@ -97,7 +91,7 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
             continue;
         }
 
-        if is_downloading(stem, &aria2_files) {
+        if aria2_files.contains(stem) {
             stats.skipped += 1;
             continue;
         }
@@ -108,7 +102,6 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
                 audio: audio.clone(),
                 stem: stem.clone(),
             });
-            stats.pairs += 1;
         } else {
             stats.orphaned += 1;
         }
@@ -127,53 +120,6 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_file_pair_debug() {
-        let pair = FilePair {
-            video: PathBuf::from("video.mp4"),
-            audio: PathBuf::from("video.m4a"),
-            stem: "video".to_string(),
-        };
-        let debug_str = format!("{:?}", pair);
-        assert!(debug_str.contains("video"));
-    }
-
-    #[test]
-    fn test_scan_stats_default() {
-        let stats = ScanStats::default();
-        assert_eq!(stats.pairs, 0);
-        assert_eq!(stats.skipped, 0);
-        assert_eq!(stats.orphaned, 0);
-    }
-
-    #[test]
-    fn test_is_downloading_with_bare_stem() {
-        let mut aria2_files = HashSet::new();
-        aria2_files.insert("foo".to_string());
-        assert!(is_downloading("foo", &aria2_files));
-    }
-
-    #[test]
-    fn test_is_downloading_with_suffixed_stem() {
-        // After normalization in collect_files, aria2_files stores bare stems
-        let mut aria2_files = HashSet::new();
-        aria2_files.insert("foo".to_string()); // was "foo.mp4" before normalization
-        assert!(is_downloading("foo", &aria2_files));
-    }
-
-    #[test]
-    fn test_is_downloading_no_match() {
-        let mut aria2_files = HashSet::new();
-        aria2_files.insert("bar".to_string());
-        aria2_files.insert("baz.mp4".to_string());
-        assert!(!is_downloading("foo", &aria2_files));
-    }
-}
-
-#[cfg(test)]
 mod scan_tests {
     use super::*;
     use std::fs::File;
@@ -184,7 +130,6 @@ mod scan_tests {
         let dir = tempdir().unwrap();
         let result = scan_directory(dir.path(), false).unwrap();
         assert_eq!(result.pairs.len(), 0);
-        assert_eq!(result.stats.pairs, 0);
     }
 
     #[test]
@@ -203,273 +148,103 @@ mod scan_tests {
         assert!(result.is_err());
     }
 
+    fn pair_paths(path: &Path, stem: &str) {
+        File::create(path.join(format!("{stem}.mp4"))).unwrap();
+        File::create(path.join(format!("{stem}.m4a"))).unwrap();
+    }
+
     #[test]
-    fn test_scan_with_valid_pairs() {
+    fn test_scan_matches_pairs() {
         let dir = tempdir().unwrap();
         let path = dir.path();
 
-        File::create(path.join("video1.mp4")).unwrap();
-        File::create(path.join("video1.m4a")).unwrap();
-        File::create(path.join("video2.mp4")).unwrap();
-        File::create(path.join("video2.m4a")).unwrap();
+        pair_paths(path, "my_video");
+        pair_paths(path, "second");
 
         let result = scan_directory(path, false).unwrap();
-        assert_eq!(result.pairs.len(), 2);
-        assert_eq!(result.stats.pairs, 2);
+        assert_eq!(result.pairs.len(), 2, "should find both matching pairs");
         assert_eq!(result.stats.skipped, 0);
         assert_eq!(result.stats.orphaned, 0);
+        let first = result.pairs.iter().find(|p| p.stem == "my_video").unwrap();
+        assert!(first.video.ends_with("my_video.mp4"));
+        assert!(first.audio.ends_with("my_video.m4a"));
+    }
+
+    // Any .aria2 sentinel (bare stem or file-suffix) marks the pair as busy.
+    #[test]
+    fn test_scan_skips_aria2_downloading_variants() {
+        for sentinel in ["busy", "busy.mp4", "busy.m4a"] {
+            let dir = tempdir().unwrap();
+            let path = dir.path();
+            pair_paths(path, "busy");
+            pair_paths(path, "complete");
+            File::create(path.join(format!("{sentinel}.aria2"))).unwrap();
+
+            let result = scan_directory(path, false).unwrap();
+            assert_eq!(result.pairs.len(), 1, "only the busy pair is blocked");
+            assert_eq!(result.pairs[0].stem, "complete");
+            assert_eq!(
+                result.stats.skipped, 1,
+                "{sentinel}.aria2 must count skipped"
+            );
+        }
     }
 
     #[test]
-    fn test_scan_skips_aria2_files_stem() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
+    fn test_scan_counts_orphaned_either_ext() {
+        for ext in ["mp4", "m4a"] {
+            let dir = tempdir().unwrap();
+            File::create(dir.path().join(format!("lonely.{ext}"))).unwrap();
 
-        File::create(path.join("video1.mp4")).unwrap();
-        File::create(path.join("video1.m4a")).unwrap();
-        File::create(path.join("video1.aria2")).unwrap();
-
-        File::create(path.join("video2.mp4")).unwrap();
-        File::create(path.join("video2.m4a")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        assert_eq!(result.pairs.len(), 1);
-        assert_eq!(result.stats.skipped, 1);
+            let result = scan_directory(dir.path(), false).unwrap();
+            assert_eq!(result.pairs.len(), 0, "half pair has no match");
+            assert_eq!(result.stats.orphaned, 1, "lonely.{ext} counts as orphaned");
+        }
     }
 
     #[test]
-    fn test_scan_skips_aria2_files_mp4_suffix() {
+    fn test_scan_recursive_scans_subdirs_only_when_asked() {
         let dir = tempdir().unwrap();
         let path = dir.path();
 
-        File::create(path.join("video1.mp4")).unwrap();
-        File::create(path.join("video1.m4a")).unwrap();
-        File::create(path.join("video1.mp4.aria2")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        assert_eq!(result.pairs.len(), 0);
-        assert_eq!(result.stats.skipped, 1);
-    }
-
-    #[test]
-    fn test_scan_skips_aria2_files_m4a_suffix() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        File::create(path.join("video1.mp4")).unwrap();
-        File::create(path.join("video1.m4a")).unwrap();
-        File::create(path.join("video1.m4a.aria2")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        assert_eq!(result.pairs.len(), 0);
-        assert_eq!(result.stats.skipped, 1);
-    }
-
-    #[test]
-    fn test_scan_counts_orphaned_mp4() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        File::create(path.join("video1.mp4")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        assert_eq!(result.pairs.len(), 0);
-        assert_eq!(result.stats.orphaned, 1);
-    }
-
-    #[test]
-    fn test_scan_counts_orphaned_m4a() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        File::create(path.join("video1.m4a")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        assert_eq!(result.pairs.len(), 0);
-        assert_eq!(result.stats.orphaned, 1);
-    }
-
-    #[test]
-    fn test_scan_ignores_subdirectories_when_not_recursive() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        let subdir = path.join("subdir");
-        fs::create_dir(&subdir).unwrap();
-        File::create(subdir.join("video.mp4")).unwrap();
-        File::create(subdir.join("video.m4a")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        assert_eq!(result.pairs.len(), 0);
-    }
-
-    #[test]
-    fn test_scan_finds_pairs_in_subdirectories_when_recursive() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        let subdir = path.join("subdir");
-        fs::create_dir(&subdir).unwrap();
-        File::create(subdir.join("video.mp4")).unwrap();
-        File::create(subdir.join("video.m4a")).unwrap();
-
-        let result = scan_directory(path, true).unwrap();
-        assert_eq!(result.pairs.len(), 1);
-        assert_eq!(result.stats.pairs, 1);
-    }
-
-    #[test]
-    fn test_scan_recursive_nested_subdirectories() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        let subdir1 = path.join("season1");
-        let subdir2 = path.join("season2");
-        fs::create_dir(&subdir1).unwrap();
-        fs::create_dir(&subdir2).unwrap();
-
-        File::create(subdir1.join("ep01.mp4")).unwrap();
-        File::create(subdir1.join("ep01.m4a")).unwrap();
-        File::create(subdir2.join("ep02.mp4")).unwrap();
-        File::create(subdir2.join("ep02.m4a")).unwrap();
-
-        let result = scan_directory(path, true).unwrap();
-        assert_eq!(result.pairs.len(), 2);
-    }
-
-    #[test]
-    fn test_scan_directory_matches_mp4_with_m4a() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        File::create(path.join("my_video.mp4")).unwrap();
-        File::create(path.join("my_video.m4a")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        assert_eq!(result.pairs.len(), 1, "should find one matching pair");
-        assert_eq!(result.pairs[0].stem, "my_video");
-        assert!(result.pairs[0].video.ends_with("my_video.mp4"));
-        assert!(result.pairs[0].audio.ends_with("my_video.m4a"));
-        assert_eq!(result.stats.pairs, 1);
-        assert_eq!(result.stats.orphaned, 0);
-    }
-
-    #[test]
-    fn test_scan_directory_orphaned_video_only() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        File::create(path.join("lonely_video.mp4")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        assert_eq!(result.pairs.len(), 0, "no pairs without matching audio");
-        assert_eq!(
-            result.stats.orphaned, 1,
-            "video-only should count as orphaned"
-        );
-    }
-
-    #[test]
-    fn test_scan_directory_skips_aria2_downloading() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        // This pair has an active .aria2 download — should be skipped
-        File::create(path.join("downloading.mp4")).unwrap();
-        File::create(path.join("downloading.m4a")).unwrap();
-        File::create(path.join("downloading.aria2")).unwrap();
-
-        // This pair is complete — should be found
-        File::create(path.join("complete.mp4")).unwrap();
-        File::create(path.join("complete.m4a")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        assert_eq!(
-            result.pairs.len(),
-            1,
-            "only non-downloading pair should be found"
-        );
-        assert_eq!(result.pairs[0].stem, "complete");
-        assert_eq!(
-            result.stats.skipped, 1,
-            "downloading pair should be skipped"
-        );
-        assert_eq!(result.stats.pairs, 1);
-    }
-
-    #[test]
-    fn test_scan_directory_recursive_finds_subdirs() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        // Top-level pair
-        File::create(path.join("top.mp4")).unwrap();
-        File::create(path.join("top.m4a")).unwrap();
-
-        // Nested pair
+        pair_paths(path, "top");
         let sub = path.join("nested");
         fs::create_dir(&sub).unwrap();
-        File::create(sub.join("deep.mp4")).unwrap();
-        File::create(sub.join("deep.m4a")).unwrap();
+        pair_paths(&sub, "deep");
 
-        // Non-recursive: only top-level pair
-        let result_flat = scan_directory(path, false).unwrap();
-        assert_eq!(
-            result_flat.pairs.len(),
-            1,
-            "non-recursive should find only top-level"
-        );
+        let flat = scan_directory(path, false).unwrap();
+        assert_eq!(flat.pairs.len(), 1, "non-recursive sees only top level");
+        assert_eq!(flat.stats.orphaned, 0, "subdir files must be invisible");
 
-        // Recursive: both pairs
-        let result_recursive = scan_directory(path, true).unwrap();
-        assert_eq!(
-            result_recursive.pairs.len(),
-            2,
-            "recursive should find pairs in subdirs"
-        );
-        let stems: Vec<&str> = result_recursive
-            .pairs
-            .iter()
-            .map(|p| p.stem.as_str())
-            .collect();
+        let recursive = scan_directory(path, true).unwrap();
+        assert_eq!(recursive.pairs.len(), 2, "recursive finds subdir pairs");
+        let stems: Vec<&str> = recursive.pairs.iter().map(|p| p.stem.as_str()).collect();
         assert!(stems.contains(&"top"));
         assert!(stems.contains(&"deep"));
     }
 
+    // Estimated duration scales with file size at a fixed 10 MB/s heuristic.
     #[test]
-    fn test_scan_includes_estimated_duration() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        File::create(path.join("video1.mp4")).unwrap();
-        File::create(path.join("video1.m4a")).unwrap();
-        File::create(path.join("video2.mp4")).unwrap();
-        File::create(path.join("video2.m4a")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        // Empty files → 0 duration
-        assert_eq!(result.estimated_duration.as_secs(), 0);
-    }
-
-    #[test]
-    fn test_scan_estimated_duration_with_data() {
+    fn test_scan_estimated_duration_scales_with_size() {
         use std::io::Write;
 
         let dir = tempdir().unwrap();
         let path = dir.path();
 
-        // Create ~10 MB video file
-        let mut video1 = File::create(path.join("video1.mp4")).unwrap();
-        video1.write_all(&vec![0u8; 10 * 1024 * 1024]).unwrap();
-        File::create(path.join("video1.m4a")).unwrap();
+        // Empty pair: zero duration.
+        pair_paths(path, "video1");
 
-        // Create ~20 MB video file
-        let mut video2 = File::create(path.join("video2.mp4")).unwrap();
-        video2.write_all(&vec![0u8; 20 * 1024 * 1024]).unwrap();
+        // ~10 MB video → 1s, plus a second pair at ~20 MB → 2s. Total 3s.
         File::create(path.join("video2.m4a")).unwrap();
+        for (name, mb) in [("video2.mp4", 10), ("video3.mp4", 20)] {
+            let mut f = File::create(path.join(name)).unwrap();
+            f.write_all(&vec![0u8; mb * 1024 * 1024]).unwrap();
+        }
+        File::create(path.join("video3.m4a")).unwrap();
 
         let result = scan_directory(path, false).unwrap();
-        // 10 MB / 10 MB/s = 1s, 20 MB / 10 MB/s = 2s, total = 3s
+        assert_eq!(result.pairs.len(), 3);
+        // video1 contributes 0 (empty files), video2 1s, video3 2s.
         assert_eq!(result.estimated_duration.as_secs(), 3);
     }
 }

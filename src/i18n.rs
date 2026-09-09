@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -122,8 +121,6 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::Cn, "failed_files"), "失败的文件："),
     ((Lang::En, "failed_files"), "Failed files:"),
     // Retry / markers
-    ((Lang::Cn, "retry_marker"), "重试 {0} {1}"),
-    ((Lang::En, "retry_marker"), "retry {0} {1}"),
     ((Lang::Cn, "verbose_retry"), "正在重试 {0}（第 {1} 次）"),
     ((Lang::En, "verbose_retry"), "Retrying {0} (attempt {1})"),
     // Symbols
@@ -265,16 +262,13 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "once_missing_audio"), "Audio file not found: {0}"),
 ];
 
-static TRANSLATION_MAP: OnceLock<HashMap<TranslationKey, &'static str>> = OnceLock::new();
-
-fn translation_map() -> &'static HashMap<TranslationKey, &'static str> {
-    TRANSLATION_MAP.get_or_init(|| TRANSLATIONS.iter().map(|&(k, v)| (k, v)).collect())
-}
-
 fn translate(lang: Lang, key: &str) -> Cow<'static, str> {
-    translation_map()
-        .get(&(lang, key))
-        .map(|s| Cow::Borrowed(*s))
+    // Linear scan over ~130 entries at print time: cheaper than a HashMap
+    // the process would build once and barely save on.
+    TRANSLATIONS
+        .iter()
+        .find(|&&((entry_lang, entry_key), _)| entry_lang == lang && entry_key == key)
+        .map(|&(_, text)| Cow::Borrowed(text))
         .unwrap_or_else(|| Cow::Owned(key.to_string()))
 }
 
@@ -356,11 +350,10 @@ mod tests {
     }
 
     #[test]
-    fn test_translation_map_completeness() {
-        let map = translation_map();
-        assert!(!map.is_empty());
-        assert!(map.contains_key(&(Lang::Cn, "error_prefix")));
-        assert!(map.contains_key(&(Lang::En, "error_prefix")));
+    fn test_translation_table_completeness() {
+        assert!(!TRANSLATIONS.is_empty());
+        assert_eq!(t_for(Lang::Cn, "error_prefix"), "错误：");
+        assert_eq!(t_for(Lang::En, "error_prefix"), "Error:");
     }
 
     #[test]

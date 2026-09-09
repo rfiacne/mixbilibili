@@ -78,9 +78,7 @@ fn init() -> Result<Args> {
         return Err(AppError::FfmpegNotFound.into());
     }
 
-    if !args.output.exists() {
-        std::fs::create_dir_all(&args.output).context(t("failed_create_output").into_owned())?;
-    }
+    std::fs::create_dir_all(&args.output).context(t("failed_create_output").into_owned())?;
 
     Ok(args)
 }
@@ -128,16 +126,15 @@ fn scan_and_filter(args: &Args) -> Result<Option<(scanner::ScanResult, state::Me
         return Ok(None);
     }
 
-    let merge_state =
-        existing_state.unwrap_or_else(|| state::MergeState::new(&args.source, &args.output));
+    let merge_state = existing_state.unwrap_or_else(|| state::MergeState::new(&args.source));
 
     Ok(Some((scan_result, merge_state)))
 }
 
-/// Print preview of pairs to be processed, including header and time estimate.
-fn print_preview_pairs(scan: &scanner::ScanResult, format: &cli::OutputFormat, header: &str) {
+/// Print preview of pairs to be processed, header included.
+fn print_preview_pairs(pairs: &[scanner::FilePair], format: &cli::OutputFormat, header: &str) {
     println!("{}", header.cyan().bold());
-    for pair in &scan.pairs {
+    for pair in pairs {
         println!(
             "  {} + {} -> {}.{}",
             pair.video.display(),
@@ -145,9 +142,6 @@ fn print_preview_pairs(scan: &scanner::ScanResult, format: &cli::OutputFormat, h
             pair.stem,
             format.extension()
         );
-    }
-    if let Some(msg) = format_time_estimate(scan) {
-        println!("{}", msg);
     }
 }
 
@@ -197,7 +191,10 @@ fn run() -> Result<()> {
 
     // Phase 2.5: Interactive preview + confirmation
     if args.interactive {
-        print_preview_pairs(&scan, &args.format, &t("interactive_preview_header"));
+        print_preview_pairs(&scan.pairs, &args.format, &t("interactive_preview_header"));
+        if let Some(msg) = format_time_estimate(&scan) {
+            println!("{}", msg);
+        }
         if args.sdel {
             println!("{}", t("dry_run_sdel_header").yellow().bold());
         }
@@ -217,7 +214,10 @@ fn run() -> Result<()> {
     // Phase 3: Dry-run preview or execute merges
     if args.dry_run {
         if !args.quiet {
-            print_preview_pairs(&scan, &args.format, &t("dry_run_header"));
+            print_preview_pairs(&scan.pairs, &args.format, &t("dry_run_header"));
+            if let Some(msg) = format_time_estimate(&scan) {
+                println!("{}", msg);
+            }
             if args.sdel {
                 println!("\n{}", t("dry_run_sdel_header").yellow().bold());
                 for pair in &scan.pairs {
@@ -295,13 +295,10 @@ fn run_once(
     };
 
     if args.dry_run {
-        println!("{}", t("dry_run_header").cyan().bold());
-        println!(
-            "  {} + {} -> {}.{}",
-            pair.video.display(),
-            pair.audio.display(),
-            pair.stem,
-            opts.format.extension()
+        print_preview_pairs(
+            std::slice::from_ref(&pair),
+            &opts.format,
+            &t("dry_run_header"),
         );
         if args.sdel {
             println!("{}", t("dry_run_sdel_header").yellow().bold());
@@ -368,10 +365,6 @@ fn execute(
 fn render_report(summary: &merger::MergeSummary, quiet: bool) {
     use merger::MergeSummary;
 
-    fn line(text: String) {
-        println!("{text}");
-    }
-
     if quiet {
         let total = summary.success_count + summary.failed_count;
         let key = if summary.failed_count > 0 {
@@ -379,14 +372,17 @@ fn render_report(summary: &merger::MergeSummary, quiet: bool) {
         } else {
             "merged_summary_ok"
         };
-        line(tf(
-            key,
-            &[
-                &summary.success_count.to_string(),
-                &total.to_string(),
-                &summary.failed_count.to_string(),
-            ],
-        ));
+        println!(
+            "{}",
+            tf(
+                key,
+                &[
+                    &summary.success_count.to_string(),
+                    &total.to_string(),
+                    &summary.failed_count.to_string(),
+                ],
+            )
+        );
         return;
     }
 
@@ -401,9 +397,9 @@ fn render_report(summary: &merger::MergeSummary, quiet: bool) {
         merge_count: _,
     } = summary;
 
-    line(t("separator").bright_black().to_string());
-    line(t("merge_report").cyan().bold().to_string());
-    line(t("separator").bright_black().to_string());
+    println!("{}", t("separator").bright_black());
+    println!("{}", t("merge_report").cyan().bold());
+    println!("{}", t("separator").bright_black());
 
     let success_str = format!(
         "{} {}",
@@ -425,61 +421,57 @@ fn render_report(summary: &merger::MergeSummary, quiet: bool) {
             tf("failed_fmt", &[&failed_count.to_string()])
         )
     };
-    line(format!("  {success_str}    {fail_str}"));
+    println!("  {success_str}    {fail_str}");
 
     if *skipped_count > 0 {
-        line(format!(
+        println!(
             "  {} {}",
             tf("skipped_fmt", &[&skipped_count.to_string()]),
             "(aria2)".bright_black()
-        ));
+        );
     }
     if *orphaned_count > 0 {
-        line(format!(
+        println!(
             "  {} {}",
             tf("orphaned_fmt", &[&orphaned_count.to_string()]),
             "(orphan)".bright_black()
-        ));
+        );
     }
 
     if summary.merge_count > 0 {
-        line(format!(
+        println!(
             "  {}: {}",
             t("duration").bright_black(),
             progress::format_duration(*total_duration)
-        ));
+        );
         if let Some(avg) = summary.avg_duration() {
-            line(format!(
+            println!(
                 "  {}: {}",
                 t("avg").bright_black(),
                 progress::format_duration(avg)
-            ));
+            );
         }
         if let Some(tp) = summary.throughput() {
-            line(format!(
-                "  {}: {:.2} pairs/sec",
-                t("throughput").bright_black(),
-                tp
-            ));
+            println!("  {}: {:.2} pairs/sec", t("throughput").bright_black(), tp);
         }
     }
 
     if *deletion_failures > 0 {
-        line(format!(
+        println!(
             "  {} {}",
             tf("deletion_failures", &[&deletion_failures.to_string()]),
             "(warn)".yellow()
-        ));
+        );
     }
 
-    line(t("separator").bright_black().to_string());
+    println!("{}", t("separator").bright_black());
 
     if !failures.is_empty() {
-        line(format!("\n{}", t("failed_files").red().bold()));
+        println!("\n{}", t("failed_files").red().bold());
         for (name, error) in failures {
-            line(format!("  {} {}: {}", t("cross").red(), name, error));
+            println!("  {} {}: {}", t("cross").red(), name, error);
         }
-        line(String::new());
+        println!();
     }
 }
 
@@ -495,19 +487,6 @@ fn finalize(args: &Args, summary: &merger::MergeSummary) -> Result<()> {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-
-    #[test]
-    fn test_exit_codes_constants() {
-        assert_eq!(exit_codes::GENERAL_ERROR, 1);
-        assert_eq!(exit_codes::FFMPEG_NOT_FOUND, 2);
-        assert_eq!(exit_codes::MERGE_FAILED, 3);
-    }
-
-    #[test]
-    fn test_state_save_interval_constant() {
-        // Ensure reasonable batch size for incremental saves
-        const _: () = assert!(STATE_SAVE_INTERVAL >= 1 && STATE_SAVE_INTERVAL <= 20);
-    }
 
     #[test]
     fn test_cancel_token_default() {
@@ -596,27 +575,14 @@ mod integration_tests {
         std::fs::create_dir(&output).unwrap();
 
         // Simulate execute() having flushed state for video1/video2.
-        let mut state = state::MergeState::new(&source, &output);
+        let mut state = state::MergeState::new(&source);
         state.mark_completed("video1");
         state.mark_failed("video2");
         state.save(&source).unwrap();
 
-        let args = cli::Args {
-            source: source.clone(),
-            output: output.clone(),
-            recursive: false,
-            format: cli::OutputFormat::Mkv,
-            jobs: 1,
-            sdel: false,
-            dry_run: false,
-            interactive: false,
-            resume: false,
-            progress: false,
-            quiet: true,
-            verbose: false,
-            retry: 0,
-            mode: cli::Mode::Batch,
-        };
+        let mut args = cli::make_args();
+        args.source = source.clone();
+        args.output = output.clone();
 
         let summary = merger::MergeSummary {
             success_count: 1,
@@ -649,26 +615,11 @@ mod integration_tests {
         std::fs::create_dir(&source).unwrap();
         std::fs::create_dir(&output).unwrap();
 
-        let args = cli::Args {
-            source: source.clone(),
-            output: output.clone(),
-            recursive: false,
-            format: cli::OutputFormat::Mkv,
-            jobs: 1,
-            sdel: false,
-            dry_run: false,
-            interactive: false,
-            resume: false,
-            progress: false,
-            quiet: true,
-            verbose: false,
-            retry: 0,
-            mode: cli::Mode::Batch,
-        };
+        let mut args = cli::make_args();
+        args.source = source.clone();
+        args.output = output.clone();
 
-        state::MergeState::new(&source, &output)
-            .save(&source)
-            .unwrap();
+        state::MergeState::new(&source).save(&source).unwrap();
 
         let summary = merger::MergeSummary {
             success_count: 2,
@@ -677,29 +628,5 @@ mod integration_tests {
         finalize(&args, &summary).unwrap();
 
         assert!(state::MergeState::load(&source).unwrap().is_none());
-    }
-
-    #[test]
-    fn test_resume_with_wrong_source_dir_warns() {
-        use tempfile::tempdir;
-
-        let dir_a = tempdir().unwrap();
-        let dir_b = tempdir().unwrap();
-
-        // Save state pointing to dir_a
-        let state = state::MergeState::new(dir_a.path(), dir_a.path());
-        state.save(dir_a.path()).unwrap();
-
-        // Copy state file to dir_b (simulating user moved files or used wrong path)
-        let content =
-            std::fs::read_to_string(state::MergeState::state_file_path(dir_a.path())).unwrap();
-        std::fs::write(state::MergeState::state_file_path(dir_b.path()), &content).unwrap();
-
-        // Loading from dir_b should detect the source_dir mismatch
-        let result = state::MergeState::load(dir_b.path());
-        assert!(
-            result.is_err(),
-            "should error when source_dir doesn't match load path"
-        );
     }
 }

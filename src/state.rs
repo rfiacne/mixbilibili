@@ -24,13 +24,12 @@ fn vec_as_set<'de, D: Deserializer<'de>>(d: D) -> Result<HashSet<String>, D::Err
 /// The `pending` set that older files carry is deliberately gone: its content
 /// is exactly `scan result − completed`, so a resume run recomputes it by
 /// rescanning. `#[serde(default)]` keeps pre-existing files loadable (old
-/// files carry `pending`, which serde ignores; rolled-back binaries meet the
-/// fields they know).
+/// files carry `pending` and `output_dir`, which serde ignores; rolled-back
+/// binaries meet the fields they know).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MergeState {
     pub source_dir: String,
-    pub output_dir: String,
     #[serde(serialize_with = "set_as_vec", deserialize_with = "vec_as_set")]
     pub completed: HashSet<String>,
     #[serde(serialize_with = "set_as_vec", deserialize_with = "vec_as_set")]
@@ -113,10 +112,9 @@ impl StateTracker {
 }
 
 impl MergeState {
-    pub fn new(source: &Path, output: &Path) -> Self {
+    pub fn new(source: &Path) -> Self {
         Self {
             source_dir: source.to_string_lossy().to_string(),
-            output_dir: output.to_string_lossy().to_string(),
             completed: HashSet::new(),
             failed: HashSet::new(),
         }
@@ -187,21 +185,9 @@ mod tests {
 
     #[test]
     fn test_state_creation() {
-        let state = MergeState::new(Path::new("/source"), Path::new("/output"));
+        let state = MergeState::new(Path::new("/source"));
         assert!(state.completed.is_empty());
         assert!(state.failed.is_empty());
-    }
-
-    #[test]
-    fn test_state_save_load() {
-        let dir = tempdir().unwrap();
-        let mut state = MergeState::new(dir.path(), dir.path());
-        state.mark_completed("test");
-
-        state.save(dir.path()).unwrap();
-        let loaded = MergeState::load(dir.path()).unwrap().unwrap();
-
-        assert!(loaded.completed.contains("test"));
     }
 
     #[test]
@@ -232,7 +218,7 @@ mod tests {
     #[test]
     fn test_save_is_atomic_no_temp_leftover() {
         let dir = tempdir().unwrap();
-        let state = MergeState::new(dir.path(), dir.path());
+        let state = MergeState::new(dir.path());
         state.save(dir.path()).unwrap();
         // The tmp sibling must be renamed away, not left behind.
         let tmp = MergeState::state_file_path(dir.path()).with_extension("json.tmp");
@@ -240,31 +226,18 @@ mod tests {
     }
 
     #[test]
-    fn test_is_completed() {
-        let mut state = MergeState::new(Path::new("."), Path::new("."));
-        state.completed.insert("video1".to_string());
-        assert!(state.is_completed("video1"));
-        assert!(!state.is_completed("video2"));
-    }
-
-    #[test]
-    fn test_mark_failed() {
-        let mut state = MergeState::new(Path::new("."), Path::new("."));
-        state.mark_failed("video1");
-        assert!(state.failed.contains("video1"));
-        assert!(!state.completed.contains("video1"));
-    }
-
-    #[test]
     fn test_clear_state() {
         let dir = tempdir().unwrap();
-        let state = MergeState::new(dir.path(), dir.path());
+        let state = MergeState::new(dir.path());
         state.save(dir.path()).unwrap();
 
         assert!(MergeState::state_file_path(dir.path()).exists());
 
         MergeState::clear(dir.path()).unwrap();
         assert!(!MergeState::state_file_path(dir.path()).exists());
+
+        // Clearing again with no file on disk must not error.
+        MergeState::clear(dir.path()).unwrap();
     }
 
     #[test]
@@ -275,40 +248,12 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_state_clear_removes_file() {
-        let dir = tempdir().unwrap();
-        let state = MergeState::new(dir.path(), dir.path());
-        state.save(dir.path()).unwrap();
-        let path = MergeState::state_file_path(dir.path());
-        assert!(path.exists(), "state file should exist after save");
-        MergeState::clear(dir.path()).unwrap();
-        assert!(!path.exists(), "state file should be gone after clear");
-    }
-
-    #[test]
-    fn test_merge_state_clear_no_error_when_no_file() {
-        let dir = tempdir().unwrap();
-        let path = MergeState::state_file_path(dir.path());
-        assert!(!path.exists());
-        let result = MergeState::clear(dir.path());
-        assert!(result.is_ok(), "clear should not error when no file exists");
-    }
-
-    #[test]
-    fn test_merge_state_is_completed_false_for_unknown() {
-        let state = MergeState::new(Path::new("."), Path::new("."));
-        assert!(!state.is_completed("nonexistent_video"));
-        assert!(!state.is_completed(""));
-        assert!(!state.is_completed("anything"));
-    }
-
-    #[test]
     fn test_merge_state_resume_validates_source_dir() {
         let dir_a = tempdir().unwrap();
         let dir_b = tempdir().unwrap();
 
         // Create state with source_dir pointing to dir_a
-        let state = MergeState::new(dir_a.path(), dir_a.path());
+        let state = MergeState::new(dir_a.path());
         state.save(dir_a.path()).unwrap();
 
         // Copy state file to dir_b so load() finds it there
@@ -332,7 +277,7 @@ mod tests {
     #[test]
     fn test_mark_completed_clears_prior_failure() {
         // A retried merge that now succeeds must not stay listed as failed.
-        let mut state = MergeState::new(Path::new("."), Path::new("."));
+        let mut state = MergeState::new(Path::new("."));
         state.mark_failed("video1");
         state.mark_completed("video1");
         assert!(state.completed.contains("video1"));
@@ -341,7 +286,7 @@ mod tests {
 
     #[test]
     fn test_mark_failed_clears_prior_completion() {
-        let mut state = MergeState::new(Path::new("."), Path::new("."));
+        let mut state = MergeState::new(Path::new("."));
         state.mark_completed("video1");
         state.mark_failed("video1");
         assert!(state.failed.contains("video1"));
@@ -351,8 +296,7 @@ mod tests {
     #[test]
     fn test_merge_state_save_and_load_roundtrip() {
         let dir = tempdir().unwrap();
-        let output_dir = dir.path().join("output");
-        let mut state = MergeState::new(dir.path(), &output_dir);
+        let mut state = MergeState::new(dir.path());
         state.mark_completed("video1");
         state.mark_failed("video2");
 
@@ -363,10 +307,6 @@ mod tests {
             .expect("state should load");
 
         assert_eq!(loaded.source_dir, dir.path().to_string_lossy());
-        assert_eq!(
-            loaded.output_dir,
-            dir.path().join("output").to_string_lossy()
-        );
         assert!(loaded.completed.contains("video1"));
         assert!(loaded.failed.contains("video2"));
     }
@@ -380,7 +320,7 @@ mod tracker_tests {
     #[test]
     fn tracker_records_at_interval_and_flushes() {
         let dir = tempdir().unwrap();
-        let tracker = StateTracker::new(MergeState::new(dir.path(), dir.path()), dir.path(), 2);
+        let tracker = StateTracker::new(MergeState::new(dir.path()), dir.path(), 2);
 
         // First outcome: below interval, nothing on disk yet.
         tracker.record("a", true, false).unwrap();
@@ -404,7 +344,7 @@ mod tracker_tests {
     fn tracker_is_shared_across_threads() {
         let dir = tempdir().unwrap();
         let tracker = std::sync::Arc::new(StateTracker::new(
-            MergeState::new(dir.path(), dir.path()),
+            MergeState::new(dir.path()),
             dir.path(),
             1,
         ));

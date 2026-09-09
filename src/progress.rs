@@ -1,27 +1,16 @@
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::IsTerminal;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// Internal rendering strategy.
 enum Renderer {
-    Bar(Arc<ProgressBar>),
-    Text {
-        total: usize,
-        completed: Arc<std::sync::atomic::AtomicUsize>,
-    },
+    /// ProgressBar is internally Arc'd: Clone shares state, Send + Sync.
+    Bar(ProgressBar),
+    Text,
 }
 
 impl Renderer {
-    /// Create a text-mode renderer.
-    fn new_text(total: usize) -> Self {
-        Self::Text {
-            total,
-            completed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }
-    }
-
     fn record(
         &self,
         stem: &str,
@@ -30,66 +19,39 @@ impl Renderer {
         error: Option<&str>,
         retry: Option<usize>,
     ) {
+        let line = format_record(stem, success, duration, error, retry);
         match self {
             Self::Bar(bar) => {
-                let msg = format_record(stem, success, duration, error, retry, false);
-                bar.set_message(msg);
+                // indicatif strips ANSI when measuring width, so the bar
+                // stays aligned with colored messages.
+                bar.set_message(line);
                 bar.inc(1);
             }
-            Self::Text { .. } => {
-                let line = format_record(stem, success, duration, error, retry, true);
-                println!("{}", line);
-            }
+            Self::Text => println!("{}", line),
         }
     }
 
     fn finish(&self) {
-        match self {
-            Self::Bar(bar) => {
-                bar.finish();
-            }
-            Self::Text { total, completed } => {
-                completed.store(*total, std::sync::atomic::Ordering::Relaxed);
-            }
+        if let Self::Bar(bar) = self {
+            bar.finish();
         }
     }
 }
 
-/// Format a record line. If `colored`, adds ANSI color codes.
+/// Format a record line.
 fn format_record(
     stem: &str,
     success: bool,
     duration: Duration,
     error: Option<&str>,
     retry: Option<usize>,
-    colored: bool,
 ) -> String {
     let time = format_duration(duration);
     match (success, retry, error) {
-        (true, _, _) => {
-            let sym = if colored {
-                "✓".green()
-            } else {
-                "✓".normal()
-            };
-            format!("{} {} ({})", sym, stem, time)
-        }
-        (false, Some(r), _) => {
-            let sym = if colored {
-                "↻".yellow()
-            } else {
-                "↻".normal()
-            };
-            format!("{} {} retry {} ({})", sym, stem, r, time)
-        }
-        (false, None, Some(e)) => {
-            let sym = if colored { "✗".red() } else { "✗".normal() };
-            format!("{} {}: {}", sym, stem, e)
-        }
-        (false, None, None) => {
-            let sym = if colored { "✗".red() } else { "✗".normal() };
-            format!("{} {} ({})", sym, stem, time)
-        }
+        (true, _, _) => format!("{} {} ({})", "✓".green(), stem, time),
+        (false, Some(r), _) => format!("{} {} retry {} ({})", "↻".yellow(), stem, r, time),
+        (false, None, Some(e)) => format!("{} {}: {}", "✗".red(), stem, e),
+        (false, None, None) => format!("{} {} ({})", "✗".red(), stem, time),
     }
 }
 
@@ -115,58 +77,30 @@ impl MergeProgress {
         if std::io::stderr().is_terminal() {
             let bar = ProgressBar::new(total as u64);
             bar.enable_steady_tick(Duration::from_millis(100));
+            // {per_sec} and {eta} are indicatif's built-in keys — no custom
+            // formatters needed.
             bar.set_style(
                 ProgressStyle::with_template(
                     "[{elapsed_precise}] {bar:30.cyan/blue} {pos}/{len} ({per_sec}) ETA: {eta}",
                 )
                 .unwrap()
-                .progress_chars("=>-")
-                .with_key(
-                    "per_sec",
-                    |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
-                        let elapsed = state.elapsed().as_secs_f64();
-                        if elapsed > 0.0 {
-                            let _ = write!(w, "{:.1} files/s", state.pos() as f64 / elapsed);
-                        } else {
-                            let _ = write!(w, "0.0 files/s");
-                        }
-                    },
-                )
-                .with_key(
-                    "eta",
-                    |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
-                        let pos = state.pos() as usize;
-                        let total = state.len().unwrap_or(0) as usize;
-                        let elapsed = state.elapsed().as_secs_f64();
-                        if pos > 0 && elapsed > 0.0 && total > pos {
-                            let rate = pos as f64 / elapsed;
-                            let remaining = (total - pos) as f64 / rate;
-                            let _ = write!(
-                                w,
-                                "{}",
-                                format_duration(Duration::from_secs_f64(remaining))
-                            );
-                        } else {
-                            let _ = write!(w, "--");
-                        }
-                    },
-                ),
+                .progress_chars("=>-"),
             );
             Self {
-                inner: Renderer::Bar(Arc::new(bar)),
+                inner: Renderer::Bar(bar),
             }
         } else {
             Self {
-                inner: Renderer::new_text(total),
+                inner: Renderer::Text,
             }
         }
     }
 
-    /// Create a text-mode renderer explicitly (for testing or forced text output).
-    #[allow(dead_code)]
-    pub fn new_text(total: usize) -> Self {
+    /// Create a text-mode renderer explicitly (for testing).
+    #[cfg(test)]
+    pub fn new_text() -> Self {
         Self {
-            inner: Renderer::new_text(total),
+            inner: Renderer::Text,
         }
     }
 
@@ -190,21 +124,7 @@ impl MergeProgress {
     /// Test helper: returns true if using text mode.
     #[cfg(test)]
     pub fn inner_is_text(&self) -> bool {
-        matches!(self.inner, Renderer::Text { .. })
-    }
-}
-
-impl Clone for MergeProgress {
-    fn clone(&self) -> Self {
-        Self {
-            inner: match &self.inner {
-                Renderer::Bar(bar) => Renderer::Bar(bar.clone()),
-                Renderer::Text { total, completed } => Renderer::Text {
-                    total: *total,
-                    completed: Arc::clone(completed),
-                },
-            },
-        }
+        matches!(self.inner, Renderer::Text)
     }
 }
 
@@ -220,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_progress_text_new_and_record() {
-        let progress = MergeProgress::new_text(10);
+        let progress = MergeProgress::new_text();
         progress.record("test", true, Duration::from_millis(100), None, None);
         assert!(progress.inner_is_text());
         progress.finish();
@@ -228,24 +148,15 @@ mod tests {
 
     #[test]
     fn test_progress_record_success() {
-        let progress = MergeProgress::new_text(10);
+        let progress = MergeProgress::new_text();
         progress.record("test", true, Duration::from_millis(500), None, None);
         progress.finish();
     }
 
     #[test]
     fn test_progress_record_failure() {
-        let progress = MergeProgress::new_text(10);
+        let progress = MergeProgress::new_text();
         progress.record("test", false, Duration::from_secs(2), Some("error"), None);
         progress.finish();
-    }
-
-    #[test]
-    fn test_progress_clone() {
-        let progress = MergeProgress::new_text(10);
-        let cloned = progress.clone();
-        cloned.record("test", true, Duration::from_millis(100), None, None);
-        progress.finish();
-        cloned.finish();
     }
 }

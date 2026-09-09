@@ -37,33 +37,23 @@ impl Cancel {
     }
 }
 
-/// Extension trait for `std::process::Child` that adds timeout-aware waiting.
-trait ChildExt {
-    fn wait_with_timeout(
-        &mut self,
-        timeout: Duration,
-        poll_interval: Duration,
-    ) -> io::Result<Option<ExitStatus>>;
-}
-
-impl ChildExt for Child {
-    fn wait_with_timeout(
-        &mut self,
-        timeout: Duration,
-        poll_interval: Duration,
-    ) -> io::Result<Option<ExitStatus>> {
-        let start = std::time::Instant::now();
-        loop {
-            match self.try_wait() {
-                Ok(Some(status)) => return Ok(Some(status)),
-                Ok(None) => {
-                    if start.elapsed() >= timeout {
-                        return Ok(None);
-                    }
-                    std::thread::sleep(poll_interval);
+/// Timeout-aware `Child::wait`: returns `Ok(None)` when the deadline passes.
+fn wait_with_timeout(
+    child: &mut Child,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> io::Result<Option<ExitStatus>> {
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    return Ok(None);
                 }
-                Err(e) => return Err(e),
+                std::thread::sleep(poll_interval);
             }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -127,7 +117,6 @@ impl MergeSummary {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Merge one pair. Pure fact producer: it never prints, never touches
 /// progress — the caller displays the returned result.
 pub fn merge_pair(
@@ -261,7 +250,7 @@ pub fn announce(result: &MergeResult, progress: Option<&MergeProgress>, verbose:
 fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Result<ExitStatus> {
     let mut child = cmd.spawn().context(t("failed_to_spawn"))?;
 
-    match child.wait_with_timeout(timeout, POLL_INTERVAL) {
+    match wait_with_timeout(&mut child, timeout, POLL_INTERVAL) {
         Ok(Some(status)) => Ok(status),
         Ok(None) => {
             let _ = child.kill();
@@ -398,7 +387,6 @@ pub(crate) fn delete_source_files(pair: &FilePair) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
 
     #[test]
     fn test_merge_summary_default() {
@@ -408,15 +396,6 @@ mod tests {
         assert_eq!(summary.merge_count, 0);
         assert!(summary.total_duration.is_zero());
         assert!(summary.all_success());
-    }
-
-    #[test]
-    fn test_merge_summary_all_success_false_with_failures() {
-        let summary = MergeSummary {
-            failed_count: 1,
-            ..Default::default()
-        };
-        assert!(!summary.all_success());
     }
 
     #[test]
@@ -436,28 +415,10 @@ mod tests {
     }
 
     #[test]
-    fn test_timing_empty_summary() {
-        let summary = MergeSummary::default();
-        assert!(summary.total_duration.is_zero());
-        assert!(summary.avg_duration().is_none());
-        assert!(summary.throughput().is_none());
-    }
-
-    #[test]
     fn test_merge_summary_avg_duration_none_when_zero_merges() {
         let summary = MergeSummary::default();
         assert_eq!(summary.merge_count, 0);
         assert!(summary.avg_duration().is_none());
-    }
-
-    #[test]
-    fn test_merge_summary_avg_duration_some_when_merges_exist() {
-        let summary = MergeSummary {
-            total_duration: Duration::from_secs(6),
-            merge_count: 3,
-            ..Default::default()
-        };
-        assert_eq!(summary.avg_duration(), Some(Duration::from_secs(2)));
     }
 
     #[test]
@@ -471,17 +432,6 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_summary_throughput_computes_rate() {
-        let summary = MergeSummary {
-            merge_count: 10,
-            total_duration: Duration::from_secs(2),
-            ..Default::default()
-        };
-        let tp = summary.throughput().unwrap();
-        assert!((tp - 5.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
     fn test_format_duration() {
         use crate::progress::format_duration;
         assert!(format_duration(Duration::from_millis(50)).contains("ms"));
@@ -492,31 +442,6 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_summary_accumulate() {
-        let mut summary = MergeSummary::default();
-        summary.success_count += 3;
-        summary.failed_count += 1;
-        summary.total_duration += Duration::from_secs(10);
-        summary.merge_count += 4;
-
-        assert_eq!(summary.success_count, 3);
-        assert_eq!(summary.failed_count, 1);
-        assert_eq!(summary.merge_count, 4);
-        assert_eq!(summary.total_duration, Duration::from_secs(10));
-        assert_eq!(summary.avg_duration(), Some(Duration::from_millis(2500)));
-    }
-
-    #[test]
-    fn test_merge_summary_all_success_when_no_failures() {
-        let summary = MergeSummary {
-            success_count: 5,
-            failed_count: 0,
-            ..Default::default()
-        };
-        assert!(summary.all_success());
-    }
-
-    #[test]
     fn test_merge_summary_all_success_false_when_failures() {
         let summary = MergeSummary {
             success_count: 3,
@@ -524,45 +449,6 @@ mod tests {
             ..Default::default()
         };
         assert!(!summary.all_success());
-    }
-
-    #[test]
-    fn test_delete_source_files_both_succeed() {
-        let dir = tempdir().unwrap();
-        let video_path = dir.path().join("test_v.mp4");
-        let audio_path = dir.path().join("test_a.m4a");
-        std::fs::write(&video_path, b"fake video").unwrap();
-        std::fs::write(&audio_path, b"fake audio").unwrap();
-
-        let pair = FilePair {
-            video: video_path.clone(),
-            audio: audio_path.clone(),
-            stem: "test".to_string(),
-        };
-
-        let result = delete_source_files(&pair);
-        assert!(result.is_ok());
-        assert!(!video_path.exists());
-        assert!(!audio_path.exists());
-    }
-
-    #[test]
-    fn test_delete_source_files_video_missing() {
-        let dir = tempdir().unwrap();
-        let video_path = dir.path().join("missing.mp4");
-        let audio_path = dir.path().join("exists.m4a");
-        std::fs::write(&audio_path, b"fake audio").unwrap();
-
-        let pair = FilePair {
-            video: video_path,
-            audio: audio_path,
-            stem: "missing".to_string(),
-        };
-
-        let result = delete_source_files(&pair);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("video"), "Error should mention video: {}", err);
     }
 }
 
@@ -663,7 +549,7 @@ mod exec_tests {
     }
 
     fn tracker_for(dir: &Path) -> StateTracker {
-        StateTracker::new(MergeState::new(dir, dir), dir, 5)
+        StateTracker::new(MergeState::new(dir), dir, 5)
     }
 
     fn opts_for<'a>(dir: &'a Path) -> MergeOptions<'a> {
@@ -681,7 +567,6 @@ mod exec_tests {
         let summary = run_batch(
             &[],
             &ScanStats {
-                pairs: 0,
                 skipped: 5,
                 orphaned: 3,
             },
@@ -768,21 +653,6 @@ mod exec_tests {
 
         assert!(pair.video.exists(), "cancelled pair must keep its video");
         assert!(pair.audio.exists(), "cancelled pair must keep its audio");
-    }
-
-    #[test]
-    fn test_deletion_failures_counted_correctly() {
-        let summary = MergeSummary {
-            success_count: 5,
-            failed_count: 0,
-            skipped_count: 0,
-            orphaned_count: 0,
-            failures: vec![],
-            deletion_failures: 2,
-            total_duration: Duration::ZERO,
-            merge_count: 0,
-        };
-        assert_eq!(summary.deletion_failures, 2);
     }
 }
 
@@ -911,7 +781,7 @@ mod timeout_tests {
             .spawn()
             .expect("ping command should be available");
 
-        let result = child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL);
+        let result = wait_with_timeout(&mut child, Duration::from_secs(5), POLL_INTERVAL);
         assert!(result.is_ok());
         let status = result.unwrap();
         assert!(status.is_some());
@@ -931,7 +801,7 @@ mod timeout_tests {
             .spawn()
             .expect("ping command should be available");
 
-        let result = child.wait_with_timeout(Duration::from_millis(50), POLL_INTERVAL);
+        let result = wait_with_timeout(&mut child, Duration::from_millis(50), POLL_INTERVAL);
         assert!(result.is_ok());
         // Should return None indicating timeout
         let status = result.unwrap();
@@ -958,7 +828,7 @@ mod timeout_tests {
         // Wait a bit for it to finish
         std::thread::sleep(Duration::from_millis(150));
 
-        let result = child.wait_with_timeout(Duration::from_secs(5), POLL_INTERVAL);
+        let result = wait_with_timeout(&mut child, Duration::from_secs(5), POLL_INTERVAL);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }

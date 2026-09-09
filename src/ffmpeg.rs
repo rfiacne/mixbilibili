@@ -8,130 +8,41 @@ pub fn is_ffmpeg_available() -> bool {
     which::which("ffmpeg").is_ok()
 }
 
-#[cfg(test)]
-pub fn ffmpeg_path() -> Option<std::path::PathBuf> {
-    which::which("ffmpeg").ok()
+/// First available (name, install_command) package manager candidate for the
+/// current OS, per `std::env::consts::OS`.
+fn first_package_manager() -> Option<(&'static str, &'static str)> {
+    let candidates: &[(&str, &str)] = match std::env::consts::OS {
+        "windows" => &[
+            ("winget", "winget install ffmpeg"),
+            ("choco", "choco install ffmpeg -y"),
+        ],
+        "macos" => &[("brew", "brew install ffmpeg")],
+        "linux" => &[
+            ("apt", "sudo apt update && sudo apt install -y ffmpeg"),
+            ("dnf", "sudo dnf install -y ffmpeg"),
+            ("yum", "sudo yum install -y ffmpeg"),
+            ("pacman", "sudo pacman -S --noconfirm ffmpeg"),
+            ("zypper", "sudo zypper install -y ffmpeg"),
+        ],
+        _ => &[],
+    };
+    candidates
+        .iter()
+        .copied()
+        .find(|(name, _)| which::which(name).is_ok())
 }
 
-// Os variants are matched in get_install_command/get_manual_instructions
-// but only one variant is constructed at compile time via detect_os()
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum Os {
-    Windows,
-    MacOS,
-    Linux,
-    Unknown,
-}
-
-pub fn detect_os() -> Os {
-    #[cfg(target_os = "windows")]
-    {
-        Os::Windows
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Os::MacOS
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Os::Linux
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    {
-        Os::Unknown
-    }
-}
-
-/// Package manager candidates per OS: (name, install_command, availability_check).
-fn package_managers(os: Os) -> Vec<(&'static str, &'static str)> {
-    match os {
-        Os::Windows => {
-            let mut pms = Vec::new();
-            if which::which("winget").is_ok() {
-                pms.push(("winget", "winget install ffmpeg"));
-            }
-            if which::which("choco").is_ok() {
-                pms.push(("choco", "choco install ffmpeg -y"));
-            }
-            pms
-        }
-        Os::MacOS => {
-            if which::which("brew").is_ok() {
-                vec![("brew", "brew install ffmpeg")]
-            } else {
-                vec![]
-            }
-        }
-        Os::Linux => {
-            let mut pms = Vec::new();
-            if which::which("apt").is_ok() {
-                pms.push(("apt", "sudo apt update && sudo apt install -y ffmpeg"));
-            }
-            if which::which("dnf").is_ok() {
-                pms.push(("dnf", "sudo dnf install -y ffmpeg"));
-            }
-            if which::which("yum").is_ok() {
-                pms.push(("yum", "sudo yum install -y ffmpeg"));
-            }
-            if which::which("pacman").is_ok() {
-                pms.push(("pacman", "sudo pacman -S --noconfirm ffmpeg"));
-            }
-            if which::which("zypper").is_ok() {
-                pms.push(("zypper", "sudo zypper install -y ffmpeg"));
-            }
-            pms
-        }
-        Os::Unknown => vec![],
-    }
-}
-
-#[allow(dead_code)]
-pub fn get_install_command(os: Os) -> Option<(String, String)> {
-    package_managers(os)
-        .first()
-        .map(|(name, cmd)| (name.to_string(), cmd.to_string()))
-}
-
-pub fn get_manual_instructions(os: Os) -> std::borrow::Cow<'static, str> {
+pub fn get_manual_instructions(os: &str) -> std::borrow::Cow<'static, str> {
     let key = match os {
-        Os::Windows => "manual_instructions_windows",
-        Os::MacOS => "manual_instructions_macos",
-        Os::Linux => "manual_instructions_linux",
-        Os::Unknown => "manual_instructions",
+        "windows" => "manual_instructions_windows",
+        "macos" => "manual_instructions_macos",
+        "linux" => "manual_instructions_linux",
+        _ => "manual_instructions",
     };
     t(key)
 }
 
-pub fn prompt_and_install(os: Os) -> anyhow::Result<bool> {
-    let pms = package_managers(os);
-    if pms.is_empty() {
-        println!("{}", get_manual_instructions(os));
-        return Ok(false);
-    }
-
-    let (pm_name, _) = pms[0];
-    print!("{}", tf("install_ffmpeg_prompt", &[pm_name]));
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    if io::stdin().lock().read_line(&mut input).is_ok() {
-        let input = input.trim().to_lowercase();
-        if input == "y" || input == "yes" {
-            return Ok(run_install(&pms));
-        }
-    }
-
-    println!("{}", get_manual_instructions(os));
-    Ok(false)
-}
-
-fn run_install(pms: &[(&str, &str)]) -> bool {
-    if pms.is_empty() {
-        return false;
-    }
-
-    let (_, cmd) = pms[0];
+fn run_install(cmd: &str) -> bool {
     println!("{}", tf("running_cmd", &[cmd]));
 
     let result = if cfg!(target_os = "windows") {
@@ -173,8 +84,24 @@ pub fn ensure_ffmpeg() -> anyhow::Result<bool> {
         return Ok(true);
     }
 
-    let os = detect_os();
-    prompt_and_install(os)
+    let Some((pm_name, cmd)) = first_package_manager() else {
+        println!("{}", get_manual_instructions(std::env::consts::OS));
+        return Ok(false);
+    };
+
+    print!("{}", tf("install_ffmpeg_prompt", &[pm_name]));
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    if io::stdin().lock().read_line(&mut input).is_ok() {
+        let input = input.trim().to_lowercase();
+        if input == "y" || input == "yes" {
+            return Ok(run_install(cmd));
+        }
+    }
+
+    println!("{}", get_manual_instructions(std::env::consts::OS));
+    Ok(false)
 }
 
 pub fn build_merge_command(
@@ -223,92 +150,31 @@ pub fn estimate_merge_duration(video_path: &Path) -> std::time::Duration {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_ffmpeg_available_does_not_panic() {
-        // This test depends on system state
-        // It should not panic either way
-        let _ = is_ffmpeg_available();
-    }
-
-    #[test]
-    fn test_ffmpeg_path_returns_some_if_available() {
-        // If ffmpeg is installed, should return Some
-        if is_ffmpeg_available() {
-            assert!(ffmpeg_path().is_some());
-        }
-    }
-}
-
-#[cfg(test)]
-mod os_tests {
-    use super::*;
-
-    #[test]
-    fn test_detect_os_returns_valid_value() {
-        let os = detect_os();
-        assert!(matches!(
-            os,
-            Os::Windows | Os::MacOS | Os::Linux | Os::Unknown
-        ));
-    }
-
-    #[test]
-    fn test_os_debug_format() {
-        let os = detect_os();
-        let debug_str = format!("{:?}", os);
-        assert!(!debug_str.is_empty());
-    }
-}
-
-#[cfg(test)]
 mod pm_tests {
     use super::*;
 
     #[test]
     fn test_get_manual_instructions_windows() {
-        let instructions = get_manual_instructions(Os::Windows);
+        let instructions = get_manual_instructions("windows");
         assert!(instructions.contains("winget") || instructions.contains("choco"));
     }
 
     #[test]
     fn test_get_manual_instructions_macos() {
-        let instructions = get_manual_instructions(Os::MacOS);
+        let instructions = get_manual_instructions("macos");
         assert!(instructions.contains("brew") || instructions.contains("MacPorts"));
     }
 
     #[test]
     fn test_get_manual_instructions_linux() {
-        let instructions = get_manual_instructions(Os::Linux);
+        let instructions = get_manual_instructions("linux");
         assert!(instructions.contains("apt") || instructions.contains("snap"));
     }
 
     #[test]
     fn test_get_manual_instructions_unknown() {
-        let instructions = get_manual_instructions(Os::Unknown);
+        let instructions = get_manual_instructions("haiku");
         assert!(instructions.contains("ffmpeg.org"));
-    }
-
-    #[test]
-    fn test_get_install_command_unknown_returns_none() {
-        let result = get_install_command(Os::Unknown);
-        assert!(result.is_none());
-    }
-}
-
-#[cfg(test)]
-mod install_tests {
-    use super::*;
-
-    #[test]
-    fn test_ensure_ffmpeg_returns_true_if_available() {
-        // If ffmpeg is installed, ensure_ffmpeg should return Ok(true) immediately
-        // We can't easily test the prompt flow without mocking stdin
-        if is_ffmpeg_available() {
-            assert!(ensure_ffmpeg().unwrap());
-        }
     }
 }
 
