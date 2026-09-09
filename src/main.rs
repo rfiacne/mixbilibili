@@ -11,7 +11,6 @@ use anyhow::{Context, Result};
 use cli::Args;
 use colored::Colorize;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -189,9 +188,6 @@ fn print_preview_pairs(ctx: &ScanContext, format: &cli::OutputFormat, header: &s
     }
 }
 
-/// Shared flag set by the Ctrl+C handler.
-pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
 fn main() {
     if let Err(e) = run() {
         eprintln!("{} {}", t("error_prefix").red(), translate_error(&e));
@@ -200,9 +196,13 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    // Cancellation signal; the Ctrl+C handler holds its own clone.
+    let cancel = merger::Cancel::new();
+
     // Set up Ctrl+C handler for graceful shutdown
-    ctrlc::set_handler(|| {
-        INTERRUPTED.store(true, Ordering::SeqCst);
+    let cancel_on_signal = cancel.clone();
+    ctrlc::set_handler(move || {
+        cancel_on_signal.cancel();
     })
     .context(t("failed_set_signal").into_owned())?;
 
@@ -211,7 +211,7 @@ fn run() -> Result<()> {
 
     // --once mode: merge a single pair by stem, skip scanning
     if let Some(ref stem) = args.once {
-        return run_once(&args, format, stem);
+        return run_once(&args, format, stem, &cancel);
     }
 
     // Configure rayon's global thread pool once at startup
@@ -267,14 +267,14 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let summary = execute(&args, ctx, &mut merge_state, format)?;
+    let summary = execute(&args, ctx, &mut merge_state, format, &cancel)?;
 
     // Phase 4: Update state and report
     finalize(&args, merge_state, &summary)?;
 
     summary.print_report(args.quiet);
 
-    if INTERRUPTED.load(Ordering::SeqCst) {
+    if cancel.is_cancelled() {
         println!("{}", t("interrupted_cleanup").yellow());
         println!("{}", t("interrupted_resume_hint").cyan());
         Ok(())
@@ -290,7 +290,12 @@ fn run() -> Result<()> {
 
 /// --once mode: merge a single pair identified by stem.
 /// No scanning, no state file, no progress bar — just merge and exit.
-fn run_once(args: &Args, format: cli::OutputFormat, stem: &str) -> Result<()> {
+fn run_once(
+    args: &Args,
+    format: cli::OutputFormat,
+    stem: &str,
+    cancel: &merger::Cancel,
+) -> Result<()> {
     let video_path = args.source.join(format!("{stem}.mp4"));
     let audio_path = args.source.join(format!("{stem}.m4a"));
 
@@ -321,6 +326,7 @@ fn run_once(args: &Args, format: cli::OutputFormat, stem: &str) -> Result<()> {
         None,
         args.verbose,
         args.retry,
+        cancel,
     );
 
     if result.success {
@@ -344,6 +350,7 @@ fn execute(
     ctx: ScanContext,
     merge_state: &mut state::MergeState,
     format: cli::OutputFormat,
+    cancel: &merger::Cancel,
 ) -> Result<merger::MergeSummary> {
     if !args.quiet {
         if let Some(msg) = ctx.format_time_estimate() {
@@ -380,6 +387,7 @@ fn execute(
                 progress.as_ref(),
                 args.verbose,
                 args.retry,
+                cancel,
             );
 
             // Update state and periodically save
@@ -425,7 +433,7 @@ fn execute(
     }
 
     // Cleanup partial output files on interrupt
-    if INTERRUPTED.load(Ordering::SeqCst) {
+    if cancel.is_cancelled() {
         for result in &results {
             if result.was_interrupted {
                 let pair = &ctx.pairs[result.pair_index];
@@ -536,15 +544,17 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_interrupted_flag_default() {
-        assert!(!INTERRUPTED.load(Ordering::SeqCst));
+    fn test_cancel_token_default() {
+        let cancel = merger::Cancel::new();
+        assert!(!cancel.is_cancelled());
     }
 
     #[test]
-    fn test_interrupted_flag_can_be_set() {
-        INTERRUPTED.store(true, Ordering::SeqCst);
-        assert!(INTERRUPTED.load(Ordering::SeqCst));
-        INTERRUPTED.store(false, Ordering::SeqCst); // Reset
+    fn test_cancel_token_is_shared_between_clones() {
+        let cancel = merger::Cancel::new();
+        let handler_clone = cancel.clone();
+        handler_clone.cancel();
+        assert!(cancel.is_cancelled());
     }
 
     #[test]

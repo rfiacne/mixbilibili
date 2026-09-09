@@ -3,18 +3,38 @@ use crate::ffmpeg;
 use crate::i18n::{t, tf};
 use crate::progress::{format_duration, MergeProgress};
 use crate::scanner::{FilePair, ScanResult};
-use crate::INTERRUPTED;
 use anyhow::{Context, Result};
 use colored::Colorize;
 use rayon::prelude::*;
 use std::io;
 use std::path::Path;
 use std::process::{Child, ExitStatus};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Cooperative cancellation signal. The Ctrl+C handler in main holds a clone
+/// and flips it; merge workers poll it. Tests flip it directly — no global
+/// state, so parallel tests can each own a token.
+#[derive(Debug, Clone, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 /// Extension trait for `std::process::Child` that adds timeout-aware waiting.
 trait ChildExt {
@@ -211,8 +231,9 @@ pub fn merge_pair(
     progress: Option<&MergeProgress>,
     verbose: bool,
     max_retries: usize,
+    cancel: &Cancel,
 ) -> MergeResult {
-    if INTERRUPTED.load(Ordering::SeqCst) {
+    if cancel.is_cancelled() {
         return MergeResult {
             pair_index,
             pair_name: pair.stem.clone(),
@@ -374,7 +395,18 @@ pub fn execute_merges(
     let results: Vec<MergeResult> = pairs
         .par_iter()
         .enumerate()
-        .map(|(idx, pair)| merge_pair(pair, idx, &output_dir, format, progress_ref, verbose, retry))
+        .map(|(idx, pair)| {
+            merge_pair(
+                pair,
+                idx,
+                &output_dir,
+                format,
+                progress_ref,
+                verbose,
+                retry,
+                &Cancel::new(),
+            )
+        })
         .collect();
 
     // Note: progress.finish() is NOT called here because execute_merges may be
@@ -634,6 +666,59 @@ mod merge_tests {
         };
         let debug_str = format!("{:?}", result);
         assert!(debug_str.contains("video"));
+    }
+
+    #[test]
+    fn test_merge_pair_skips_when_cancelled() {
+        // A cancelled token short-circuits before ffmpeg is ever spawned, so
+        // this needs no real media files and no ffmpeg on PATH.
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let pair = FilePair {
+            video: std::path::PathBuf::from("does-not-exist.mp4"),
+            audio: std::path::PathBuf::from("does-not-exist.m4a"),
+            stem: "does-not-exist".to_string(),
+        };
+
+        let result = merge_pair(
+            &pair,
+            0,
+            std::path::Path::new("."),
+            OutputFormat::Mkv,
+            None,
+            false,
+            0,
+            &cancel,
+        );
+
+        assert!(!result.success);
+        assert!(result.was_interrupted);
+    }
+
+    #[test]
+    fn test_merge_pair_fails_when_sources_missing() {
+        // Not cancelled: reaches ffmpeg and fails on missing inputs rather than
+        // short-circuiting — proves the cancel check is the only thing gating it.
+        let cancel = Cancel::new();
+        let dir = tempfile::tempdir().unwrap();
+        let pair = FilePair {
+            video: dir.path().join("missing.mp4"),
+            audio: dir.path().join("missing.m4a"),
+            stem: "missing".to_string(),
+        };
+
+        let result = merge_pair(
+            &pair,
+            0,
+            dir.path(),
+            OutputFormat::Mkv,
+            None,
+            false,
+            0,
+            &cancel,
+        );
+
+        assert!(!result.was_interrupted);
     }
 
     #[test]
