@@ -69,12 +69,10 @@ fn translate_error(e: &anyhow::Error) -> String {
 }
 
 /// Initialize the application: parse args, verify ffmpeg, ensure directories.
-fn init() -> Result<(Args, cli::OutputFormat)> {
+fn init() -> Result<Args> {
     let matches = cli::build_cli().get_matches();
     let mut args = cli::parse_args(&matches);
     args.validate()?;
-
-    let format = args.format;
 
     if !ffmpeg::ensure_ffmpeg()? {
         return Err(AppError::FfmpegNotFound.into());
@@ -84,7 +82,7 @@ fn init() -> Result<(Args, cli::OutputFormat)> {
         std::fs::create_dir_all(&args.output).context(t("failed_create_output").into_owned())?;
     }
 
-    Ok((args, format))
+    Ok(args)
 }
 
 /// Render the scan's time estimate, or None when the scan produced nothing
@@ -172,10 +170,10 @@ fn run() -> Result<()> {
     .context(t("failed_set_signal").into_owned())?;
 
     // Phase 1: Initialize
-    let (args, format) = init()?;
+    let args = init()?;
     let opts = merger::MergeOptions {
         output_dir: &args.output,
-        format,
+        format: args.format,
         verbose: args.verbose,
         retry: args.retry,
     };
@@ -199,7 +197,7 @@ fn run() -> Result<()> {
 
     // Phase 2.5: Interactive preview + confirmation
     if args.interactive {
-        print_preview_pairs(&scan, &format, &t("interactive_preview_header"));
+        print_preview_pairs(&scan, &args.format, &t("interactive_preview_header"));
         if args.sdel {
             println!("{}", t("dry_run_sdel_header").yellow().bold());
         }
@@ -219,7 +217,7 @@ fn run() -> Result<()> {
     // Phase 3: Dry-run preview or execute merges
     if args.dry_run {
         if !args.quiet {
-            print_preview_pairs(&scan, &format, &t("dry_run_header"));
+            print_preview_pairs(&scan, &args.format, &t("dry_run_header"));
             if args.sdel {
                 println!("\n{}", t("dry_run_sdel_header").yellow().bold());
                 for pair in &scan.pairs {
