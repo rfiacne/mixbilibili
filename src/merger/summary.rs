@@ -1,5 +1,6 @@
 use crate::i18n::{t, tf};
 use crate::progress::format_duration;
+use std::io::Write;
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -81,127 +82,192 @@ impl MergeSummary {
     }
 
     fn print_full_report(&self) {
-        use crate::ui::{Colors, Symbols};
+        // Many short lines: one buffered, locked writer instead of a syscall each.
+        let symbols = crate::ui::Symbols::new(crate::ui::supports_unicode());
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+        self.write_full_report(&mut out, &symbols);
+        let _ = out.flush();
+    }
 
-        let symbols = Symbols::new(crate::ui::supports_unicode());
-        let width = 40;
+    /// Renders the report box. Split out from [`print_full_report`] so the exact
+    /// layout can be asserted in tests.
+    ///
+    /// Every line is `content_width + 4` columns wide (`border + " " + content +
+    /// " " + border`), so the box closes on all four sides whatever the rows say.
+    fn write_full_report(&self, out: &mut impl Write, symbols: &crate::ui::Symbols) {
+        use crate::ui::{write_padding, Colors};
+        use unicode_width::UnicodeWidthStr;
 
-        let top_border = format!(
-            "{}{}{}",
-            symbols.top_left,
-            symbols.horizontal_line.repeat(width),
-            symbols.top_right
-        );
-        println!("{}", Colors::secondary(&top_border));
+        let title = t("merge_report").into_owned();
 
-        let title = Colors::title(&t("merge_report"));
-        println!(
-            "{} {} {}",
-            Colors::secondary(symbols.vertical_line),
-            title,
-            Colors::secondary(symbols.vertical_line)
-        );
+        // Rows carry both their plain and coloured text: the box width must be
+        // measured from the plain text, since ANSI escapes have zero display
+        // width but would still be counted by a naive width().
+        let mut rows: Vec<ReportLine> = Vec::new();
 
-        let mid_border = format!(
-            "{}{}{}",
-            symbols.top_left,
-            symbols.horizontal_line.repeat(width),
-            symbols.top_right
-        );
-        println!("{}", Colors::secondary(&mid_border));
-
-        let success_str = format!(
-            "{} {}",
-            Colors::success(symbols.success),
-            tf("succeeded_fmt", &[&self.success_count.to_string()])
-        );
-        let fail_str = if self.failed_count > 0 {
-            Colors::failure(&format!(
-                "{} {}",
-                symbols.failure,
-                tf("failed_fmt", &[&self.failed_count.to_string()])
-            ))
-        } else {
-            format!(
-                "{} {}",
-                symbols.failure,
-                tf("failed_fmt", &[&self.failed_count.to_string()])
-            )
-        };
-        println!("  {}    {}", success_str, fail_str);
+        let success_count = self.success_count.to_string();
+        let failed_count = self.failed_count.to_string();
+        let mut stats = ReportLine::default();
+        stats
+            .styled(Style::Success, symbols.success)
+            .text(" ")
+            .text(&tf("succeeded_fmt", &[&success_count]))
+            .text("    ")
+            .styled(Style::Failure, symbols.failure)
+            .text(" ")
+            .text(&tf("failed_fmt", &[&failed_count]));
+        rows.push(stats);
 
         if self.skipped_count > 0 {
-            println!(
-                "  {} {}",
-                tf("skipped_fmt", &[&self.skipped_count.to_string()]),
-                Colors::secondary("(aria2)")
-            );
+            let mut row = ReportLine::default();
+            row.text(&tf("skipped_fmt", &[&self.skipped_count.to_string()]))
+                .text(" ")
+                .styled(Style::Secondary, "(aria2)");
+            rows.push(row);
         }
+
         if self.orphaned_count > 0 {
-            println!(
-                "  {} {}",
-                tf("orphaned_fmt", &[&self.orphaned_count.to_string()]),
-                Colors::secondary("(orphan)")
-            );
+            let mut row = ReportLine::default();
+            row.text(&tf("orphaned_fmt", &[&self.orphaned_count.to_string()]))
+                .text(" ")
+                .styled(Style::Secondary, "(orphan)");
+            rows.push(row);
         }
 
         if self.merge_count > 0 {
-            let total = self.total_duration;
-            println!(
-                "  {}: {}",
-                Colors::secondary(&t("duration")),
-                format_duration(total)
-            );
+            let label = t("duration").into_owned();
+            let mut row = ReportLine::default();
+            row.styled(Style::Secondary, &label)
+                .text(": ")
+                .text(&format_duration(self.total_duration));
+            rows.push(row);
+
             if let Some(avg) = self.avg_duration() {
-                println!(
-                    "  {}: {}",
-                    Colors::secondary(&t("avg")),
-                    format_duration(avg)
-                );
+                let label = t("avg").into_owned();
+                let mut row = ReportLine::default();
+                row.styled(Style::Secondary, &label)
+                    .text(": ")
+                    .text(&format_duration(avg));
+                rows.push(row);
             }
+
             if let Some(tp) = self.throughput() {
-                println!(
-                    "  {}: {:.2} pairs/sec",
-                    Colors::secondary(&t("throughput")),
-                    tp
-                );
+                let label = t("throughput").into_owned();
+                let mut row = ReportLine::default();
+                row.styled(Style::Secondary, &label)
+                    .text(&format!(": {tp:.2} pairs/sec"));
+                rows.push(row);
             }
         }
 
         if self.deletion_failures > 0 {
-            println!(
-                "  {} {}",
-                tf("deletion_failures", &[&self.deletion_failures.to_string()]),
-                Colors::warning("(warn)")
-            );
+            let mut row = ReportLine::default();
+            row.text(&tf(
+                "deletion_failures",
+                &[&self.deletion_failures.to_string()],
+            ))
+            .text(" ")
+            .styled(Style::Warning, "(warn)");
+            rows.push(row);
         }
 
-        let bottom_border = format!(
-            "{}{}{}",
-            symbols.bottom_left,
-            symbols.horizontal_line.repeat(width),
-            symbols.bottom_right
-        );
-        println!("{}", Colors::secondary(&bottom_border));
+        let content_width = rows
+            .iter()
+            .map(|r| r.width())
+            .max()
+            .unwrap_or(0)
+            .max(UnicodeWidthStr::width(title.as_str()));
+
+        let dashes = symbols.horizontal_line.repeat(content_width + 2);
+        let vertical = Colors::secondary(symbols.vertical_line);
+
+        let top = format!("{}{}{}", symbols.top_left, dashes, symbols.top_right);
+        let _ = writeln!(out, "{}", Colors::secondary(&top));
+
+        let _ = write!(out, "{vertical} ");
+        let _ = write!(out, "{}", Colors::title(&title));
+        write_padding(out, content_width - UnicodeWidthStr::width(title.as_str()));
+        let _ = writeln!(out, " {vertical}");
+
+        let mid = format!("{}{}{}", symbols.middle_left, dashes, symbols.middle_right);
+        let _ = writeln!(out, "{}", Colors::secondary(&mid));
+
+        for row in &rows {
+            let _ = write!(out, "{vertical} ");
+            let _ = write!(out, "{}", row.colored);
+            write_padding(out, content_width - row.width());
+            let _ = writeln!(out, " {vertical}");
+        }
+
+        let bottom = format!("{}{}{}", symbols.bottom_left, dashes, symbols.bottom_right);
+        let _ = writeln!(out, "{}", Colors::secondary(&bottom));
 
         if !self.failures.is_empty() {
-            println!("\n{}", Colors::failure(&t("failed_files")));
+            let _ = writeln!(out);
+            let _ = writeln!(out, "{}", Colors::failure(&t("failed_files")));
             for (i, (name, error)) in self.failures.iter().enumerate() {
+                // Connectors come from `Symbols` too, so they follow --ascii.
                 let connector = if i == self.failures.len() - 1 {
-                    "└"
+                    symbols.bottom_left
                 } else {
-                    "├"
+                    symbols.middle_left
                 };
-                println!(
-                    "  {}─ {} {}: {}",
-                    connector,
+                let _ = writeln!(
+                    out,
+                    "  {connector}{} {} {}: {}",
+                    symbols.horizontal_line,
                     Colors::failure(symbols.failure),
                     name,
                     error
                 );
             }
-            println!();
+            let _ = writeln!(out);
         }
+    }
+}
+
+/// Box-drawing style for a report line.
+#[derive(Clone, Copy)]
+enum Style {
+    Success,
+    Failure,
+    Warning,
+    Secondary,
+}
+
+/// A report line in both plain and coloured form.
+#[derive(Default)]
+struct ReportLine {
+    plain: String,
+    colored: String,
+}
+
+impl ReportLine {
+    /// Appends unstyled text.
+    fn text(&mut self, s: &str) -> &mut Self {
+        self.plain.push_str(s);
+        self.colored.push_str(s);
+        self
+    }
+
+    /// Appends `s` rendered in `style` (plain copy kept for measuring).
+    fn styled(&mut self, style: Style, s: &str) -> &mut Self {
+        use crate::ui::Colors;
+        let painted = match style {
+            Style::Success => Colors::success(s).to_string(),
+            Style::Failure => Colors::failure(s).to_string(),
+            Style::Warning => Colors::warning(s).to_string(),
+            Style::Secondary => Colors::secondary(s).to_string(),
+        };
+        self.plain.push_str(s);
+        self.colored.push_str(&painted);
+        self
+    }
+
+    /// Display width of the plain text.
+    fn width(&self) -> usize {
+        unicode_width::UnicodeWidthStr::width(self.plain.as_str())
     }
 }
 
@@ -427,5 +493,139 @@ mod tests {
         summary.failed_count = 2;
         assert_eq!(summary.failures.len(), 2);
         assert!(!summary.all_success());
+    }
+
+    /// Renders with an explicit symbol set: deterministic on every platform,
+    /// and no test mutates process-wide env vars that other tests read.
+    fn render_report_with(summary: &MergeSummary, symbols: &crate::ui::Symbols) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        summary.write_full_report(&mut buf, symbols);
+        String::from_utf8(buf).expect("report output should be UTF-8")
+    }
+
+    fn render_report(summary: &MergeSummary) -> String {
+        render_report_with(summary, &crate::ui::Symbols::new(false))
+    }
+
+    /// Only the box strands, so the trailing failure list is excluded.
+    fn box_lines(out: &str) -> Vec<&str> {
+        out.lines()
+            .filter(|l| l.starts_with(['┌', '│', '├', '└', '+', '|']))
+            .collect()
+    }
+
+    fn width_of(s: &str) -> usize {
+        unicode_width::UnicodeWidthStr::width(s)
+    }
+
+    fn sample_summary() -> MergeSummary {
+        MergeSummary {
+            success_count: 12,
+            failed_count: 3,
+            merge_count: 12,
+            total_duration: Duration::from_secs(5),
+            failures: vec![("a.mp4".into(), "boom".into())],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_report_box_lines_share_one_width() {
+        let out = render_report(&sample_summary());
+        let lines = box_lines(&out);
+        assert!(lines.len() >= 4, "expected a closed box, got:\n{out}");
+
+        // This holds in both symbol modes, so it needs no env override.
+        let widths: Vec<usize> = lines.iter().map(|l| width_of(l)).collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "box lines must share one display width, got {widths:?}:\n{out}"
+        );
+
+        for line in &lines {
+            assert!(
+                line.ends_with(['┐', '│', '┤', '┘', '+', '|']),
+                "line must close the box: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_report_uses_separator_not_a_second_top_border() {
+        // Unicode mode is required to even see this defect: in ASCII mode every
+        // corner is "+", which is exactly why it stayed hidden there.
+        let symbols = crate::ui::Symbols::new(true);
+        let out = render_report_with(&Default::default(), &symbols);
+
+        // The old report drew its mid border with the top-left/right corners, so
+        // the box visually opened twice. Exactly one top border is allowed.
+        let top_borders = out
+            .lines()
+            .filter(|l| l.starts_with(symbols.top_left))
+            .count();
+        assert_eq!(
+            top_borders, 1,
+            "expected exactly one top border, found {top_borders}:\n{out}"
+        );
+        assert!(
+            out.contains(symbols.middle_left) && out.contains(symbols.middle_right),
+            "expected a tee separator inside the box:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_report_failure_connectors_follow_symbol_style() {
+        let summary = MergeSummary {
+            failed_count: 2,
+            failures: vec![
+                ("one.mp4".into(), "e1".into()),
+                ("two.mp4".into(), "e2".into()),
+            ],
+            ..Default::default()
+        };
+        let symbols = crate::ui::Symbols::new(false);
+        let out = render_report_with(&summary, &symbols);
+
+        // Connectors come from `Symbols`, so `--ascii` no longer leaks Unicode
+        // box characters into the failure list.
+        assert!(
+            out.contains(&format!(
+                "  {}{} ",
+                symbols.middle_left, symbols.horizontal_line
+            )),
+            "first failure should use a tee connector:\n{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "  {}{} ",
+                symbols.bottom_left, symbols.horizontal_line
+            )),
+            "last failure should use a corner connector:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_report_box_grows_with_content() {
+        let base = MergeSummary::default();
+        let wide = MergeSummary {
+            success_count: 123_456_789,
+            ..Default::default()
+        };
+        let short_out = render_report(&base);
+        let long_out = render_report(&wide);
+        let short = box_lines(&short_out);
+        let long = box_lines(&long_out);
+
+        let short_width = width_of(short[0]);
+        let long_width = width_of(long[0]);
+
+        // The box used to be pinned at 40 dashes, so wide rows overflowed it.
+        assert!(
+            long_width > short_width,
+            "box must widen for a longer row ({short_width} vs {long_width})"
+        );
+        for line in &long {
+            assert_eq!(width_of(line), long_width, "line overflows the box: {line}");
+        }
     }
 }

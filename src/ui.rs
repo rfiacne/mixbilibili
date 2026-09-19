@@ -7,7 +7,7 @@ use std::io::Write;
 /// The preview aligns columns by *display* width (so CJK names line up), which
 /// rules out `{:width$}`; padding is therefore written explicitly. Doing this
 /// with `" ".repeat()` allocated a String per column per row.
-fn write_padding(out: &mut impl Write, mut width: usize) {
+pub(crate) fn write_padding(out: &mut impl Write, mut width: usize) {
     const SPACES: &[u8] = b"                                                                ";
     while width > 0 {
         let chunk = width.min(SPACES.len());
@@ -15,6 +15,38 @@ fn write_padding(out: &mut impl Write, mut width: usize) {
             return;
         }
         width -= chunk;
+    }
+}
+
+/// Writes a right-aligned, colourised row index without allocating.
+///
+/// `format!("{:>width$}.", i)` plus `Colors::secondary(..)` allocated twice per
+/// row; the digits are formatted into a stack buffer instead.
+fn write_index(out: &mut impl Write, value: usize, width: usize) {
+    let mut buf = [0u8; 20];
+    let mut n = value;
+    let mut pos = buf.len();
+    loop {
+        pos -= 1;
+        buf[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let digits = &buf[pos..];
+    write_padding(out, width.saturating_sub(digits.len()));
+    if let Ok(text) = std::str::from_utf8(digits) {
+        let _ = write!(out, "{}.", Colors::secondary(text));
+    }
+}
+
+/// The file-name component of `path` as a `Cow`, so a valid UTF-8 name is
+/// borrowed instead of copied.
+fn file_name_cow(p: &std::path::Path) -> std::borrow::Cow<'_, str> {
+    match p.file_name() {
+        Some(name) => name.to_string_lossy(),
+        None => std::borrow::Cow::Owned(p.display().to_string()),
     }
 }
 
@@ -52,6 +84,10 @@ pub struct Symbols {
     pub top_right: &'static str,
     pub bottom_left: &'static str,
     pub bottom_right: &'static str,
+    /// Left/right tee, used for the separator inside a box and for list
+    /// connectors so those strands stay ASCII in `--ascii` mode too.
+    pub middle_left: &'static str,
+    pub middle_right: &'static str,
     pub arrow: &'static str,
 }
 
@@ -68,6 +104,8 @@ impl Symbols {
                 top_right: "┐",
                 bottom_left: "└",
                 bottom_right: "┘",
+                middle_left: "├",
+                middle_right: "┤",
                 arrow: "→",
             }
         } else {
@@ -81,6 +119,8 @@ impl Symbols {
                 top_right: "+",
                 bottom_left: "+",
                 bottom_right: "+",
+                middle_left: "+",
+                middle_right: "+",
                 arrow: "->",
             }
         }
@@ -88,31 +128,42 @@ impl Symbols {
 }
 
 /// Semantic color mapping for terminal output.
+///
+/// These return the lazily-rendered `ColoredString` rather than `String`:
+/// `.to_string()` forced a heap copy of every fragment purely so it could be
+/// handed straight to a `write!`, which allocated several times per preview row.
+/// `colored` already emits the plain text when color is disabled (non-TTY), so
+/// behaviour is unchanged.
 pub enum Colors {}
 
 impl Colors {
-    pub fn success(text: &str) -> String {
-        text.green().to_string()
+    pub fn success(text: &str) -> impl std::fmt::Display + '_ {
+        text.green()
     }
 
-    pub fn failure(text: &str) -> String {
-        text.red().to_string()
+    pub fn failure(text: &str) -> impl std::fmt::Display + '_ {
+        text.red()
     }
 
-    pub fn warning(text: &str) -> String {
-        text.yellow().to_string()
+    pub fn warning(text: &str) -> impl std::fmt::Display + '_ {
+        text.yellow()
     }
 
-    pub fn info(text: &str) -> String {
-        text.cyan().to_string()
+    /// Yellow and bold, for a warning used as a heading.
+    pub fn warning_title(text: &str) -> impl std::fmt::Display + '_ {
+        text.yellow().bold()
     }
 
-    pub fn secondary(text: &str) -> String {
-        text.bright_black().to_string()
+    pub fn info(text: &str) -> impl std::fmt::Display + '_ {
+        text.cyan()
     }
 
-    pub fn title(text: &str) -> String {
-        text.cyan().bold().to_string()
+    pub fn secondary(text: &str) -> impl std::fmt::Display + '_ {
+        text.bright_black()
+    }
+
+    pub fn title(text: &str) -> impl std::fmt::Display + '_ {
+        text.cyan().bold()
     }
 }
 
@@ -135,25 +186,54 @@ pub fn print_preview_pairs(
     // Render through one buffered, locked writer. std's stdout is line-buffered,
     // so a `println!` per row cost a write() syscall per row — over 20000 rows
     // that dominated the scan phase. Buffering collapses it to a few writes.
+    let symbols = Symbols::new(supports_unicode());
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
-    write_preview_pairs(&mut out, pairs, extension, header, time_estimate);
+    write_preview_pairs(&mut out, pairs, extension, header, time_estimate, &symbols);
     let _ = out.flush();
+}
+
+/// Prints the source files that a dry run would delete, two lines per pair.
+///
+/// Buffered for the same reason as [`print_preview_pairs`]: this used to be a
+/// `println!` per pair, and std's stdout flushes on every newline, so 20000
+/// pairs cost 40000 write syscalls.
+pub fn print_deletion_preview(pairs: &[FilePair], header: &str) {
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    write_deletion_preview(&mut out, pairs, header);
+    let _ = out.flush();
+}
+
+/// Renders the deletion list into `out`; see [`print_deletion_preview`].
+fn write_deletion_preview(out: &mut impl Write, pairs: &[FilePair], header: &str) {
+    let _ = writeln!(out);
+    let _ = writeln!(out, "{}", Colors::warning_title(header));
+    for pair in pairs {
+        let _ = writeln!(out, "  {} (video)", pair.video.display());
+        let _ = writeln!(out, "  {} (audio)", pair.audio.display());
+    }
 }
 
 /// Renders the preview list into `out`. Split out from
 /// [`print_preview_pairs`] so the exact layout (including CJK column
 /// alignment) can be asserted in tests.
+///
+/// The box is closed on all four sides: every line is exactly
+/// `inner_width + 2` columns wide, where `inner_width` is the dash span between
+/// the corners. The header sits inside the top border, and the box is widened
+/// if the header is wider than the rows.
 fn write_preview_pairs(
     out: &mut impl Write,
     pairs: &[FilePair],
     extension: &str,
     header: &str,
     time_estimate: Option<&str>,
+    symbols: &Symbols,
 ) {
-    let symbols = Symbols::new(supports_unicode());
+    use unicode_width::UnicodeWidthStr;
 
-    // Compute max widths for two-column alignment (video | audio)
+    // Column widths, by *display* width so CJK names line up.
     let max_video_width = pairs
         .iter()
         .map(|p| file_name_width(&p.video))
@@ -164,67 +244,83 @@ fn write_preview_pairs(
         .map(|p| file_name_width(&p.audio))
         .max()
         .unwrap_or(0);
+    let max_stem_width = pairs
+        .iter()
+        .map(|p| UnicodeWidthStr::width(p.stem.as_str()))
+        .max()
+        .unwrap_or(0);
 
-    // Compute inner content width for border
-    // Format: " N. video -> audio " => idx_width + 2 + max_video + 1 + arrow_len + 1 + max_audio + 1
     let idx_width = pairs.len().to_string().len();
-    let arrow_len = symbols.arrow.chars().count();
-    let inner_width = idx_width + 2 + max_video_width + 1 + arrow_len + 1 + max_audio_width;
-    let border = symbols.horizontal_line.repeat(inner_width);
+    let arrow_width = UnicodeWidthStr::width(symbols.arrow);
+    let ext_width = UnicodeWidthStr::width(extension);
 
-    // Header with box-drawing top
+    // Width of "{num}. {video} {arrow} {audio} {stem}.{ext}": everything between
+    // the leading space and the trailing space of a row. The stem is *not*
+    // padded, so the extension stays next to it; the slack is added at the end.
+    let fields_width = |stem_width: usize| {
+        (idx_width + 1)
+            + 1
+            + max_video_width
+            + 1
+            + arrow_width
+            + 1
+            + max_audio_width
+            + 1
+            + stem_width
+            + 1
+            + ext_width
+    };
+
+    let header_width = UnicodeWidthStr::width(header);
+
+    // A row is `vertical + " " + fields + slack + " " + vertical`, so the dash
+    // span must cover the widest row's fields plus two spaces; the header needs
+    // two as well. Widening to fit the header keeps all four sides aligned.
+    let inner_width = (fields_width(max_stem_width) + 2).max(header_width + 2);
+
+    let dashes = |n: usize| symbols.horizontal_line.repeat(n);
+
+    // Top border: `corner + " " + header + " " + dashes + corner`.
     let _ = writeln!(
         out,
-        "{} {} {}",
+        "{} {} {}{}",
         Colors::secondary(symbols.top_left),
         Colors::info(header),
-        Colors::secondary(&border)
+        Colors::secondary(&dashes(inner_width - header_width - 2)),
+        Colors::secondary(symbols.top_right)
     );
 
-    // Rows
     for (idx, pair) in pairs.iter().enumerate() {
-        let video_name = pair
-            .video
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| pair.video.display().to_string());
-        let audio_name = pair
-            .audio
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| pair.audio.display().to_string());
+        // `Cow` rather than `into_owned()`: a valid UTF-8 name (the norm) is
+        // borrowed, so the row needs no allocation for either name.
+        let video_name = file_name_cow(&pair.video);
+        let audio_name = file_name_cow(&pair.audio);
+        let video_width = UnicodeWidthStr::width(&*video_name);
+        let audio_width = UnicodeWidthStr::width(&*audio_name);
+        let stem_width = UnicodeWidthStr::width(pair.stem.as_str());
 
-        // Use unicode-width for correct CJK character padding
-        let video_display_width = unicode_width::UnicodeWidthStr::width(video_name.as_str());
-        let audio_display_width = unicode_width::UnicodeWidthStr::width(audio_name.as_str());
-        let video_pad = max_video_width.saturating_sub(video_display_width);
-        let audio_pad = max_audio_width.saturating_sub(audio_display_width);
-
-        let num = Colors::secondary(&format!("{:>width$}.", idx + 1, width = idx_width));
-        let arrow = Colors::info(symbols.arrow);
-
-        // Same layout as before, but padding is written straight to the buffer
-        // instead of being materialised as a String first:
-        //   {vertical} {num} {video}{pad} {arrow} {audio}{pad} {stem}.{ext}
-        let _ = write!(
+        let _ = write!(out, "{} ", Colors::secondary(symbols.vertical_line));
+        write_index(out, idx + 1, idx_width);
+        let _ = write!(out, " {}", video_name);
+        write_padding(out, max_video_width.saturating_sub(video_width));
+        let _ = write!(out, " {} {}", Colors::info(symbols.arrow), audio_name);
+        write_padding(out, max_audio_width.saturating_sub(audio_width));
+        let _ = write!(out, " {}.{extension}", Colors::info(pair.stem.as_str()));
+        // Right-align the closing border, leaving the extension against the stem.
+        write_padding(
             out,
-            "{} {} {}",
-            Colors::secondary(symbols.vertical_line),
-            num,
-            video_name
+            inner_width.saturating_sub(2 + fields_width(stem_width)),
         );
-        write_padding(out, video_pad);
-        let _ = write!(out, " {} {}", arrow, audio_name);
-        write_padding(out, audio_pad);
-        let _ = writeln!(out, " {}.{}", Colors::info(&pair.stem), extension);
+        let _ = writeln!(out, " {}", Colors::secondary(symbols.vertical_line));
     }
 
     // Bottom border
     let _ = writeln!(
         out,
-        "{}{}",
+        "{}{}{}",
         Colors::secondary(symbols.bottom_left),
-        Colors::secondary(&border)
+        Colors::secondary(&dashes(inner_width)),
+        Colors::secondary(symbols.bottom_right)
     );
 
     // Time estimate
@@ -289,14 +385,24 @@ mod tests {
         }
     }
 
-    /// Renders a preview with the ASCII symbol set so the expected text is
-    /// readable and independent of terminal capabilities.
-    fn render_ascii_preview(pairs: &[FilePair]) -> String {
-        std::env::set_var("MIXBILIBILI_ASCII", "1");
+    /// Renders a preview with an explicit symbol set, so expected text is
+    /// readable and independent of terminal capabilities (and no test mutates
+    /// process-wide env vars that other tests read).
+    fn render_preview_with(pairs: &[FilePair], unicode: bool) -> String {
         let mut buf: Vec<u8> = Vec::new();
-        write_preview_pairs(&mut buf, pairs, "mkv", "HEADER", None);
-        std::env::remove_var("MIXBILIBILI_ASCII");
+        write_preview_pairs(
+            &mut buf,
+            pairs,
+            "mkv",
+            "HEADER",
+            None,
+            &Symbols::new(unicode),
+        );
         String::from_utf8(buf).expect("preview output should be UTF-8")
+    }
+
+    fn render_ascii_preview(pairs: &[FilePair]) -> String {
+        render_preview_with(pairs, false)
     }
 
     #[test]
@@ -339,33 +445,109 @@ mod tests {
         );
     }
 
+    /// Display width of a line, so CJK rows can be compared against ASCII
+    /// borders (byte length would not line up).
+    fn line_width(s: &str) -> usize {
+        unicode_width::UnicodeWidthStr::width(s)
+    }
+
     #[test]
-    fn test_preview_border_spans_row_width() {
-        let pairs = vec![pair("abcdef.mp4", "ghij.m4a", "abcdef")];
+    fn test_preview_box_is_closed_and_aligned() {
+        let pairs = vec![
+            pair("ab.mp4", "ab.m4a", "ab"),
+            pair(
+                "a_reasonably_long_name_here.mp4",
+                "a_reasonably_long_name_here.m4a",
+                "a_reasonably_long_name_here",
+            ),
+            pair(
+                "第1集_中文标题测试.mp4",
+                "第1集_中文标题测试.m4a",
+                "第1集_中文标题测试",
+            ),
+        ];
         let out = render_ascii_preview(&pairs);
         let lines: Vec<&str> = out.lines().collect();
+        // top border + one row per pair + bottom border
+        let box_lines = &lines[..pairs.len() + 2];
 
-        let top = lines[0];
-        let row = lines[1];
-        let bottom = lines[2];
+        assert!(box_lines[0].starts_with("+ HEADER "), "{out}");
+        for (i, line) in box_lines.iter().enumerate() {
+            assert!(
+                line.ends_with('+') || line.ends_with('|'),
+                "line {i} must close the box: {line}"
+            );
+            assert!(
+                line.starts_with('+') || line.starts_with('|'),
+                "line {i} must open the box: {line}"
+            );
+        }
 
-        assert!(top.starts_with("+ HEADER "), "unexpected header: {top}");
+        // The whole point of closing the box: every line is exactly as wide as
+        // the others, including when CJK names make byte length differ.
+        let widths: Vec<usize> = box_lines.iter().map(|l| line_width(l)).collect();
         assert!(
-            row.starts_with("| 1. abcdef.mp4 -> ghij.m4a abcdef.mkv"),
-            "{row}"
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "box lines must share one display width, got {widths:?}:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_preview_keeps_extension_next_to_stem() {
+        // Slack from the widest row is added after the extension, so "x.mkv"
+        // stays readable instead of being pushed to the far right.
+        let pairs = vec![
+            pair("x.mp4", "x.m4a", "x"),
+            pair(
+                "a_much_longer_name.mp4",
+                "a_much_longer_name.m4a",
+                "a_much_longer_name",
+            ),
+        ];
+        let out = render_ascii_preview(&pairs);
+        let row1 = out.lines().nth(1).expect("first row should exist");
+
+        assert!(
+            row1.contains(" x.mkv"),
+            "extension should sit right after the stem, got:\n{row1}"
+        );
+        assert!(
+            !row1.contains("x .mkv") && !row1.contains("x  .mkv"),
+            "stem must not be padded away from its extension:\n{row1}"
+        );
+        assert!(
+            row1.ends_with('|') && row1.trim_end_matches('|').ends_with("  "),
+            "the row should be padded out to the closing border:\n{row1}"
+        );
+    }
+
+    #[test]
+    fn test_preview_widens_box_for_long_header() {
+        // A header wider than the rows must widen the box rather than overflow.
+        let pairs = vec![pair("a.mp4", "a.m4a", "a")];
+        let long_header = "H".repeat(200);
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_preview_pairs(
+            &mut buf,
+            &pairs,
+            "mkv",
+            &long_header,
+            None,
+            &Symbols::new(false),
         );
 
-        // The header label sits inside the top border, so top and bottom borders
-        // carry the same number of dashes (the label shifts the top one right).
-        let dashes = |s: &str| s.chars().filter(|c| *c == '-').count();
+        let out = String::from_utf8(buf).expect("UTF-8");
+        let widths: Vec<usize> = out.lines().map(line_width).collect();
+
         assert_eq!(
-            dashes(top),
-            dashes(bottom),
-            "top and bottom borders must be the same length:\n{out}"
+            widths[0], widths[1],
+            "header line must match the row:\n{out}"
         );
+        assert_eq!(widths[0], widths[2], "borders must match:\n{out}");
         assert!(
-            bottom.starts_with("+-"),
-            "unexpected bottom border: {bottom}"
+            widths[0] > long_header.len(),
+            "box must widen past the header"
         );
     }
 
@@ -430,5 +612,37 @@ mod tests {
             assert_eq!(padded_video_len, max_video_width);
             assert_eq!(padded_audio_len, max_audio_width);
         }
+    }
+
+    fn render_deletion_preview(pairs: &[FilePair]) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        write_deletion_preview(&mut buf, pairs, "HEADER");
+        String::from_utf8(buf).expect("deletion preview should be UTF-8")
+    }
+
+    #[test]
+    fn test_deletion_preview_lists_both_sources_per_pair() {
+        let pairs = vec![pair("a.mp4", "b.m4a", "a")];
+        let out = render_deletion_preview(&pairs);
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["", "HEADER", "  a.mp4 (video)", "  b.m4a (audio)"],
+            "unexpected deletion preview:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_deletion_preview_has_one_block_per_pair() {
+        let pairs: Vec<FilePair> = (0..5)
+            .map(|i| pair(&format!("v{i}.mp4"), &format!("a{i}.m4a"), &format!("v{i}")))
+            .collect();
+        let out = render_deletion_preview(&pairs);
+
+        // blank line + header + two lines (video, audio) per pair
+        assert_eq!(out.lines().count(), 2 + pairs.len() * 2, "{out}");
+        assert!(out.contains("  v4.mp4 (video)"), "{out}");
+        assert!(out.contains("  a4.m4a (audio)"), "{out}");
     }
 }

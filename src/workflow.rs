@@ -518,14 +518,7 @@ pub fn run() -> Result<()> {
                 ctx.format_time_estimate().as_deref(),
             );
             if args.sdel {
-                println!("\n{}", t("dry_run_sdel_header").yellow().bold());
-                for pair in &ctx.pairs {
-                    println!(
-                        "  {} (video)\n  {} (audio)",
-                        pair.video.display(),
-                        pair.audio.display()
-                    );
-                }
+                crate::ui::print_deletion_preview(&ctx.pairs, &t("dry_run_sdel_header"));
             }
             println!(
                 "\n{}",

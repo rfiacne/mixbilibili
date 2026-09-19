@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Output validation upgraded from "non-zero size" to size consistency: output must be >= source video size (invalid undersized outputs are cleaned up)
 - `merger.rs` split into `merger/` submodules (merge/runner/summary/delete) with no public API change
 - Stem normalization unified into `scanner::make_key` / `scanner::safe_stem`; `--once` and directory scan no longer maintain separate composite-key rules
+- Preview/report renderers now take an explicit `Symbols` argument instead of each calling `supports_unicode()` internally, making them deterministic under test
 - ffmpeg commands now use the path resolved by `which`, so a minimal PATH (e.g. aria2 hook) invokes the same binary that detection validated
 - Child-process waiting now polls with exponential backoff (1 ms → 50 ms) instead of a fixed 100 ms interval, removing up to one full interval of dead time from every merge
 
@@ -23,18 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The relative-parent key was re-derived from each file's path (`strip_prefix` + allocation per file). It is a property of the directory, so it is now carried down the recursion.
   - `path.is_dir()` issued a second `stat()` per entry even though `read_dir` already reported the type; the entry's `file_type()` is now used once for both the symlink and directory checks.
 - Preview rendering writes through one buffered, locked stdout: `println!` per row meant a `write()` syscall per row (std's stdout is line-buffered), which dominated the scan phase on large lists. Column padding is also written straight to the buffer instead of allocating a `String` per column per row.
+- The dry-run deletion list is buffered the same way: it printed one `println!` per pair, so 20000 pairs cost 40000 `write()` syscalls. On a 20000-pair tree, that list now costs 1.3 ms instead of 43.2 ms, taking the whole `-n --sdel` preview from 126.5 ms to 83.0 ms (~34% faster).
+- `Colors::*` return the lazily-rendered `ColoredString` instead of `String`, so a colourised fragment no longer copies itself into a heap `String` just to be handed to a `write!`. Row names also use `Cow` instead of `into_owned()`, and the row index is formatted into a stack buffer.
 
 ### Added
 - Per-stem output size anchors recorded on merge success; `--resume` warns (non-blocking) when a completed output's size differs from its recorded anchor
 - `--once` stem validation (`validate_stem`) rejecting path separators, null bytes, empty input, and `.`/`..`
 - Unit tests for the poll backoff schedule (doubling, `POLL_MAX` clamp, zero-delay guard) plus a fast-child detection regression test
 - Tests pinning the recursive composite-key format for multi-level trees (nested keys decide output filenames) and the preview's exact two-column CJK alignment
+- Tests asserting each display box is closed and that all of its lines share one display width (preview and merge report), that a box widens for a long header or row, that the extension stays beside its stem, and that failure connectors follow `Symbols`. Renderers take an explicit symbol set, so these tests are deterministic on every platform instead of depending on terminal capabilities.
 
 ### Fixed
+- Preview and merge-report boxes are now closed on all four sides. The preview omitted the stem and extension columns from its width calculation and never drew a right border, so the top/bottom borders were far shorter than the rows. The report row was left unpadded and its mid separator was drawn with the *top* corners, producing a second `┌───┐` line; its width was also pinned at 40 columns, so wider rows overflowed. Both boxes now size to their content and every line of a box shares one display width, asserted by tests.
+- `--ascii` leaked Unicode box characters (`├`, `└`, `─`) into the merge report's failure list, and re-implemented the vertical rule with a hardcoded `│` in the report title row. Both now come from `Symbols`.
 - Translation-completeness test only scanned top-level `src/*.rs`, so the `src/merger/` submodules added in the module split were silently never validated. The scan is now recursive and asserts it visited those files, so it cannot go blind again.
 - State migration driver stamped `CURRENT_SCHEMA_VERSION` from inside `migrate_v1_to_v2`; on the next schema bump, a v1 file would have been marked current while every later migration was skipped, loading state that claims a version whose fields it does not have. The driver now owns the version bump, and a new test fails if `CURRENT_SCHEMA_VERSION` is raised without a matching migration entry.
-
-### Fixed
 - Silent data loss: distinct composite keys that flatten to the same output filename (`sub/a` vs `sub_a`) are now rejected upfront instead of overwriting
 
 ## [0.8.0] - 2026-07-19

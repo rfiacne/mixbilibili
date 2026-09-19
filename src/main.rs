@@ -21,7 +21,10 @@ pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 fn main() {
     if let Err(e) = workflow::run() {
         let symbols = Symbols::new(ui::supports_unicode());
-        let error_prefix = Colors::failure(&format!("{} {}", symbols.failure, t("error_prefix")));
+        // Bind the text before colourising: `Colors` borrows it rather than
+        // allocating a copy, so the temporary must outlive the coloured view.
+        let prefix_text = format!("{} {}", symbols.failure, t("error_prefix"));
+        let error_prefix = Colors::failure(&prefix_text);
         eprintln!("{} {}", error_prefix, translate_error(&e));
         std::process::exit(get_exit_code(&e));
     }

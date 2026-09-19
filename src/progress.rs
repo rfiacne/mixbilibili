@@ -78,7 +78,7 @@ fn format_record(
     match (success, retry, error) {
         (true, _, _) => {
             let sym = if colored {
-                Colors::success(symbols.success)
+                Colors::success(symbols.success).to_string()
             } else {
                 symbols.success.to_string()
             };
@@ -86,7 +86,7 @@ fn format_record(
         }
         (false, Some(r), _) => {
             let sym = if colored {
-                Colors::warning(symbols.retry)
+                Colors::warning(symbols.retry).to_string()
             } else {
                 symbols.retry.to_string()
             };
@@ -94,7 +94,7 @@ fn format_record(
         }
         (false, None, Some(e)) => {
             let sym = if colored {
-                Colors::failure(symbols.failure)
+                Colors::failure(symbols.failure).to_string()
             } else {
                 symbols.failure.to_string()
             };
@@ -102,7 +102,7 @@ fn format_record(
         }
         (false, None, None) => {
             let sym = if colored {
-                Colors::failure(symbols.failure)
+                Colors::failure(symbols.failure).to_string()
             } else {
                 symbols.failure.to_string()
             };
