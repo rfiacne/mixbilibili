@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests for the poll backoff schedule (doubling, `POLL_MAX` clamp, zero-delay guard) plus a fast-child detection regression test
 
 ### Fixed
+- Translation-completeness test only scanned top-level `src/*.rs`, so the `src/merger/` submodules added in the module split were silently never validated. The scan is now recursive and asserts it visited those files, so it cannot go blind again.
+- State migration driver stamped `CURRENT_SCHEMA_VERSION` from inside `migrate_v1_to_v2`; on the next schema bump, a v1 file would have been marked current while every later migration was skipped, loading state that claims a version whose fields it does not have. The driver now owns the version bump, and a new test fails if `CURRENT_SCHEMA_VERSION` is raised without a matching migration entry.
+
+### Fixed
 - Silent data loss: distinct composite keys that flatten to the same output filename (`sub/a` vs `sub_a`) are now rejected upfront instead of overwriting
 
 ## [0.8.0] - 2026-07-19

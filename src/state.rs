@@ -29,8 +29,8 @@ fn default_schema_version() -> u32 {
     LEGACY_SCHEMA_VERSION
 }
 
-/// A schema migration: `(from_version, migrate_fn)`. `migrate_fn` advances a
-/// state from `from_version` to `from_version + 1`.
+/// A schema migration: `(from_version, migrate_fn)`. `migrate_fn` only reshapes
+/// data; [`apply_migrations`] owns the version bump to `from_version + 1`.
 type Migration = fn(&mut MergeState);
 
 /// Ordered migration chain. Index `v - LEGACY_SCHEMA_VERSION` upgrades v → v+1.
@@ -39,9 +39,27 @@ fn migrations() -> &'static [(u32, Migration)] {
 }
 
 /// v1 → v2: introduce per-stem output size anchors. The `anchors` field is
-/// populated by serde's `#[serde(default)]`, so nothing to fill here.
-fn migrate_v1_to_v2(state: &mut MergeState) {
-    state.version = CURRENT_SCHEMA_VERSION;
+/// populated by serde's `#[serde(default)]`, so there is no data to reshape and
+/// this migration is intentionally a no-op.
+fn migrate_v1_to_v2(_state: &mut MergeState) {}
+
+/// Advances `state` to `target_version` by applying every migration in `chain`
+/// in order, stopping early if a step is missing.
+///
+/// The driver — not each migration — bumps `state.version`. Otherwise a migration
+/// that wrote `CURRENT_SCHEMA_VERSION` directly would, on the next schema bump,
+/// stamp an old file as current while the loop skipped every later migration,
+/// leaving state that claims a version whose fields it does not have.
+fn apply_migrations(state: &mut MergeState, chain: &[(u32, Migration)], target_version: u32) {
+    for (from_version, migrate) in chain {
+        if state.version == *from_version {
+            migrate(state);
+            state.version = from_version + 1;
+        }
+        if state.version >= target_version {
+            break;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -105,11 +123,7 @@ impl MergeState {
 
         // Apply any pending migrations in order (old version → current).
         if state.version < CURRENT_SCHEMA_VERSION {
-            for (from_version, migrate) in migrations() {
-                if state.version == *from_version {
-                    migrate(&mut state);
-                }
-            }
+            apply_migrations(&mut state, migrations(), CURRENT_SCHEMA_VERSION);
         }
 
         let expected = source.to_string_lossy().to_string();
@@ -752,10 +766,122 @@ mod state_logic_tests {
     }
 
     #[test]
-    fn test_migrate_v1_to_v2_sets_version() {
+    fn test_migrate_v1_to_v2_leaves_data_intact() {
+        // The v1 → v2 migration is a pure version bump; serde fills `anchors`.
         let mut state = MergeState::new(Path::new("/s"), Path::new("/o"));
         state.version = LEGACY_SCHEMA_VERSION;
+        state.completed.insert("video1".to_string());
+
         migrate_v1_to_v2(&mut state);
+        apply_migrations(&mut state, migrations(), CURRENT_SCHEMA_VERSION);
+
+        assert_eq!(state.version, CURRENT_SCHEMA_VERSION);
+        assert!(state.completed.contains("video1"));
+    }
+
+    /// Synthetic chain used to prove the driver walks a *future*, longer chain.
+    /// Each step appends a marker so we can assert every step ran, in order.
+    fn step_to_v2(state: &mut MergeState) {
+        state.pending.insert("ran-v1-v2".to_string());
+    }
+
+    fn step_to_v3(state: &mut MergeState) {
+        state.pending.insert("ran-v2-v3".to_string());
+    }
+
+    #[test]
+    fn test_apply_migrations_runs_every_step_in_order() {
+        let chain: &[(u32, Migration)] = &[(1, step_to_v2), (2, step_to_v3)];
+        let mut state = MergeState::new(Path::new("/s"), Path::new("/o"));
+        state.version = 1;
+
+        apply_migrations(&mut state, chain, 3);
+
+        assert_eq!(state.version, 3, "should reach the target version");
+        assert!(
+            state.pending.contains("ran-v1-v2"),
+            "v1 → v2 migration was skipped"
+        );
+        assert!(
+            state.pending.contains("ran-v2-v3"),
+            "v2 → v3 migration was skipped"
+        );
+    }
+
+    #[test]
+    fn test_apply_migrations_stops_at_current_version() {
+        // A v2 file on a v3 chain must only run the v2 → v3 step.
+        let chain: &[(u32, Migration)] = &[(1, step_to_v2), (2, step_to_v3)];
+        let mut state = MergeState::new(Path::new("/s"), Path::new("/o"));
+        state.version = 2;
+
+        apply_migrations(&mut state, chain, 3);
+
+        assert_eq!(state.version, 3);
+        assert!(
+            !state.pending.contains("ran-v1-v2"),
+            "must not re-run an already-applied migration"
+        );
+        assert!(state.pending.contains("ran-v2-v3"));
+    }
+
+    #[test]
+    fn test_apply_migrations_is_noop_when_already_current() {
+        let chain: &[(u32, Migration)] = &[(1, step_to_v2), (2, step_to_v3)];
+        let mut state = MergeState::new(Path::new("/s"), Path::new("/o"));
+        state.version = 3;
+
+        apply_migrations(&mut state, chain, 3);
+
+        assert_eq!(state.version, 3);
+        assert!(state.pending.is_empty(), "no migration should have run");
+    }
+
+    #[test]
+    fn test_apply_migrations_tolerates_missing_step() {
+        // If a migration is missing, the state keeps whatever version it reached
+        // rather than being stamped as current with un-migrated fields.
+        let chain: &[(u32, Migration)] = &[(1, step_to_v2)];
+        let mut state = MergeState::new(Path::new("/s"), Path::new("/o"));
+        state.version = 1;
+
+        apply_migrations(&mut state, chain, 3);
+
+        assert_eq!(
+            state.version, 2,
+            "should not claim v3 without running v2→v3"
+        );
+    }
+
+    #[test]
+    fn test_migration_chain_is_contiguous_and_complete() {
+        // Bumping CURRENT_SCHEMA_VERSION without adding the matching migration
+        // would leave old files unable to reach the current version, so fail
+        // loudly here instead of silently loading un-migrated state.
+        let chain = migrations();
+        assert_eq!(
+            chain.len() as u32,
+            CURRENT_SCHEMA_VERSION - LEGACY_SCHEMA_VERSION,
+            "each version bump from LEGACY to CURRENT needs exactly one migration entry"
+        );
+        for (offset, (from_version, _)) in chain.iter().enumerate() {
+            assert_eq!(
+                *from_version,
+                LEGACY_SCHEMA_VERSION + offset as u32,
+                "migration chain must be ordered and contiguous"
+            );
+        }
+    }
+
+    #[test]
+    fn test_load_v1_reaches_current_through_real_chain() {
+        // End-to-end proof that a legacy file lands on the current version and
+        // that every step in the real chain actually ran.
+        let mut state = MergeState::new(Path::new("/s"), Path::new("/o"));
+        state.version = LEGACY_SCHEMA_VERSION;
+
+        apply_migrations(&mut state, migrations(), CURRENT_SCHEMA_VERSION);
+
         assert_eq!(state.version, CURRENT_SCHEMA_VERSION);
     }
 

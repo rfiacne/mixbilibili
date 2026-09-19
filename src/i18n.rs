@@ -456,6 +456,24 @@ mod tests {
         keys
     }
 
+    /// Collect every `.rs` file under `dir`, recursing into subdirectories.
+    /// Results are sorted so failure messages stay deterministic.
+    fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+        out.sort();
+    }
+
     #[test]
     fn test_table_keys_paired_and_source_keys_exist() {
         use std::collections::HashSet;
@@ -483,13 +501,24 @@ mod tests {
         // (b) Every t("...")/tf("...") literal used in src/ must exist in the table.
         //     Catches misspelled keys at test time instead of silent runtime fallback.
         let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        for entry in std::fs::read_dir(&src_dir).expect("src dir should exist") {
-            let path = entry.expect("dir entry").path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let content = std::fs::read_to_string(&path).expect("read source file");
+        let mut files = Vec::new();
+        collect_rs_files(&src_dir, &mut files);
+
+        // Guard against the scan silently covering nothing: `merger` is a
+        // *directory* module, so a non-recursive walk would skip it entirely
+        // and this test would keep passing while validating fewer files.
+        for required in ["merger/merge.rs", "merger/delete.rs", "scanner.rs"] {
+            assert!(
+                files.iter().any(|f| f.ends_with(required)),
+                "translation scan did not visit src/{required}; is it still recursive?"
+            );
+        }
+
+        let mut keys_checked = 0usize;
+        for path in &files {
+            let content = std::fs::read_to_string(path).expect("read source file");
             for key in extract_t_keys(&content) {
+                keys_checked += 1;
                 assert!(
                     cn.contains(key.as_str()),
                     "key '{}' used in {} is missing from the translation table",
@@ -498,6 +527,10 @@ mod tests {
                 );
             }
         }
+        assert!(
+            keys_checked > 0,
+            "extracted no translation keys at all; the scanner is broken"
+        );
     }
 
     #[test]
