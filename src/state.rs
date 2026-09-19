@@ -1,7 +1,7 @@
 use crate::i18n::t;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,8 +16,32 @@ fn vec_as_set<'de, D: Deserializer<'de>>(d: D) -> Result<HashSet<String>, D::Err
     Ok(vec.into_iter().collect())
 }
 
+/// Schema version of state files written before versioning existed.
+/// Files without a `version` field deserialize to this value via
+/// `default_schema_version`, so they migrate forward like any v1 file.
+pub const LEGACY_SCHEMA_VERSION: u32 = 1;
+
+/// Current schema version. Bump together with a migration entry in
+/// `migrations()`; `load()` still rejects any file with a newer version.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
 fn default_schema_version() -> u32 {
-    1
+    LEGACY_SCHEMA_VERSION
+}
+
+/// A schema migration: `(from_version, migrate_fn)`. `migrate_fn` advances a
+/// state from `from_version` to `from_version + 1`.
+type Migration = fn(&mut MergeState);
+
+/// Ordered migration chain. Index `v - LEGACY_SCHEMA_VERSION` upgrades v → v+1.
+fn migrations() -> &'static [(u32, Migration)] {
+    &[(LEGACY_SCHEMA_VERSION, migrate_v1_to_v2)]
+}
+
+/// v1 → v2: introduce per-stem output size anchors. The `anchors` field is
+/// populated by serde's `#[serde(default)]`, so nothing to fill here.
+fn migrate_v1_to_v2(state: &mut MergeState) {
+    state.version = CURRENT_SCHEMA_VERSION;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -32,17 +56,22 @@ pub struct MergeState {
     pub failed: HashSet<String>,
     #[serde(serialize_with = "set_as_vec", deserialize_with = "vec_as_set")]
     pub pending: HashSet<String>,
+    /// stem → merged output byte size. Recorded on success; used on resume to
+    /// detect outputs modified externally. Absent from v1 files.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub anchors: HashMap<String, u64>,
 }
 
 impl MergeState {
     pub fn new(source: &Path, output: &Path) -> Self {
         Self {
-            version: 1,
+            version: CURRENT_SCHEMA_VERSION,
             source_dir: source.to_string_lossy().to_string(),
             output_dir: output.to_string_lossy().to_string(),
             completed: HashSet::new(),
             failed: HashSet::new(),
             pending: HashSet::new(),
+            anchors: HashMap::new(),
         }
     }
 
@@ -58,19 +87,29 @@ impl MergeState {
         let content = fs::read_to_string(&path).context(t("failed_read_state").into_owned())?;
 
         // Try to parse with detailed error message
-        let state: Self = match serde_json::from_str(&content) {
+        let mut state: Self = match serde_json::from_str(&content) {
             Ok(state) => state,
             Err(e) => {
                 anyhow::bail!("{}: {}. {}", t("failed_parse_state"), path.display(), e);
             }
         };
 
-        // Check schema version for forward compatibility
-        if state.version > 1 {
+        // Reject files written by a newer mixbilibili (forward compatibility).
+        if state.version > CURRENT_SCHEMA_VERSION {
             anyhow::bail!(
-                "State file schema version {} is not supported (max: 1). Please upgrade mixbilibili.",
-                state.version
+                "State file schema version {} is not supported (max: {}). Please upgrade mixbilibili.",
+                state.version,
+                CURRENT_SCHEMA_VERSION
             );
+        }
+
+        // Apply any pending migrations in order (old version → current).
+        if state.version < CURRENT_SCHEMA_VERSION {
+            for (from_version, migrate) in migrations() {
+                if state.version == *from_version {
+                    migrate(&mut state);
+                }
+            }
         }
 
         let expected = source.to_string_lossy().to_string();
@@ -126,6 +165,16 @@ impl MergeState {
         {
             self.pending.insert(stem.to_string());
         }
+    }
+
+    /// Record the merged output byte size for a stem (size anchor).
+    pub fn record_anchor(&mut self, stem: &str, size: u64) {
+        self.anchors.insert(stem.to_string(), size);
+    }
+
+    /// Return the recorded output size for a stem, if any.
+    pub fn anchor_for(&self, stem: &str) -> Option<u64> {
+        self.anchors.get(stem).copied()
     }
 
     pub fn clear(source: &Path) -> Result<()> {
@@ -587,7 +636,10 @@ mod state_logic_tests {
     #[test]
     fn test_state_file_path_format() {
         let path = MergeState::state_file_path(Path::new("/some/dir"));
-        assert_eq!(path.file_name().unwrap().to_str().unwrap(), ".mixbilibili_state.json");
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            ".mixbilibili_state.json"
+        );
         assert_eq!(path.parent().unwrap(), Path::new("/some/dir"));
     }
 
@@ -664,7 +716,82 @@ mod state_logic_tests {
         fs::write(&path, json).unwrap();
 
         let loaded = MergeState::load(dir.path()).unwrap().unwrap();
-        assert_eq!(loaded.version, 1, "old format should default to version 1");
+        // Old format defaults to v1, then migrates forward to the current version.
+        assert_eq!(
+            loaded.version, CURRENT_SCHEMA_VERSION,
+            "old format should migrate to the current version"
+        );
+        assert!(
+            loaded.anchors.is_empty(),
+            "migrated anchors should be empty"
+        );
+    }
+
+    #[test]
+    fn test_load_v1_migrates_to_v2() {
+        let dir = tempdir().unwrap();
+        let dir_str = dir.path().to_string_lossy().to_string();
+        // Explicit version 1 state file
+        let json = format!(
+            r#"{{
+  "version": 1,
+  "source_dir": "{dir_str}",
+  "output_dir": "{dir_str}",
+  "completed": ["video1"],
+  "failed": [],
+  "pending": []
+}}"#
+        );
+        let path = MergeState::state_file_path(dir.path());
+        fs::write(&path, json).unwrap();
+
+        let loaded = MergeState::load(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.version, CURRENT_SCHEMA_VERSION);
+        assert!(loaded.completed.contains("video1"));
+        assert!(loaded.anchors.is_empty());
+    }
+
+    #[test]
+    fn test_migrate_v1_to_v2_sets_version() {
+        let mut state = MergeState::new(Path::new("/s"), Path::new("/o"));
+        state.version = LEGACY_SCHEMA_VERSION;
+        migrate_v1_to_v2(&mut state);
+        assert_eq!(state.version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_record_anchor_and_query() {
+        let mut state = MergeState::new(Path::new("."), Path::new("."));
+        assert_eq!(state.anchor_for("video1"), None);
+        state.record_anchor("video1", 12345);
+        assert_eq!(state.anchor_for("video1"), Some(12345));
+        assert_eq!(state.anchor_for("video2"), None);
+    }
+
+    #[test]
+    fn test_anchors_roundtrip() {
+        let dir = tempdir().unwrap();
+        let mut state = MergeState::new(dir.path(), dir.path());
+        state.add_pending("video1");
+        state.mark_completed("video1");
+        state.record_anchor("video1", 999);
+
+        state.save(dir.path()).unwrap();
+        let loaded = MergeState::load(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.anchor_for("video1"), Some(999));
+    }
+
+    #[test]
+    fn test_anchors_empty_not_serialized() {
+        let dir = tempdir().unwrap();
+        let state = MergeState::new(dir.path(), dir.path());
+        state.save(dir.path()).unwrap();
+
+        let content = fs::read_to_string(MergeState::state_file_path(dir.path())).unwrap();
+        assert!(
+            !content.contains("anchors"),
+            "empty anchors map should be skipped: {content}"
+        );
     }
 
     #[test]
@@ -674,7 +801,10 @@ mod state_logic_tests {
         state.save(dir.path()).unwrap();
 
         let content = fs::read_to_string(MergeState::state_file_path(dir.path())).unwrap();
-        assert!(content.contains("\"version\""), "serialized state should include version field");
+        assert!(
+            content.contains("\"version\""),
+            "serialized state should include version field"
+        );
     }
 
     #[test]

@@ -183,7 +183,9 @@ pub fn build_merge_command(
     output_path: &Path,
     format: OutputFormat,
 ) -> Command {
-    let mut cmd = Command::new("ffmpeg");
+    // Resolve the absolute path once so a minimal PATH (e.g. aria2 hook) still
+    // finds the same binary that is_ffmpeg_available()/ensure_ffmpeg() located.
+    let mut cmd = Command::new(which::which("ffmpeg").unwrap_or_else(|_| "ffmpeg".into()));
 
     cmd.arg("-hide_banner")
         .arg("-loglevel")
@@ -428,7 +430,6 @@ mod estimate_tests {
 #[cfg(test)]
 mod no_transcode_tests {
     use super::*;
-    use std::ffi::OsStr;
     use std::path::PathBuf;
 
     /// Helper: get all args from a command as Strings for easier assertion.
@@ -448,7 +449,15 @@ mod no_transcode_tests {
             OutputFormat::Mkv,
         );
         let args = args_vec(&cmd);
-        let forbidden = ["libx264", "libx265", "aac", "libvorbis", "libopus", "h264", "hevc"];
+        let forbidden = [
+            "libx264",
+            "libx265",
+            "aac",
+            "libvorbis",
+            "libopus",
+            "h264",
+            "hevc",
+        ];
         for codec in &forbidden {
             assert!(
                 !args.contains(&codec.to_string()),
@@ -470,8 +479,14 @@ mod no_transcode_tests {
         let args = args_vec(&cmd);
 
         // Find positions of -c:v and -c:a and verify their following arg is "copy"
-        let cv_idx = args.iter().position(|a| a == "-c:v").expect("-c:v should exist");
-        let ca_idx = args.iter().position(|a| a == "-c:a").expect("-c:a should exist");
+        let cv_idx = args
+            .iter()
+            .position(|a| a == "-c:v")
+            .expect("-c:v should exist");
+        let ca_idx = args
+            .iter()
+            .position(|a| a == "-c:a")
+            .expect("-c:a should exist");
         assert_eq!(args[cv_idx + 1], "copy", "-c:v must be followed by 'copy'");
         assert_eq!(args[ca_idx + 1], "copy", "-c:a must be followed by 'copy'");
     }
@@ -551,7 +566,12 @@ mod no_transcode_tests {
             &PathBuf::from("o.mkv"),
             OutputFormat::Mkv,
         );
-        assert_eq!(cmd.get_program(), OsStr::new("ffmpeg"));
+        let program = cmd.get_program().to_string_lossy().to_string();
+        assert!(
+            program == "ffmpeg" || program.ends_with("ffmpeg") || program.ends_with("ffmpeg.exe"),
+            "program should be ffmpeg (or its resolved path): {}",
+            program
+        );
     }
 
     #[test]

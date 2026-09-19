@@ -1,11 +1,35 @@
 use crate::ffmpeg;
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Build the composite key for a file: bare stem for non-recursive,
+/// "relative_parent/stem" for recursive scans.
+pub(crate) fn make_key(recursive: bool, relative_parent: &str, stem: &str) -> String {
+    if recursive && !relative_parent.is_empty() {
+        format!("{}/{}", relative_parent, stem)
+    } else {
+        stem.to_string()
+    }
+}
+
+/// Flatten a composite key "parent/stem" into a safe output filename.
+/// Single source of truth for the key → filename rule, shared by merger and workflow.
+pub(crate) fn safe_stem(key: &str) -> String {
+    key.replace('/', "_")
+}
+
+/// Relative parent directory of `path` under `scan_root`, as a lossy string.
+fn relative_parent_of(path: &Path, scan_root: &Path) -> String {
+    path.parent()
+        .and_then(|p| p.strip_prefix(scan_root).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
 
 #[derive(Debug, Clone)]
 pub struct FilePair {
@@ -66,22 +90,7 @@ fn collect_files(
         };
 
         // Build key: bare stem for non-recursive, relative path prefix for recursive
-        let make_key = |stem: &str| -> String {
-            if recursive {
-                let relative_parent = path
-                    .parent()
-                    .and_then(|p| p.strip_prefix(scan_root).ok())
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if relative_parent.is_empty() {
-                    stem.to_string()
-                } else {
-                    format!("{}/{}", relative_parent, stem)
-                }
-            } else {
-                stem.to_string()
-            }
-        };
+        let parent = relative_parent_of(&path, scan_root);
 
         if let Some(stem) = filename.strip_suffix(".aria2") {
             // Normalize: strip .mp4/.m4a suffix so is_downloading needs only one lookup
@@ -89,11 +98,11 @@ fn collect_files(
                 .strip_suffix(".mp4")
                 .or_else(|| stem.strip_suffix(".m4a"))
                 .unwrap_or(stem);
-            aria2_files.insert(make_key(bare));
+            aria2_files.insert(make_key(recursive, &parent, bare));
         } else if let Some(stem) = filename.strip_suffix(".mp4") {
-            mp4_files.insert(make_key(stem), path);
+            mp4_files.insert(make_key(recursive, &parent, stem), path);
         } else if let Some(stem) = filename.strip_suffix(".m4a") {
-            m4a_files.insert(make_key(stem), path);
+            m4a_files.insert(make_key(recursive, &parent, stem), path);
         }
     }
 
@@ -137,6 +146,20 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
             stats.pairs += 1;
         } else {
             stats.orphaned += 1;
+        }
+    }
+
+    // Guard against silent overwrite: distinct composite keys (e.g. "a/b" and
+    // "a_b") can flatten to the same output filename. The second pair would
+    // overwrite the first's output (unrecoverable with --sdel), so reject upfront.
+    let mut seen_flat: HashMap<String, String> = HashMap::new();
+    for pair in &pairs {
+        let flat = safe_stem(&pair.stem);
+        if let Some(prev) = seen_flat.insert(flat.clone(), pair.stem.clone()) {
+            anyhow::bail!(
+                "{}",
+                tf("output_name_collision", &[&prev, &pair.stem, &flat])
+            );
         }
     }
 
@@ -197,6 +220,28 @@ mod tests {
         aria2_files.insert("baz.mp4".to_string());
         assert!(!is_downloading("foo", &aria2_files));
     }
+
+    #[test]
+    fn test_make_key_non_recursive() {
+        assert_eq!(make_key(false, "parent", "stem"), "stem");
+    }
+
+    #[test]
+    fn test_make_key_recursive_with_parent() {
+        assert_eq!(make_key(true, "parent", "stem"), "parent/stem");
+    }
+
+    #[test]
+    fn test_make_key_recursive_root() {
+        assert_eq!(make_key(true, "", "stem"), "stem");
+    }
+
+    #[test]
+    fn test_safe_stem_flattens_composite_key() {
+        assert_eq!(safe_stem("parent/stem"), "parent_stem");
+        assert_eq!(safe_stem("stem"), "stem");
+        assert_eq!(safe_stem("a/b/c"), "a_b_c");
+    }
 }
 
 #[cfg(test)]
@@ -211,6 +256,26 @@ mod scan_tests {
         let result = scan_directory(dir.path(), false).unwrap();
         assert_eq!(result.pairs.len(), 0);
         assert_eq!(result.stats.pairs, 0);
+    }
+
+    #[test]
+    fn test_scan_rejects_output_name_collision() {
+        let dir = tempdir().unwrap();
+
+        // "sub/a" and "sub_a" both flatten to "sub_a" → silent overwrite risk
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        for f in ["sub/a.mp4", "sub/a.m4a", "sub_a.mp4", "sub_a.m4a"] {
+            File::create(dir.path().join(f)).unwrap();
+        }
+
+        let result = scan_directory(dir.path(), true);
+        assert!(result.is_err(), "should reject flattened-name collision");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("collision") || err.contains("冲突"),
+            "Error should mention collision: {}",
+            err
+        );
     }
 
     #[test]
@@ -612,7 +677,8 @@ mod scan_tests {
             let video_parent = pair.video.parent().unwrap();
             let audio_parent = pair.audio.parent().unwrap();
             assert_eq!(
-                video_parent, audio_parent,
+                video_parent,
+                audio_parent,
                 "Video and audio must be from same directory: video={}, audio={}",
                 pair.video.display(),
                 pair.audio.display()
@@ -649,11 +715,7 @@ mod scan_tests {
         File::create(season2.join("ep01.m4a")).unwrap();
 
         let result = scan_directory(path, true).unwrap();
-        assert_eq!(
-            result.pairs.len(),
-            1,
-            "only season2/ep01 should be paired"
-        );
+        assert_eq!(result.pairs.len(), 1, "only season2/ep01 should be paired");
         assert_eq!(result.stats.skipped, 1, "season1/ep01 should be skipped");
         assert_eq!(result.pairs[0].stem, "season2/ep01");
     }
@@ -739,7 +801,10 @@ mod collect_tests {
         collect_files(path, path, &mut mp4, &mut m4a, &mut aria2, false).unwrap();
 
         // In non-recursive mode, aria2 set uses bare stem
-        assert!(aria2.contains("video"), "aria2 should contain bare key: video");
+        assert!(
+            aria2.contains("video"),
+            "aria2 should contain bare key: video"
+        );
     }
 
     #[test]
@@ -757,7 +822,10 @@ mod collect_tests {
         collect_files(path, path, &mut mp4, &mut m4a, &mut aria2, false).unwrap();
 
         // In non-recursive mode, aria2 set uses bare stem
-        assert!(aria2.contains("audio"), "aria2 should contain bare key: audio");
+        assert!(
+            aria2.contains("audio"),
+            "aria2 should contain bare key: audio"
+        );
     }
 
     #[test]
@@ -775,10 +843,7 @@ mod collect_tests {
         let stems: Vec<&str> = result.pairs.iter().map(|p| p.stem.as_str()).collect();
 
         // Non-recursive: bare stems, sorted alphabetically
-        assert_eq!(
-            stems,
-            vec!["alpha", "middle", "zebra"]
-        );
+        assert_eq!(stems, vec!["alpha", "middle", "zebra"]);
     }
 
     #[test]

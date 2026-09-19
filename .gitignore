@@ -14,3 +14,6 @@ CLAUDE.md
 
 # Qoder agent workspace
 .qoder/
+
+# Reasonix agent runtime state (topic titles/timestamps, session-local)
+.reasonix/

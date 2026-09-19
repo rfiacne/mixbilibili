@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- `main.rs` split (1137 → 28 lines): 4-phase orchestration moved to new `workflow` module, `AppError`/exit-code mapping to new `error` module; exit codes 1/2/3 unchanged
+- State schema upgraded to v2 with a per-version migration chain (`migrations()`); v1 files (with or without `version`) migrate forward transparently on load
+- Output validation upgraded from "non-zero size" to size consistency: output must be >= source video size (invalid undersized outputs are cleaned up)
+- `merger.rs` split into `merger/` submodules (merge/runner/summary/delete) with no public API change
+- Stem normalization unified into `scanner::make_key` / `scanner::safe_stem`; `--once` and directory scan no longer maintain separate composite-key rules
+- ffmpeg commands now use the path resolved by `which`, so a minimal PATH (e.g. aria2 hook) invokes the same binary that detection validated
+
+### Added
+- Per-stem output size anchors recorded on merge success; `--resume` warns (non-blocking) when a completed output's size differs from its recorded anchor
+- `--once` stem validation (`validate_stem`) rejecting path separators, null bytes, empty input, and `.`/`..`
+
+### Fixed
+- Silent data loss: distinct composite keys that flatten to the same output filename (`sub/a` vs `sub_a`) are now rejected upfront instead of overwriting
+
+## [0.8.0] - 2026-07-19
+
+### Added
+- `--ascii` flag to force ASCII symbols (disable Unicode output)
+- UI foundation module: terminal symbols (Unicode/ASCII dual-mode) and semantic colors
+- Box-drawing preview list with two-column video/audio alignment and CJK-aware width calculation
+- UI component translation keys (report header, preview list, interactive confirmation)
+
+### Changed
+- Redesigned report header, progress bar, and interactive confirmation with highlighted defaults
+- Interactive confirmation now default-rejects when `--sdel` is enabled (destructive mode)
+- Error messages refactored to use Symbols and Colors for consistent styling
+- Consolidated ffmpeg translation keys and removed stale dead_code allows
+- Documentation structure reorganized
+
+### Fixed
+- Hardened recursive scan: deterministic pair ordering, composite key safety
+- Source-overwrite safety: reject source == output when format would overwrite video
+- CJK display width corrected via unicode-width in preview alignment
+- Reset SIGCHLD to SIG_DFL before spawning ffmpeg (aria2 hook sets SIG_IGN, causing waitpid ECHILD)
+- Prevent source file deletion on interrupt
+- Resolved TOCTOU races, i18n regression, and cleanup bugs
+
 ## [0.7.0] - 2026-06-24
 
 ### Added

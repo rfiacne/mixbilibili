@@ -41,6 +41,31 @@ impl std::fmt::Display for OutputFormat {
     }
 }
 
+/// Validate `--once` stem argument to prevent path traversal attacks.
+pub fn validate_stem(stem: &str) -> Result<()> {
+    // Reject path separators
+    if stem.contains('/') || stem.contains('\\') {
+        bail!("Invalid stem '{}': must not contain path separators", stem);
+    }
+
+    // Reject null bytes (path injection)
+    if stem.contains('\0') {
+        bail!("Invalid stem: must not contain null bytes");
+    }
+
+    // Reject empty or whitespace-only stems
+    if stem.trim().is_empty() {
+        bail!("Invalid stem: cannot be empty");
+    }
+
+    // Reject special directory names
+    if stem == "." || stem == ".." {
+        bail!("Invalid stem '{}': cannot be . or ..", stem);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,10 +350,7 @@ impl Args {
                 .flatten();
             if let (Some(s), Some(o)) = (src, out) {
                 if s == o {
-                    bail!(
-                        "{}",
-                        tf("same_source_output", &[&self.format.to_string()])
-                    );
+                    bail!("{}", tf("same_source_output", &[&self.format.to_string()]));
                 }
             }
         }
@@ -712,7 +734,10 @@ mod validation_tests {
         args.source = dir1.path().to_path_buf();
         args.output = dir2.path().to_path_buf();
         args.format = OutputFormat::Mp4;
-        assert!(args.validate().is_ok(), "mp4 with different dirs should be allowed");
+        assert!(
+            args.validate().is_ok(),
+            "mp4 with different dirs should be allowed"
+        );
     }
 
     #[test]

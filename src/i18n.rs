@@ -312,6 +312,13 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "same_source_output"), "Output directory is the same as source and format is {0}; output would overwrite source video. Use a different output directory."),
     ((Lang::Cn, "same_source_output_runtime"), "输出路径与输入视频路径相同，跳过以防止覆盖"),
     ((Lang::En, "same_source_output_runtime"), "Output path identical to input video, skipping to prevent overwrite"),
+    ((Lang::Cn, "output_name_collision"), "输出文件名冲突：'{0}' 与 '{1}' 都会扁平化为 '{2}'。请重命名其中一个后重试。"),
+    ((Lang::En, "output_name_collision"), "Output name collision: '{0}' and '{1}' both flatten to '{2}'. Rename one of them and retry."),
+    // 输出校验 / 锚点
+    ((Lang::Cn, "output_too_small"), "输出文件 {0} 大小 {1} 字节小于源视频 {2} 字节，可能合并不完整"),
+    ((Lang::En, "output_too_small"), "Output {0} is {1} bytes, smaller than source video {2} bytes; merge may be incomplete"),
+    ((Lang::Cn, "output_modified_warning"), "警告：{0} 输出文件大小与上次记录不一致（{1}），可能已被外部修改"),
+    ((Lang::En, "output_modified_warning"), "Warning: {0} output size differs from the recorded value ({1}); it may have been modified externally"),
     // 参数冲突
     ((Lang::Cn, "verbose_quiet_conflict"), "不能同时使用 --verbose 和 --quiet"),
     ((Lang::En, "verbose_quiet_conflict"), "Cannot use --verbose with --quiet"),
@@ -413,6 +420,84 @@ mod tests {
         assert!(!map.is_empty());
         assert!(map.contains_key(&(Lang::Cn, "error_prefix")));
         assert!(map.contains_key(&(Lang::En, "error_prefix")));
+    }
+
+    /// Extract string-literal keys from t()/tf() calls in source text.
+    /// Keys are simple identifiers without escapes, so a closing-quote scan suffices.
+    /// Matches are only counted when not preceded by an identifier char (skips
+    /// lookalikes like .expect()/.context()/.insert() taking a string literal),
+    /// and // comment text is ignored.
+    fn extract_t_keys(content: &str) -> Vec<String> {
+        // \u{22} keeps the marker text from matching itself during the scan.
+        let markers = ["t(\u{22}", "tf(\u{22}"];
+        let mut keys = Vec::new();
+        for raw_line in content.lines() {
+            let line = match raw_line.find("//") {
+                Some(i) => &raw_line[..i],
+                None => raw_line,
+            };
+            for marker in markers {
+                let mut rest = line;
+                while let Some(pos) = rest.find(marker) {
+                    let after = &rest[pos + marker.len()..];
+                    let Some(end) = after.find('"') else { break };
+                    let preceded_by_ident = pos > 0
+                        && rest[..pos]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+                    if !preceded_by_ident {
+                        keys.push(after[..end].to_string());
+                    }
+                    rest = &after[end..];
+                }
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn test_table_keys_paired_and_source_keys_exist() {
+        use std::collections::HashSet;
+
+        // (a) Every key in TRANSLATIONS must have both Cn and En entries.
+        let mut cn: HashSet<&str> = HashSet::new();
+        let mut en: HashSet<&str> = HashSet::new();
+        for &((lang, key), _) in TRANSLATIONS {
+            match lang {
+                Lang::Cn => {
+                    cn.insert(key);
+                }
+                Lang::En => {
+                    en.insert(key);
+                }
+            }
+        }
+        for key in &cn {
+            assert!(en.contains(key), "missing En entry for key '{key}'");
+        }
+        for key in &en {
+            assert!(cn.contains(key), "missing Cn entry for key '{key}'");
+        }
+
+        // (b) Every t("...")/tf("...") literal used in src/ must exist in the table.
+        //     Catches misspelled keys at test time instead of silent runtime fallback.
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for entry in std::fs::read_dir(&src_dir).expect("src dir should exist") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path).expect("read source file");
+            for key in extract_t_keys(&content) {
+                assert!(
+                    cn.contains(key.as_str()),
+                    "key '{}' used in {} is missing from the translation table",
+                    key,
+                    path.display()
+                );
+            }
+        }
     }
 
     #[test]

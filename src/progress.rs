@@ -340,7 +340,14 @@ mod format_tests {
 
     #[test]
     fn test_format_record_success_uncolored() {
-        let s = format_record("my_video", true, Duration::from_millis(200), None, None, false);
+        let s = format_record(
+            "my_video",
+            true,
+            Duration::from_millis(200),
+            None,
+            None,
+            false,
+        );
         assert!(s.contains("my_video"));
         assert!(s.contains("200ms"));
     }
