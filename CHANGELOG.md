@@ -14,10 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `merger.rs` split into `merger/` submodules (merge/runner/summary/delete) with no public API change
 - Stem normalization unified into `scanner::make_key` / `scanner::safe_stem`; `--once` and directory scan no longer maintain separate composite-key rules
 - ffmpeg commands now use the path resolved by `which`, so a minimal PATH (e.g. aria2 hook) invokes the same binary that detection validated
+- Child-process waiting now polls with exponential backoff (1 ms → 50 ms) instead of a fixed 100 ms interval, removing up to one full interval of dead time from every merge
+
+### Performance
+- Batch merge throughput improved ~39% on a 200-pair `-c copy` benchmark (200 merges: 2.64s → 1.61s on 8 threads), now within ~9% of the raw `xargs -P8 ffmpeg` ceiling. The fixed 100 ms poll interval dominated merges that finish in ~30 ms.
 
 ### Added
 - Per-stem output size anchors recorded on merge success; `--resume` warns (non-blocking) when a completed output's size differs from its recorded anchor
 - `--once` stem validation (`validate_stem`) rejecting path separators, null bytes, empty input, and `.`/`..`
+- Unit tests for the poll backoff schedule (doubling, `POLL_MAX` clamp, zero-delay guard) plus a fast-child detection regression test
 
 ### Fixed
 - Silent data loss: distinct composite keys that flatten to the same output filename (`sub/a` vs `sub_a`) are now rejected upfront instead of overwriting
