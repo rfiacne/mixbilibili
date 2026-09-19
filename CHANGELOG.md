@@ -18,11 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 - Batch merge throughput improved ~39% on a 200-pair `-c copy` benchmark (200 merges: 2.64s → 1.61s on 8 threads), now within ~9% of the raw `xargs -P8 ffmpeg` ceiling. The fixed 100 ms poll interval dominated merges that finish in ~30 ms.
+- Scan/pairing phase roughly 2x faster on large trees (20000 pairs: preview 210 ms → 120 ms, quiet scan 130 ms → 60 ms). Three causes, all per-entry work in the hot loop:
+  - `entry.context(t("...").into_owned())` built the error message — a hash lookup plus a `String` — for *every* directory entry, on the happy path. Now lazy via `with_context`.
+  - The relative-parent key was re-derived from each file's path (`strip_prefix` + allocation per file). It is a property of the directory, so it is now carried down the recursion.
+  - `path.is_dir()` issued a second `stat()` per entry even though `read_dir` already reported the type; the entry's `file_type()` is now used once for both the symlink and directory checks.
+- Preview rendering writes through one buffered, locked stdout: `println!` per row meant a `write()` syscall per row (std's stdout is line-buffered), which dominated the scan phase on large lists. Column padding is also written straight to the buffer instead of allocating a `String` per column per row.
 
 ### Added
 - Per-stem output size anchors recorded on merge success; `--resume` warns (non-blocking) when a completed output's size differs from its recorded anchor
 - `--once` stem validation (`validate_stem`) rejecting path separators, null bytes, empty input, and `.`/`..`
 - Unit tests for the poll backoff schedule (doubling, `POLL_MAX` clamp, zero-delay guard) plus a fast-child detection regression test
+- Tests pinning the recursive composite-key format for multi-level trees (nested keys decide output filenames) and the preview's exact two-column CJK alignment
 
 ### Fixed
 - Translation-completeness test only scanned top-level `src/*.rs`, so the `src/merger/` submodules added in the module split were silently never validated. The scan is now recursive and asserts it visited those files, so it cannot go blind again.

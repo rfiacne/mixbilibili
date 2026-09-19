@@ -1,5 +1,22 @@
 use crate::scanner::FilePair;
 use colored::Colorize;
+use std::io::Write;
+
+/// Writes `width` spaces without allocating.
+///
+/// The preview aligns columns by *display* width (so CJK names line up), which
+/// rules out `{:width$}`; padding is therefore written explicitly. Doing this
+/// with `" ".repeat()` allocated a String per column per row.
+fn write_padding(out: &mut impl Write, mut width: usize) {
+    const SPACES: &[u8] = b"                                                                ";
+    while width > 0 {
+        let chunk = width.min(SPACES.len());
+        if out.write_all(&SPACES[..chunk]).is_err() {
+            return;
+        }
+        width -= chunk;
+    }
+}
 
 /// Detect whether the terminal supports Unicode output.
 pub fn supports_unicode() -> bool {
@@ -115,6 +132,25 @@ pub fn print_preview_pairs(
     header: &str,
     time_estimate: Option<&str>,
 ) {
+    // Render through one buffered, locked writer. std's stdout is line-buffered,
+    // so a `println!` per row cost a write() syscall per row — over 20000 rows
+    // that dominated the scan phase. Buffering collapses it to a few writes.
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    write_preview_pairs(&mut out, pairs, extension, header, time_estimate);
+    let _ = out.flush();
+}
+
+/// Renders the preview list into `out`. Split out from
+/// [`print_preview_pairs`] so the exact layout (including CJK column
+/// alignment) can be asserted in tests.
+fn write_preview_pairs(
+    out: &mut impl Write,
+    pairs: &[FilePair],
+    extension: &str,
+    header: &str,
+    time_estimate: Option<&str>,
+) {
     let symbols = Symbols::new(supports_unicode());
 
     // Compute max widths for two-column alignment (video | audio)
@@ -137,7 +173,8 @@ pub fn print_preview_pairs(
     let border = symbols.horizontal_line.repeat(inner_width);
 
     // Header with box-drawing top
-    println!(
+    let _ = writeln!(
+        out,
         "{} {} {}",
         Colors::secondary(symbols.top_left),
         Colors::info(header),
@@ -160,28 +197,31 @@ pub fn print_preview_pairs(
         // Use unicode-width for correct CJK character padding
         let video_display_width = unicode_width::UnicodeWidthStr::width(video_name.as_str());
         let audio_display_width = unicode_width::UnicodeWidthStr::width(audio_name.as_str());
-        let video_pad = " ".repeat(max_video_width.saturating_sub(video_display_width));
-        let audio_pad = " ".repeat(max_audio_width.saturating_sub(audio_display_width));
+        let video_pad = max_video_width.saturating_sub(video_display_width);
+        let audio_pad = max_audio_width.saturating_sub(audio_display_width);
 
         let num = Colors::secondary(&format!("{:>width$}.", idx + 1, width = idx_width));
         let arrow = Colors::info(symbols.arrow);
 
-        println!(
-            "{} {} {}{} {} {}{} {}.{}",
+        // Same layout as before, but padding is written straight to the buffer
+        // instead of being materialised as a String first:
+        //   {vertical} {num} {video}{pad} {arrow} {audio}{pad} {stem}.{ext}
+        let _ = write!(
+            out,
+            "{} {} {}",
             Colors::secondary(symbols.vertical_line),
             num,
-            video_name,
-            video_pad,
-            arrow,
-            audio_name,
-            audio_pad,
-            Colors::info(&pair.stem),
-            extension
+            video_name
         );
+        write_padding(out, video_pad);
+        let _ = write!(out, " {} {}", arrow, audio_name);
+        write_padding(out, audio_pad);
+        let _ = writeln!(out, " {}.{}", Colors::info(&pair.stem), extension);
     }
 
     // Bottom border
-    println!(
+    let _ = writeln!(
+        out,
         "{}{}",
         Colors::secondary(symbols.bottom_left),
         Colors::secondary(&border)
@@ -189,7 +229,7 @@ pub fn print_preview_pairs(
 
     // Time estimate
     if let Some(msg) = time_estimate {
-        println!("{}", Colors::secondary(msg));
+        let _ = writeln!(out, "{}", Colors::secondary(msg));
     }
 }
 
@@ -224,6 +264,109 @@ mod tests {
         std::env::set_var("MIXBILIBILI_ASCII", "1");
         assert!(!supports_unicode());
         std::env::remove_var("MIXBILIBILI_ASCII");
+    }
+
+    #[test]
+    fn test_write_padding_writes_exact_spaces() {
+        // Includes widths above the internal 64-byte chunk so the chunking loop
+        // is exercised, not just the single-write fast path.
+        for width in [0usize, 1, 5, 63, 64, 65, 130] {
+            let mut buf: Vec<u8> = Vec::new();
+            write_padding(&mut buf, width);
+            assert_eq!(buf.len(), width, "padding width mismatch for {width}");
+            assert!(
+                buf.iter().all(|&b| b == b' '),
+                "padding must contain only spaces for width {width}"
+            );
+        }
+    }
+
+    fn pair(video: &str, audio: &str, stem: &str) -> FilePair {
+        FilePair {
+            video: std::path::PathBuf::from(video),
+            audio: std::path::PathBuf::from(audio),
+            stem: stem.to_string(),
+        }
+    }
+
+    /// Renders a preview with the ASCII symbol set so the expected text is
+    /// readable and independent of terminal capabilities.
+    fn render_ascii_preview(pairs: &[FilePair]) -> String {
+        std::env::set_var("MIXBILIBILI_ASCII", "1");
+        let mut buf: Vec<u8> = Vec::new();
+        write_preview_pairs(&mut buf, pairs, "mkv", "HEADER", None);
+        std::env::remove_var("MIXBILIBILI_ASCII");
+        String::from_utf8(buf).expect("preview output should be UTF-8")
+    }
+
+    #[test]
+    fn test_preview_pads_columns_to_longest_name() {
+        let pairs = vec![
+            pair("ab.mp4", "ab.m4a", "ab"),
+            pair("abcdef.mp4", "abcdef.m4a", "abcdef"),
+        ];
+        let out = render_ascii_preview(&pairs);
+
+        // "abcdef" is the longest stem, so the short row is padded out to it.
+        assert!(
+            out.contains("| 1. ab.mp4     -> ab.m4a     ab.mkv"),
+            "short row should be padded to the longest name, got:\n{out}"
+        );
+        assert!(
+            out.contains("| 2. abcdef.mp4 -> abcdef.m4a abcdef.mkv"),
+            "long row should have no extra padding, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_preview_aligns_cjk_by_display_width() {
+        // Each CJK char is 2 columns but 3 UTF-8 bytes, so byte-count based
+        // padding would misalign these rows.
+        let pairs = vec![
+            pair("第1集.mp4", "第1集.m4a", "第1集"),
+            pair("ab.mp4", "ab.m4a", "ab"),
+        ];
+        let out = render_ascii_preview(&pairs);
+
+        // "第1集.mp4" is 9 display columns; "ab.mp4" is 6, so it needs 3 spaces.
+        assert!(
+            out.contains("| 2. ab.mp4    -> ab.m4a    ab.mkv"),
+            "ASCII row should be padded for the CJK display width, got:\n{out}"
+        );
+        assert!(
+            out.contains("| 1. 第1集.mp4 -> 第1集.m4a 第1集.mkv"),
+            "CJK row should use display width, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_preview_border_spans_row_width() {
+        let pairs = vec![pair("abcdef.mp4", "ghij.m4a", "abcdef")];
+        let out = render_ascii_preview(&pairs);
+        let lines: Vec<&str> = out.lines().collect();
+
+        let top = lines[0];
+        let row = lines[1];
+        let bottom = lines[2];
+
+        assert!(top.starts_with("+ HEADER "), "unexpected header: {top}");
+        assert!(
+            row.starts_with("| 1. abcdef.mp4 -> ghij.m4a abcdef.mkv"),
+            "{row}"
+        );
+
+        // The header label sits inside the top border, so top and bottom borders
+        // carry the same number of dashes (the label shifts the top one right).
+        let dashes = |s: &str| s.chars().filter(|c| *c == '-').count();
+        assert_eq!(
+            dashes(top),
+            dashes(bottom),
+            "top and bottom borders must be the same length:\n{out}"
+        );
+        assert!(
+            bottom.starts_with("+-"),
+            "unexpected bottom border: {bottom}"
+        );
     }
 
     #[test]

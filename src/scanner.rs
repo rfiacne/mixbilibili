@@ -23,12 +23,17 @@ pub(crate) fn safe_stem(key: &str) -> String {
     key.replace('/', "_")
 }
 
-/// Relative parent directory of `path` under `scan_root`, as a lossy string.
-fn relative_parent_of(path: &Path, scan_root: &Path) -> String {
-    path.parent()
-        .and_then(|p| p.strip_prefix(scan_root).ok())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default()
+/// Relative-parent string for a child directory of `rel_parent`.
+fn child_rel_parent(rel_parent: &str, child_name: &str) -> String {
+    if rel_parent.is_empty() {
+        child_name.to_string()
+    } else {
+        let mut out = String::with_capacity(rel_parent.len() + 1 + child_name.len());
+        out.push_str(rel_parent);
+        out.push('/');
+        out.push_str(child_name);
+        out
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -56,41 +61,56 @@ fn is_downloading(stem: &str, aria2_files: &HashSet<String>) -> bool {
     aria2_files.contains(stem)
 }
 
+/// Walks `dir` and records candidate files into the keyed maps.
+///
+/// `rel_parent` is `dir`'s path relative to the scan root (`""` at the root).
+/// It is carried down the recursion because it is a property of the *directory*:
+/// deriving it per entry cost a `strip_prefix` walk plus an allocation for every
+/// file in the tree, which dominated the scan on large directories.
 fn collect_files(
     dir: &Path,
-    scan_root: &Path,
+    rel_parent: &str,
     mp4_files: &mut HashMap<String, PathBuf>,
     m4a_files: &mut HashMap<String, PathBuf>,
     aria2_files: &mut HashSet<String>,
     recursive: bool,
 ) -> Result<()> {
-    let entries = fs::read_dir(dir).context(t("failed_read_dir").into_owned())?;
+    let entries = fs::read_dir(dir).with_context(|| t("failed_read_dir"))?;
 
     for entry in entries {
-        let entry = entry.context(t("failed_read_entry").into_owned())?;
-        let path = entry.path();
+        // Lazy context: the closure only runs on failure. Building the message
+        // eagerly allocated a String for every entry in the tree.
+        let entry = entry.with_context(|| t("failed_read_entry"))?;
 
-        // Check if this is a symlink BEFORE following it
-        // Use file_type() which does NOT follow symlinks (unlike metadata())
-        if entry.file_type()?.is_symlink() {
-            // Skip symlinks to prevent infinite loops and security issues
+        // One `file_type()` for the whole entry. Unlike `metadata()` it does not
+        // follow symlinks, and unlike `Path::is_dir()` it reuses the type already
+        // returned by readdir instead of issuing a second stat() per entry.
+        let file_type = entry.file_type()?;
+
+        // Skip symlinks to prevent infinite loops and security issues
+        if file_type.is_symlink() {
             continue;
         }
 
-        if path.is_dir() {
+        if file_type.is_dir() {
             if recursive {
-                collect_files(&path, scan_root, mp4_files, m4a_files, aria2_files, true)?;
+                let child = child_rel_parent(rel_parent, &entry.file_name().to_string_lossy());
+                collect_files(
+                    &entry.path(),
+                    &child,
+                    mp4_files,
+                    m4a_files,
+                    aria2_files,
+                    true,
+                )?;
             }
             continue;
         }
 
-        let filename = match path.file_name().and_then(|n| n.to_str()) {
-            Some(f) => f,
-            None => continue,
+        let name = entry.file_name();
+        let Some(filename) = name.to_str() else {
+            continue;
         };
-
-        // Build key: bare stem for non-recursive, relative path prefix for recursive
-        let parent = relative_parent_of(&path, scan_root);
 
         if let Some(stem) = filename.strip_suffix(".aria2") {
             // Normalize: strip .mp4/.m4a suffix so is_downloading needs only one lookup
@@ -98,11 +118,11 @@ fn collect_files(
                 .strip_suffix(".mp4")
                 .or_else(|| stem.strip_suffix(".m4a"))
                 .unwrap_or(stem);
-            aria2_files.insert(make_key(recursive, &parent, bare));
+            aria2_files.insert(make_key(recursive, rel_parent, bare));
         } else if let Some(stem) = filename.strip_suffix(".mp4") {
-            mp4_files.insert(make_key(recursive, &parent, stem), path);
+            mp4_files.insert(make_key(recursive, rel_parent, stem), entry.path());
         } else if let Some(stem) = filename.strip_suffix(".m4a") {
-            m4a_files.insert(make_key(recursive, &parent, stem), path);
+            m4a_files.insert(make_key(recursive, rel_parent, stem), entry.path());
         }
     }
 
@@ -116,7 +136,7 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
 
     collect_files(
         source_dir,
-        source_dir,
+        "",
         &mut mp4_files,
         &mut m4a_files,
         &mut aria2_files,
@@ -426,6 +446,66 @@ mod scan_tests {
 
         let result = scan_directory(path, true).unwrap();
         assert_eq!(result.pairs.len(), 2);
+    }
+
+    #[test]
+    fn test_scan_recursive_nested_keys_use_relative_parent_path() {
+        // The composite key decides the output filename, so pin the exact format
+        // for multi-level nesting (including a file directly in the scan root).
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        let season1 = root.join("season1");
+        let deeper = season1.join("extra");
+        fs::create_dir_all(&deeper).unwrap();
+
+        for (parent, stem) in [
+            (root.to_path_buf(), "ep03"),
+            (season1.clone(), "ep01"),
+            (deeper.clone(), "ep02"),
+        ] {
+            File::create(parent.join(format!("{stem}.mp4"))).unwrap();
+            File::create(parent.join(format!("{stem}.m4a"))).unwrap();
+        }
+
+        let result = scan_directory(root, true).unwrap();
+        let mut stems: Vec<&str> = result.pairs.iter().map(|p| p.stem.as_str()).collect();
+        stems.sort_unstable();
+
+        assert_eq!(
+            stems,
+            vec!["ep03", "season1/ep01", "season1/extra/ep02"],
+            "recursive keys must be the path relative to the scan root"
+        );
+    }
+
+    #[test]
+    fn test_scan_recursive_keys_flatten_to_distinct_output_names() {
+        // Guards the pipeline that follows scan: each distinct key must map to a
+        // distinct flattened filename, or pairs would overwrite each other.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        let nested = root.join("a").join("b");
+        let x_y = root.join("x_y");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&x_y).unwrap();
+        for (parent, stem) in [
+            (root.join("a"), "b"),
+            (nested.clone(), "c"),
+            (x_y.clone(), "c"),
+        ] {
+            File::create(parent.join(format!("{stem}.mp4"))).unwrap();
+            File::create(parent.join(format!("{stem}.m4a"))).unwrap();
+        }
+
+        let result = scan_directory(root, true).unwrap();
+        let mut flat: Vec<String> = result.pairs.iter().map(|p| safe_stem(&p.stem)).collect();
+        flat.sort();
+        flat.dedup();
+
+        assert_eq!(flat.len(), result.pairs.len(), "flat names must be unique");
+        assert_eq!(flat, vec!["a_b", "a_b_c", "x_y_c"]);
     }
 
     #[test]
@@ -798,7 +878,7 @@ mod collect_tests {
         let mut mp4 = HashMap::new();
         let mut m4a = HashMap::new();
         let mut aria2 = HashSet::new();
-        collect_files(path, path, &mut mp4, &mut m4a, &mut aria2, false).unwrap();
+        collect_files(path, "", &mut mp4, &mut m4a, &mut aria2, false).unwrap();
 
         // In non-recursive mode, aria2 set uses bare stem
         assert!(
@@ -819,7 +899,7 @@ mod collect_tests {
         let mut mp4 = HashMap::new();
         let mut m4a = HashMap::new();
         let mut aria2 = HashSet::new();
-        collect_files(path, path, &mut mp4, &mut m4a, &mut aria2, false).unwrap();
+        collect_files(path, "", &mut mp4, &mut m4a, &mut aria2, false).unwrap();
 
         // In non-recursive mode, aria2 set uses bare stem
         assert!(
