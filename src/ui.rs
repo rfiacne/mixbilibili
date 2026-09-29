@@ -1,3 +1,5 @@
+use crate::cli::OutputFormat;
+use crate::merger::output_file_name;
 use crate::scanner::FilePair;
 use colored::Colorize;
 use std::io::Write;
@@ -179,7 +181,7 @@ pub fn file_name_width(p: &std::path::Path) -> usize {
 /// Print preview of pairs to be processed, including header and time estimate.
 pub fn print_preview_pairs(
     pairs: &[FilePair],
-    extension: &str,
+    format: OutputFormat,
     header: &str,
     time_estimate: Option<&str>,
 ) {
@@ -189,7 +191,7 @@ pub fn print_preview_pairs(
     let symbols = Symbols::new(supports_unicode());
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
-    write_preview_pairs(&mut out, pairs, extension, header, time_estimate, &symbols);
+    write_preview_pairs(&mut out, pairs, format, header, time_estimate, &symbols);
     let _ = out.flush();
 }
 
@@ -226,7 +228,7 @@ fn write_deletion_preview(out: &mut impl Write, pairs: &[FilePair], header: &str
 fn write_preview_pairs(
     out: &mut impl Write,
     pairs: &[FilePair],
-    extension: &str,
+    format: OutputFormat,
     header: &str,
     time_estimate: Option<&str>,
     symbols: &Symbols,
@@ -244,20 +246,19 @@ fn write_preview_pairs(
         .map(|p| file_name_width(&p.audio))
         .max()
         .unwrap_or(0);
-    let max_stem_width = pairs
+    let max_output_width = pairs
         .iter()
-        .map(|p| UnicodeWidthStr::width(p.stem.as_str()))
+        .map(|p| UnicodeWidthStr::width(output_file_name(&p.stem, format).as_str()))
         .max()
         .unwrap_or(0);
 
     let idx_width = pairs.len().to_string().len();
     let arrow_width = UnicodeWidthStr::width(symbols.arrow);
-    let ext_width = UnicodeWidthStr::width(extension);
 
-    // Width of "{num}. {video} {arrow} {audio} {stem}.{ext}": everything between
-    // the leading space and the trailing space of a row. The stem is *not*
-    // padded, so the extension stays next to it; the slack is added at the end.
-    let fields_width = |stem_width: usize| {
+    // Width of "{num}. {video} {arrow} {audio} {output}": everything between the
+    // leading space and the trailing space of a row. The output name is *not*
+    // padded, so its extension stays next to the stem; the slack goes at the end.
+    let fields_width = |output_width: usize| {
         (idx_width + 1)
             + 1
             + max_video_width
@@ -266,9 +267,7 @@ fn write_preview_pairs(
             + 1
             + max_audio_width
             + 1
-            + stem_width
-            + 1
-            + ext_width
+            + output_width
     };
 
     let header_width = UnicodeWidthStr::width(header);
@@ -276,7 +275,7 @@ fn write_preview_pairs(
     // A row is `vertical + " " + fields + slack + " " + vertical`, so the dash
     // span must cover the widest row's fields plus two spaces; the header needs
     // two as well. Widening to fit the header keeps all four sides aligned.
-    let inner_width = (fields_width(max_stem_width) + 2).max(header_width + 2);
+    let inner_width = (fields_width(max_output_width) + 2).max(header_width + 2);
 
     let dashes = |n: usize| symbols.horizontal_line.repeat(n);
 
@@ -292,12 +291,15 @@ fn write_preview_pairs(
 
     for (idx, pair) in pairs.iter().enumerate() {
         // `Cow` rather than `into_owned()`: a valid UTF-8 name (the norm) is
-        // borrowed, so the row needs no allocation for either name.
+        // borrowed, so the row needs no allocation for either source name.
         let video_name = file_name_cow(&pair.video);
         let audio_name = file_name_cow(&pair.audio);
         let video_width = UnicodeWidthStr::width(&*video_name);
         let audio_width = UnicodeWidthStr::width(&*audio_name);
-        let stem_width = UnicodeWidthStr::width(pair.stem.as_str());
+        // The name the merge will actually create, so a nested pair shows up as
+        // "season1_ep.mkv" and not as the "season1/ep" composite key.
+        let output_name = output_file_name(&pair.stem, format);
+        let output_width = UnicodeWidthStr::width(output_name.as_str());
 
         let _ = write!(out, "{} ", Colors::secondary(symbols.vertical_line));
         write_index(out, idx + 1, idx_width);
@@ -305,11 +307,11 @@ fn write_preview_pairs(
         write_padding(out, max_video_width.saturating_sub(video_width));
         let _ = write!(out, " {} {}", Colors::info(symbols.arrow), audio_name);
         write_padding(out, max_audio_width.saturating_sub(audio_width));
-        let _ = write!(out, " {}.{extension}", Colors::info(pair.stem.as_str()));
+        let _ = write!(out, " {}", Colors::info(&output_name));
         // Right-align the closing border, leaving the extension against the stem.
         write_padding(
             out,
-            inner_width.saturating_sub(2 + fields_width(stem_width)),
+            inner_width.saturating_sub(2 + fields_width(output_width)),
         );
         let _ = writeln!(out, " {}", Colors::secondary(symbols.vertical_line));
     }
@@ -393,7 +395,7 @@ mod tests {
         write_preview_pairs(
             &mut buf,
             pairs,
-            "mkv",
+            OutputFormat::Mkv,
             "HEADER",
             None,
             &Symbols::new(unicode),
@@ -522,6 +524,32 @@ mod tests {
     }
 
     #[test]
+    fn test_preview_shows_the_output_name_not_the_composite_key() {
+        // A nested pair's key is "season1/ep", but the merge writes
+        // "season1_ep.mkv" (merger::output_file_name flattens the key). The
+        // preview must show the name that will really appear in the output
+        // directory, otherwise it promises a file that is never created.
+        let pairs = vec![
+            pair("ep.mp4", "ep.m4a", "ep"),
+            pair("ep.mp4", "ep.m4a", "season1/ep"),
+        ];
+        let out = render_ascii_preview(&pairs);
+
+        assert!(out.contains("season1_ep.mkv"), "got:\n{out}");
+        assert!(
+            !out.contains("season1/ep.mkv"),
+            "the composite key must not be shown as a filename:\n{out}"
+        );
+
+        // The longer flattened name must not ragged the box.
+        let widths: Vec<usize> = out.lines().map(line_width).collect();
+        assert!(
+            widths.iter().all(|w| *w == widths[0]),
+            "every line should share one width, got {widths:?}:\n{out}"
+        );
+    }
+
+    #[test]
     fn test_preview_widens_box_for_long_header() {
         // A header wider than the rows must widen the box rather than overflow.
         let pairs = vec![pair("a.mp4", "a.m4a", "a")];
@@ -531,7 +559,7 @@ mod tests {
         write_preview_pairs(
             &mut buf,
             &pairs,
-            "mkv",
+            OutputFormat::Mkv,
             &long_header,
             None,
             &Symbols::new(false),

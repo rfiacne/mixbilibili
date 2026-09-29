@@ -21,10 +21,30 @@ pub struct MergeSummary {
     pub failed_count: usize,
     pub skipped_count: usize,
     pub orphaned_count: usize,
+    /// Pairs left unfinished because the run was interrupted by Ctrl+C. They are
+    /// still pending, so `--resume` retries them on the next run.
+    pub interrupted_count: usize,
     pub failures: Vec<(String, String)>,
     pub deletion_failures: usize,
     pub total_duration: Duration,
     pub merge_count: usize,
+}
+
+impl MergeResult {
+    /// A pair that Ctrl+C stopped before it could be merged.
+    ///
+    /// Deliberately error-free: an interrupt is the user's doing, not a failure,
+    /// and the pair stays pending so `--resume` retries it.
+    pub fn interrupted(pair_index: usize, pair_name: &str, duration: Duration) -> Self {
+        Self {
+            pair_index,
+            pair_name: pair_name.to_string(),
+            success: false,
+            error: None,
+            duration,
+            was_interrupted: true,
+        }
+    }
 }
 
 impl MergeSummary {
@@ -44,8 +64,13 @@ impl MergeSummary {
         Some(self.merge_count as f64 / self.total_duration.as_secs_f64())
     }
 
+    /// True when every pair reached a terminal state.
+    ///
+    /// Interrupted pairs are *not* terminal — they stay pending for `--resume` —
+    /// so they count against success exactly like failures. `workflow::finalize`
+    /// uses this to decide whether the resume checkpoint can be deleted.
     pub fn all_success(&self) -> bool {
-        self.failed_count == 0
+        self.failed_count == 0 && self.interrupted_count == 0
     }
 
     pub fn print_report(&self, quiet: bool) {
@@ -401,6 +426,20 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_summary_all_success_false_when_interrupted() {
+        // Interrupted pairs are unfinished, not failed — but the batch as a whole
+        // is still not done, and `finalize` keys the state file off this.
+        let summary = MergeSummary {
+            success_count: 4,
+            failed_count: 0,
+            interrupted_count: 1,
+            merge_count: 4,
+            ..Default::default()
+        };
+        assert!(!summary.all_success());
+    }
+
+    #[test]
     fn test_merge_result_debug() {
         let result = MergeResult {
             pair_index: 0,
@@ -450,6 +489,7 @@ mod tests {
             failed_count: 1,
             skipped_count: 2,
             orphaned_count: 3,
+            interrupted_count: 0,
             failures: vec![("bad.mp4".to_string(), "codec error".to_string())],
             deletion_failures: 1,
             total_duration: Duration::from_secs(12),

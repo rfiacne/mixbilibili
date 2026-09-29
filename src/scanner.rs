@@ -57,10 +57,6 @@ pub struct ScanResult {
     pub estimated_duration: Duration,
 }
 
-fn is_downloading(stem: &str, aria2_files: &HashSet<String>) -> bool {
-    aria2_files.contains(stem)
-}
-
 /// Walks `dir` and records candidate files into the keyed maps.
 ///
 /// `rel_parent` is `dir`'s path relative to the scan root (`""` at the root).
@@ -113,7 +109,8 @@ fn collect_files(
         };
 
         if let Some(stem) = filename.strip_suffix(".aria2") {
-            // Normalize: strip .mp4/.m4a suffix so is_downloading needs only one lookup
+            // Normalize: strip the .mp4/.m4a suffix so the pairing check below
+            // needs only one set lookup.
             let bare = stem
                 .strip_suffix(".mp4")
                 .or_else(|| stem.strip_suffix(".m4a"))
@@ -152,7 +149,8 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
     all_keys.dedup();
 
     for key in all_keys {
-        if is_downloading(key, &aria2_files) {
+        // An .aria2 sidecar means aria2 is still writing this stem — skip it.
+        if aria2_files.contains(key) {
             stats.skipped += 1;
             continue;
         }
@@ -216,29 +214,6 @@ mod tests {
         assert_eq!(stats.pairs, 0);
         assert_eq!(stats.skipped, 0);
         assert_eq!(stats.orphaned, 0);
-    }
-
-    #[test]
-    fn test_is_downloading_with_composite_key() {
-        let mut aria2_files = HashSet::new();
-        aria2_files.insert("parent/foo".to_string());
-        assert!(is_downloading("parent/foo", &aria2_files));
-    }
-
-    #[test]
-    fn test_is_downloading_with_suffixed_composite_key() {
-        // After normalization in collect_files, aria2_files stores composite keys
-        let mut aria2_files = HashSet::new();
-        aria2_files.insert("parent/foo".to_string()); // was "foo.mp4" before normalization
-        assert!(is_downloading("parent/foo", &aria2_files));
-    }
-
-    #[test]
-    fn test_is_downloading_no_match() {
-        let mut aria2_files = HashSet::new();
-        aria2_files.insert("bar".to_string());
-        aria2_files.insert("baz.mp4".to_string());
-        assert!(!is_downloading("foo", &aria2_files));
     }
 
     #[test]

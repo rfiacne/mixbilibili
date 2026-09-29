@@ -12,31 +12,30 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-#[allow(clippy::too_many_arguments)]
-pub fn merge_pair(
-    pair: &FilePair,
-    pair_index: usize,
-    output_dir: &Path,
-    format: OutputFormat,
-    progress: Option<&MergeProgress>,
-    verbose: bool,
-    max_retries: usize,
-    runner: Option<&Runner<'_>>,
-) -> MergeResult {
+/// How to run a batch of merges.
+///
+/// Bundled into one struct because the six settings were previously six
+/// positional arguments, three of which (`verbose`, `max_retries`, `runner`)
+/// were easy to pass in the wrong order.
+pub struct MergeOptions<'a> {
+    /// Directory the merged file is written into.
+    pub output_dir: &'a Path,
+    pub format: OutputFormat,
+    /// Progress sink. When `None`, each result is printed as it completes.
+    pub progress: Option<&'a MergeProgress>,
+    pub verbose: bool,
+    /// Retries *after* the first attempt.
+    pub max_retries: usize,
+    /// Injectable ffmpeg invoker; `None` spawns ffmpeg for real.
+    pub runner: Option<&'a Runner<'a>>,
+}
+
+pub fn merge_pair(pair: &FilePair, pair_index: usize, options: &MergeOptions<'_>) -> MergeResult {
     if INTERRUPTED.load(Ordering::SeqCst) {
-        return MergeResult {
-            pair_index,
-            pair_name: pair.stem.clone(),
-            success: false,
-            error: Some("Skipped (interrupted)".to_string()),
-            duration: Duration::ZERO,
-            was_interrupted: true,
-        };
+        return MergeResult::interrupted(pair_index, &pair.stem, Duration::ZERO);
     }
 
-    // stem is now a composite key "parent/stem", flatten "/" to "_" for safe filename
-    let safe_stem = crate::scanner::safe_stem(&pair.stem);
-    let output_path = output_dir.join(format!("{}.{}", safe_stem, format.extension()));
+    let output_path = super::output_path(options.output_dir, &pair.stem, options.format);
 
     // Safety check: output path must not be identical to input video path
     // Use canonicalize to handle different path representations pointing to the same file
@@ -51,20 +50,11 @@ pub fn merge_pair(
             pair_index,
             t("same_source_output_runtime").into_owned(),
             Duration::ZERO,
-            progress,
+            options.progress,
         );
     }
 
-    do_merge(
-        pair,
-        &output_path,
-        pair_index,
-        format,
-        progress,
-        verbose,
-        max_retries,
-        runner,
-    )
+    do_merge(pair, &output_path, pair_index, options)
 }
 
 fn record_failure(
@@ -137,37 +127,25 @@ fn validate_output(output_path: &Path, min_expected: u64) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn do_merge(
     pair: &FilePair,
     output_path: &Path,
     pair_index: usize,
-    format: OutputFormat,
-    progress: Option<&MergeProgress>,
-    verbose: bool,
-    max_retries: usize,
-    runner: Option<&Runner<'_>>,
+    options: &MergeOptions<'_>,
 ) -> MergeResult {
     let start = std::time::Instant::now();
 
-    for attempt in 0..=max_retries {
+    for attempt in 0..=options.max_retries {
         // Early exit if interrupted — avoid useless retries after Ctrl+C
         if INTERRUPTED.load(Ordering::SeqCst) {
-            return MergeResult {
-                pair_index,
-                pair_name: pair.stem.clone(),
-                success: false,
-                error: None,
-                duration: start.elapsed(),
-                was_interrupted: true,
-            };
+            return MergeResult::interrupted(pair_index, &pair.stem, start.elapsed());
         }
 
         if attempt > 0 {
             std::thread::sleep(Duration::from_secs(1));
-            if let Some(p) = progress {
+            if let Some(p) = options.progress {
                 p.set_message(&tf("retry_marker", &[&attempt.to_string(), &pair.stem]));
-            } else if verbose {
+            } else if options.verbose {
                 println!(
                     "{} {}",
                     "↻".yellow(),
@@ -176,7 +154,7 @@ fn do_merge(
             }
         }
 
-        if verbose && attempt == 0 {
+        if options.verbose && attempt == 0 {
             println!(
                 "Running: ffmpeg -i {} -i {} -> {}",
                 pair.video.display(),
@@ -185,13 +163,16 @@ fn do_merge(
             );
         }
 
-        let mut cmd = ffmpeg::build_merge_command(&pair.video, &pair.audio, output_path, format);
-        let run_result = match runner {
-            Some(r) => r(&mut cmd, FFMPEG_TIMEOUT),
+        let mut cmd =
+            ffmpeg::build_merge_command(&pair.video, &pair.audio, output_path, options.format);
+        let run_result = match options.runner {
+            // The injected runner (tests) only reports exit statuses, so an
+            // interrupt can only come from the real ffmpeg invocation.
+            Some(r) => r(&mut cmd, FFMPEG_TIMEOUT).map(Some),
             None => super::runner::run_with_timeout(&mut cmd, FFMPEG_TIMEOUT),
         };
         match run_result {
-            Ok(status) if status.success() => {
+            Ok(Some(status)) if status.success() => {
                 // Validate output: exists, non-zero, and >= source video size.
                 let min_expected = match std::fs::metadata(&pair.video) {
                     Ok(m) => m.len(),
@@ -204,7 +185,7 @@ fn do_merge(
                                 &["video", &pair.video.display().to_string()],
                             ),
                             start.elapsed(),
-                            progress,
+                            options.progress,
                         );
                     }
                 };
@@ -214,12 +195,12 @@ fn do_merge(
                         pair_index,
                         e.to_string(),
                         start.elapsed(),
-                        progress,
+                        options.progress,
                     );
                 }
 
                 let duration = start.elapsed();
-                if let Some(p) = progress {
+                if let Some(p) = options.progress {
                     p.record(&pair.stem, true, duration, None, None);
                 } else {
                     println!("{} {}", t("checkmark").green(), pair.stem);
@@ -233,27 +214,41 @@ fn do_merge(
                     was_interrupted: false,
                 };
             }
-            Ok(_) if attempt < max_retries => continue,
-            Ok(status) => {
+            // Ctrl+C killed ffmpeg. Blaming ffmpeg here would be a lie, and the
+            // pair has to stay pending so `--resume` retries it.
+            Ok(None) => {
+                return MergeResult::interrupted(pair_index, &pair.stem, start.elapsed());
+            }
+            Ok(Some(_)) if attempt < options.max_retries => continue,
+            Ok(Some(status)) => {
                 let error_msg = tf(
                     "merge_failed_exit",
                     &[
-                        &status
-                            .code()
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        &max_retries.to_string(),
+                        &ffmpeg::exit_status_text(&status),
+                        &options.max_retries.to_string(),
                     ],
                 );
-                return record_failure(pair, pair_index, error_msg, start.elapsed(), progress);
+                return record_failure(
+                    pair,
+                    pair_index,
+                    error_msg,
+                    start.elapsed(),
+                    options.progress,
+                );
             }
-            Err(_) if attempt < max_retries => continue,
+            Err(_) if attempt < options.max_retries => continue,
             Err(e) => {
                 let error_msg = tf(
                     "merge_failed_io",
-                    &[&e.to_string(), &max_retries.to_string()],
+                    &[&e.to_string(), &options.max_retries.to_string()],
                 );
-                return record_failure(pair, pair_index, error_msg, start.elapsed(), progress);
+                return record_failure(
+                    pair,
+                    pair_index,
+                    error_msg,
+                    start.elapsed(),
+                    options.progress,
+                );
             }
         }
     }
@@ -367,16 +362,11 @@ mod tests {
             stem: "test".to_string(),
         };
 
-        let result = merge_pair(
-            &pair,
-            0,
-            dir.path(),
-            crate::cli::OutputFormat::Mp4,
-            None,
-            false,
-            0,
-            None,
-        );
+        let opts = MergeOptions {
+            format: crate::cli::OutputFormat::Mp4,
+            ..options(dir.path())
+        };
+        let result = merge_pair(&pair, 0, &opts);
 
         assert!(
             !result.success,
@@ -443,21 +433,28 @@ mod tests {
         Ok(success_status())
     }
 
+    /// Silent merge options; tests override the fields they care about.
+    fn options(out_dir: &Path) -> MergeOptions<'_> {
+        MergeOptions {
+            output_dir: out_dir,
+            format: OutputFormat::Mkv,
+            progress: None,
+            verbose: false,
+            max_retries: 0,
+            runner: None,
+        }
+    }
+
     #[test]
     fn test_merge_pair_success_with_fake_runner() {
         let dir = tempdir().unwrap();
         let (pair, out_dir) = make_pair(dir.path());
 
-        let result = merge_pair(
-            &pair,
-            0,
-            &out_dir,
-            crate::cli::OutputFormat::Mkv,
-            None,
-            false,
-            0,
-            Some(&fake_success_runner),
-        );
+        let opts = MergeOptions {
+            runner: Some(&fake_success_runner),
+            ..options(&out_dir)
+        };
+        let result = merge_pair(&pair, 0, &opts);
 
         assert!(result.success, "merge should succeed: {:?}", result.error);
         assert!(out_dir.join("v.mkv").exists(), "output file should exist");
@@ -480,16 +477,12 @@ mod tests {
             }
         };
 
-        let result = merge_pair(
-            &pair,
-            0,
-            &out_dir,
-            crate::cli::OutputFormat::Mkv,
-            None,
-            false,
-            1,
-            Some(&runner),
-        );
+        let opts = MergeOptions {
+            max_retries: 1,
+            runner: Some(&runner),
+            ..options(&out_dir)
+        };
+        let result = merge_pair(&pair, 0, &opts);
 
         assert!(result.success, "retry should succeed: {:?}", result.error);
         assert_eq!(attempts.load(AtomicOrdering::Relaxed), 2);
@@ -503,16 +496,12 @@ mod tests {
 
         let runner = |_cmd: &mut std::process::Command, _t: Duration| Ok(failure_status());
 
-        let result = merge_pair(
-            &pair,
-            0,
-            &out_dir,
-            crate::cli::OutputFormat::Mkv,
-            None,
-            false,
-            1,
-            Some(&runner),
-        );
+        let opts = MergeOptions {
+            max_retries: 1,
+            runner: Some(&runner),
+            ..options(&out_dir)
+        };
+        let result = merge_pair(&pair, 0, &opts);
 
         assert!(!result.success);
         let err = result.error.expect("failure should carry an error");
@@ -532,16 +521,11 @@ mod tests {
             anyhow::bail!("spawn failed")
         };
 
-        let result = merge_pair(
-            &pair,
-            0,
-            &out_dir,
-            crate::cli::OutputFormat::Mkv,
-            None,
-            false,
-            0,
-            Some(&runner),
-        );
+        let opts = MergeOptions {
+            runner: Some(&runner),
+            ..options(&out_dir)
+        };
+        let result = merge_pair(&pair, 0, &opts);
 
         assert!(!result.success);
         let err = result.error.expect("failure should carry an error");

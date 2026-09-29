@@ -122,9 +122,8 @@ impl MergeState {
         }
 
         // Apply any pending migrations in order (old version → current).
-        if state.version < CURRENT_SCHEMA_VERSION {
-            apply_migrations(&mut state, migrations(), CURRENT_SCHEMA_VERSION);
-        }
+        // A file already at the current version runs no migration.
+        apply_migrations(&mut state, migrations(), CURRENT_SCHEMA_VERSION);
 
         let expected = source.to_string_lossy().to_string();
         if state.source_dir != expected {

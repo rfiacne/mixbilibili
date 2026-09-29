@@ -12,16 +12,6 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    #[cfg(test)]
-    pub fn parse(s: &str) -> Result<Self> {
-        match s.to_lowercase().as_str() {
-            "mkv" => Ok(Self::Mkv),
-            "mp4" => Ok(Self::Mp4),
-            "mov" => Ok(Self::Mov),
-            _ => bail!("Invalid format '{}'. Supported: mkv, mp4, mov", s),
-        }
-    }
-
     pub fn extension(self) -> &'static str {
         match self {
             Self::Mkv => "mkv",
@@ -69,27 +59,6 @@ pub fn validate_stem(stem: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_valid_formats_lowercase() {
-        assert_eq!(OutputFormat::parse("mkv").unwrap(), OutputFormat::Mkv);
-        assert_eq!(OutputFormat::parse("mp4").unwrap(), OutputFormat::Mp4);
-        assert_eq!(OutputFormat::parse("mov").unwrap(), OutputFormat::Mov);
-    }
-
-    #[test]
-    fn test_parse_valid_formats_case_insensitive() {
-        assert_eq!(OutputFormat::parse("MKV").unwrap(), OutputFormat::Mkv);
-        assert_eq!(OutputFormat::parse("Mp4").unwrap(), OutputFormat::Mp4);
-        assert_eq!(OutputFormat::parse("MOV").unwrap(), OutputFormat::Mov);
-    }
-
-    #[test]
-    fn test_parse_invalid_format() {
-        let result = OutputFormat::parse("avi");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid format"));
-    }
 
     #[test]
     fn test_extension() {
@@ -265,51 +234,51 @@ pub fn build_cli() -> Command {
         )
 }
 
+/// A path-valued option. Falls back to the current directory when absent — the
+/// same default the clap definitions declare.
+fn path_arg(matches: &clap::ArgMatches, name: &str) -> PathBuf {
+    matches
+        .get_one::<String>(name)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// A boolean option that clap stores as a string so `--flag=false` is
+/// expressible. Only an explicit "false" turns it off.
+fn flag_default_true(matches: &clap::ArgMatches, name: &str) -> bool {
+    matches
+        .get_one::<String>(name)
+        .is_none_or(|value| value != "false")
+}
+
 /// Parse ArgMatches into Args struct.
 pub fn parse_args(matches: &clap::ArgMatches) -> Args {
-    let jobs = matches
-        .get_one::<usize>("jobs")
-        .copied()
-        .unwrap_or_else(default_jobs);
-    let retry = matches.get_one::<usize>("retry").copied().unwrap_or(0);
-
-    let format_str = matches
-        .get_one::<String>("format")
-        .map(|s| s.as_str())
-        .unwrap_or("mkv");
-    let format = match format_str {
-        "mp4" => OutputFormat::Mp4,
-        "mov" => OutputFormat::Mov,
-        _ => OutputFormat::Mkv,
-    };
-
     Args {
-        source: matches
-            .get_one::<String>("source")
-            .map(|s| s.into())
-            .unwrap_or_else(|| PathBuf::from(".")),
-        output: matches
-            .get_one::<String>("output")
-            .map(|s| s.into())
-            .unwrap_or_else(|| PathBuf::from(".")),
-        sdel: matches
-            .get_one::<String>("sdel")
-            .map(|s| s != "false")
-            .unwrap_or(true),
-        format,
-        jobs,
-        progress: matches
-            .get_one::<String>("progress")
-            .map(|s| s != "false")
-            .unwrap_or(true),
+        source: path_arg(matches, "source"),
+        output: path_arg(matches, "output"),
+        sdel: flag_default_true(matches, "sdel"),
+        format: match matches
+            .get_one::<String>("format")
+            .map(String::as_str)
+            .unwrap_or("mkv")
+        {
+            "mp4" => OutputFormat::Mp4,
+            "mov" => OutputFormat::Mov,
+            _ => OutputFormat::Mkv,
+        },
+        jobs: matches
+            .get_one::<usize>("jobs")
+            .copied()
+            .unwrap_or_else(default_jobs),
+        progress: flag_default_true(matches, "progress"),
         dry_run: matches.get_flag("dry_run"),
         interactive: matches.get_flag("interactive"),
         verbose: matches.get_flag("verbose"),
         quiet: matches.get_flag("quiet"),
         resume: matches.get_flag("resume"),
-        retry,
+        retry: matches.get_one::<usize>("retry").copied().unwrap_or(0),
         recursive: matches.get_flag("recursive"),
-        once: matches.get_one::<String>("once").map(|s| s.to_string()),
+        once: matches.get_one::<String>("once").cloned(),
         ascii: matches.get_flag("ascii"),
     }
 }
@@ -340,23 +309,30 @@ impl Args {
             );
         }
 
-        // Prevent source==output + mp4/mov format from overwriting source video files
+        // Prevent source==output + mp4/mov format from overwriting source video files.
+        // canonicalize() only succeeds for paths that exist, so a missing output
+        // directory simply skips the check.
         if self.format == OutputFormat::Mp4 || self.format == OutputFormat::Mov {
             let src = std::fs::canonicalize(&self.source).ok();
-            let out = self
-                .output
-                .exists()
-                .then(|| std::fs::canonicalize(&self.output).ok())
-                .flatten();
-            if let (Some(s), Some(o)) = (src, out) {
-                if s == o {
-                    bail!("{}", tf("same_source_output", &[&self.format.to_string()]));
-                }
+            let out = std::fs::canonicalize(&self.output).ok();
+            if src.is_some() && src == out {
+                bail!("{}", tf("same_source_output", &[&self.format.to_string()]));
             }
         }
 
         Ok(())
     }
+}
+
+/// Parse `argv` (without the program name) into `Args` through the real CLI.
+#[cfg(test)]
+fn args_from(argv: &[&str]) -> Args {
+    let mut full = vec!["mixbilibili"];
+    full.extend_from_slice(argv);
+    let matches = build_cli()
+        .try_get_matches_from(full)
+        .expect("test argv should parse");
+    parse_args(&matches)
 }
 
 #[cfg(test)]
@@ -408,153 +384,47 @@ mod args_tests {
     }
 
     #[test]
-    fn test_dry_run_flag_default() {
-        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
-        let args = parse_args(&matches);
-        assert!(!args.dry_run);
-    }
-
-    #[test]
     fn test_dry_run_flag_enabled() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "--dry-run"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert!(args.dry_run);
-    }
-
-    #[test]
-    fn test_verbose_flag_default() {
-        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
-        let args = parse_args(&matches);
-        assert!(!args.verbose);
+        assert!(args_from(&["--dry-run"]).dry_run);
     }
 
     #[test]
     fn test_verbose_flag_enabled() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "--verbose"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert!(args.verbose);
-    }
-
-    #[test]
-    fn test_resume_flag_default() {
-        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
-        let args = parse_args(&matches);
-        assert!(!args.resume);
+        assert!(args_from(&["--verbose"]).verbose);
     }
 
     #[test]
     fn test_resume_flag_enabled() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "--resume"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert!(args.resume);
-    }
-
-    #[test]
-    fn test_retry_default() {
-        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
-        let args = parse_args(&matches);
-        assert_eq!(args.retry, 0);
+        assert!(args_from(&["--resume"]).resume);
     }
 
     #[test]
     fn test_retry_custom() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "--retry", "3"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert_eq!(args.retry, 3);
+        assert_eq!(args_from(&["--retry", "3"]).retry, 3);
     }
 
     #[test]
-    fn test_quiet_flag_default() {
-        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
-        let args = parse_args(&matches);
-        assert!(!args.quiet);
+    fn test_quiet_flag_short_and_long() {
+        assert!(args_from(&["-q"]).quiet);
+        assert!(args_from(&["--quiet"]).quiet);
     }
 
     #[test]
-    fn test_quiet_flag_enabled() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "-q"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert!(args.quiet);
+    fn test_sdel_bare_uses_default_missing_value() {
+        assert!(args_from(&["--sdel"]).sdel);
+        assert!(args_from(&["-d"]).sdel);
+        assert!(args_from(&["--sdel", "true"]).sdel);
     }
 
     #[test]
-    fn test_quiet_flag_long() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "--quiet"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert!(args.quiet);
-    }
-
-    #[test]
-    fn test_sdel_bare() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "--sdel"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert!(args.sdel); // bare --sdel uses default_missing_value("true")
-    }
-
-    #[test]
-    fn test_sdel_bare_short() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "-d"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert!(args.sdel); // bare -d uses default_missing_value("true")
-    }
-
-    #[test]
-    fn test_sdel_explicit_true() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "--sdel", "true"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert!(args.sdel);
-    }
-
-    #[test]
-    fn test_progress_bare() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "--progress"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert!(args.progress);
-    }
-
-    #[test]
-    fn test_progress_bare_short() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "-p"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert!(args.progress);
-    }
-
-    #[test]
-    fn test_ascii_flag_default() {
-        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
-        let args = parse_args(&matches);
-        assert!(!args.ascii);
+    fn test_progress_bare_uses_default_missing_value() {
+        assert!(args_from(&["--progress"]).progress);
+        assert!(args_from(&["-p"]).progress);
     }
 
     #[test]
     fn test_ascii_flag_enabled() {
-        let matches = build_cli()
-            .try_get_matches_from(["mixbilibili", "--ascii"])
-            .unwrap();
-        let args = parse_args(&matches);
-        assert!(args.ascii);
+        assert!(args_from(&["--ascii"]).ascii);
     }
 }
 
@@ -563,35 +433,28 @@ mod builder_tests {
     use super::*;
 
     #[test]
-    fn test_build_cli_defaults() {
-        let matches = build_cli().try_get_matches_from(["mixbilibili"]).unwrap();
-        let args = parse_args(&matches);
+    fn test_cli_defaults() {
+        let args = args_from(&[]);
         assert_eq!(args.source, PathBuf::from("."));
         assert_eq!(args.output, PathBuf::from("."));
+        // --sdel and --progress are on by default.
         assert!(args.sdel);
+        assert!(args.progress);
         assert!(!args.dry_run);
+        assert!(!args.interactive);
         assert!(!args.quiet);
         assert!(!args.verbose);
         assert!(!args.resume);
+        assert!(!args.recursive);
+        assert!(!args.ascii);
         assert_eq!(args.retry, 0);
+        assert_eq!(args.once, None);
+        assert_eq!(args.format, OutputFormat::Mkv);
     }
 
     #[test]
-    fn test_build_cli_short_flags() {
-        let matches = build_cli()
-            .try_get_matches_from([
-                "mixbilibili",
-                "-s",
-                "/tmp",
-                "-o",
-                "/out",
-                "-j",
-                "4",
-                "-f",
-                "mp4",
-            ])
-            .unwrap();
-        let args = parse_args(&matches);
+    fn test_cli_short_flags() {
+        let args = args_from(&["-s", "/tmp", "-o", "/out", "-j", "4", "-f", "mp4"]);
         assert_eq!(args.source, PathBuf::from("/tmp"));
         assert_eq!(args.output, PathBuf::from("/out"));
         assert_eq!(args.jobs, 4);
@@ -599,23 +462,19 @@ mod builder_tests {
     }
 
     #[test]
-    fn test_build_cli_long_flags() {
-        let matches = build_cli()
-            .try_get_matches_from([
-                "mixbilibili",
-                "--dry-run",
-                "--quiet",
-                "--verbose",
-                "--resume",
-                "--retry",
-                "3",
-                "--sdel",
-                "false",
-                "--progress",
-                "false",
-            ])
-            .unwrap();
-        let args = parse_args(&matches);
+    fn test_cli_long_flags() {
+        let args = args_from(&[
+            "--dry-run",
+            "--quiet",
+            "--verbose",
+            "--resume",
+            "--retry",
+            "3",
+            "--sdel",
+            "false",
+            "--progress",
+            "false",
+        ]);
         assert!(args.dry_run);
         assert!(args.quiet);
         assert!(args.verbose);

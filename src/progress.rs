@@ -122,6 +122,11 @@ pub(crate) fn format_duration(d: Duration) -> String {
     }
 }
 
+/// Batch progress-bar template: spinner, status, cyan/blue bar, position, ETA.
+const PROGRESS_TEMPLATE: &str = "{spinner} {msg:20} {bar:20.cyan/blue} {pos}/{len} ETA: {eta}";
+/// Three-level block gradient for the bar fill.
+const PROGRESS_CHARS: &str = "███░░░";
+
 /// Progress bar wrapper for batch merge operations.
 pub struct MergeProgress {
     inner: Renderer,
@@ -134,15 +139,11 @@ impl MergeProgress {
             let bar = ProgressBar::new(total as u64);
             bar.enable_steady_tick(Duration::from_millis(100));
 
-            // 新模板：使用 ● spinner，蓝色已完成，亮黑未完成
-            let template =
-                "{spinner} {msg:20} {bar:20.cyan/blue} {pos}/{len} ETA: {eta}".to_string();
-
             bar.set_style(
-                ProgressStyle::with_template(&template)
+                ProgressStyle::with_template(PROGRESS_TEMPLATE)
                     .unwrap()
-                    .progress_chars("███░░░") // 三阶灰度
-                    .tick_strings(&["●", "○", "●"]) // spinner 动画
+                    .progress_chars(PROGRESS_CHARS)
+                    .tick_strings(&["●", "○", "●"])
                     .with_key(
                         "eta",
                         |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
@@ -173,8 +174,8 @@ impl MergeProgress {
         }
     }
 
-    /// Create a text-mode renderer explicitly (for testing or forced text output).
-    #[allow(dead_code)]
+    /// Create a text-mode renderer explicitly, bypassing TTY detection.
+    #[cfg(test)]
     pub fn new_text(total: usize) -> Self {
         Self {
             inner: Renderer::new_text(total),
@@ -266,11 +267,15 @@ mod tests {
     }
 
     #[test]
-    fn test_progress_bar_template_uses_new_style() {
-        // 验证进度条使用 ███░░ 样式
-        let progress = MergeProgress::new(10);
-        // 由于 indicatif 内部状态难以直接访问，这里验证创建成功
-        progress.finish();
+    fn test_progress_bar_template_parses() {
+        // indicatif validates the template at construction and `new()` unwraps the
+        // result, so a typo would panic in production rather than fail a test.
+        let parsed = ProgressStyle::with_template(PROGRESS_TEMPLATE);
+        assert!(
+            parsed.is_ok(),
+            "batch progress-bar template must be valid: {:?}",
+            parsed.err()
+        );
     }
 
     #[test]

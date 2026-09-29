@@ -2,18 +2,21 @@ use crate::cli::OutputFormat;
 use crate::i18n::{t, tf};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 
 pub fn is_ffmpeg_available() -> bool {
     which::which("ffmpeg").is_ok()
 }
 
-#[cfg(test)]
-pub fn ffmpeg_path() -> Option<std::path::PathBuf> {
-    which::which("ffmpeg").ok()
+/// Human-readable exit code of a finished process, for error messages.
+pub fn exit_status_text(status: &ExitStatus) -> String {
+    status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
-// Os variants are matched in get_install_command/get_manual_instructions
+// Os variants are matched in get_manual_instructions/package_managers
 // but only one variant is constructed at compile time via detect_os()
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // Cross-platform: only one variant constructed per target
@@ -86,13 +89,6 @@ fn package_managers(os: Os) -> Vec<(&'static str, &'static str)> {
     }
 }
 
-#[allow(dead_code)] // Used in tests only, but kept as public utility
-pub fn get_install_command(os: Os) -> Option<(String, String)> {
-    package_managers(os)
-        .first()
-        .map(|(name, cmd)| (name.to_string(), cmd.to_string()))
-}
-
 pub fn get_manual_instructions(os: Os) -> std::borrow::Cow<'static, str> {
     let key = match os {
         Os::Windows => "manual_instructions_windows",
@@ -104,21 +100,20 @@ pub fn get_manual_instructions(os: Os) -> std::borrow::Cow<'static, str> {
 }
 
 pub fn prompt_and_install(os: Os) -> anyhow::Result<bool> {
-    let pms = package_managers(os);
-    if pms.is_empty() {
+    // The first detected package manager wins; with none, only manual steps remain.
+    let Some((pm_name, install_cmd)) = package_managers(os).first().copied() else {
         println!("{}", get_manual_instructions(os));
         return Ok(false);
-    }
+    };
 
-    let (pm_name, _) = pms[0];
     print!("{}", tf("install_ffmpeg_prompt", &[pm_name]));
     io::stdout().flush()?;
 
     let mut input = String::new();
     if io::stdin().lock().read_line(&mut input).is_ok() {
-        let input = input.trim().to_lowercase();
-        if input == "y" || input == "yes" {
-            return Ok(run_install(&pms));
+        let answer = input.trim().to_lowercase();
+        if answer == "y" || answer == "yes" {
+            return Ok(run_install(install_cmd));
         }
     }
 
@@ -126,12 +121,7 @@ pub fn prompt_and_install(os: Os) -> anyhow::Result<bool> {
     Ok(false)
 }
 
-fn run_install(pms: &[(&str, &str)]) -> bool {
-    if pms.is_empty() {
-        return false;
-    }
-
-    let (_, cmd) = pms[0];
+fn run_install(cmd: &str) -> bool {
     println!("{}", tf("running_cmd", &[cmd]));
 
     let result = if cfg!(target_os = "windows") {
@@ -151,13 +141,7 @@ fn run_install(pms: &[(&str, &str)]) -> bool {
         Ok(status) => {
             println!(
                 "{}",
-                tf(
-                    "install_failed_exit",
-                    &[&status
-                        .code()
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "unknown".to_string())]
-                )
+                tf("install_failed_exit", &[&exit_status_text(&status)])
             );
         }
         Err(e) => {
@@ -234,14 +218,6 @@ mod tests {
         // It should not panic either way
         let _ = is_ffmpeg_available();
     }
-
-    #[test]
-    fn test_ffmpeg_path_returns_some_if_available() {
-        // If ffmpeg is installed, should return Some
-        if is_ffmpeg_available() {
-            assert!(ffmpeg_path().is_some());
-        }
-    }
 }
 
 #[cfg(test)]
@@ -291,12 +267,6 @@ mod pm_tests {
     fn test_get_manual_instructions_unknown() {
         let instructions = get_manual_instructions(Os::Unknown);
         assert!(instructions.contains("ffmpeg.org"));
-    }
-
-    #[test]
-    fn test_get_install_command_unknown_returns_none() {
-        let result = get_install_command(Os::Unknown);
-        assert!(result.is_none());
     }
 }
 

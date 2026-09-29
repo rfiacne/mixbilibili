@@ -16,13 +16,27 @@ const POLL_INITIAL: Duration = Duration::from_millis(1);
 /// on wakeups.
 const POLL_MAX: Duration = Duration::from_millis(50);
 
+/// Why waiting for a child stopped.
+///
+/// Kept apart because the caller reacts differently: an interrupt leaves the pair
+/// pending for `--resume`, a timeout is a merge failure.
+enum WaitOutcome {
+    /// The child exited on its own.
+    Exited(ExitStatus),
+    /// Ctrl+C was pressed. The child has been killed and reaped.
+    Interrupted,
+    /// The child outlived `timeout` and is still running, so the caller must
+    /// clean it up.
+    TimedOut,
+}
+
 /// Extension trait for `std::process::Child` that adds timeout-aware waiting.
 trait ChildExt {
     fn wait_with_timeout(
         &mut self,
         timeout: Duration,
         initial_interval: Duration,
-    ) -> io::Result<Option<ExitStatus>>;
+    ) -> io::Result<WaitOutcome>;
 }
 
 impl ChildExt for Child {
@@ -37,21 +51,21 @@ impl ChildExt for Child {
         &mut self,
         timeout: Duration,
         initial_interval: Duration,
-    ) -> io::Result<Option<ExitStatus>> {
+    ) -> io::Result<WaitOutcome> {
         let start = std::time::Instant::now();
         let mut interval = initial_interval.min(POLL_MAX);
         loop {
             match self.try_wait() {
-                Ok(Some(status)) => return Ok(Some(status)),
+                Ok(Some(status)) => return Ok(WaitOutcome::Exited(status)),
                 Ok(None) => {
                     // Check for interrupt signal and kill child if interrupted
                     if INTERRUPTED.load(Ordering::SeqCst) {
                         let _ = self.kill();
                         let _ = self.wait();
-                        return Ok(None);
+                        return Ok(WaitOutcome::Interrupted);
                     }
                     if start.elapsed() >= timeout {
-                        return Ok(None);
+                        return Ok(WaitOutcome::TimedOut);
                     }
                     std::thread::sleep(interval);
                     interval = next_poll_delay(interval, initial_interval);
@@ -73,20 +87,28 @@ fn next_poll_delay(current: Duration, initial: Duration) -> Duration {
 
 /// Runner for a single ffmpeg invocation: spawn `cmd`, wait up to `timeout`,
 /// return the exit status. Injectable so merge logic is testable without ffmpeg.
+///
+/// `Send + Sync` because a batch shares one runner across rayon workers.
 pub(super) type Runner<'a> =
-    dyn Fn(&mut std::process::Command, Duration) -> Result<ExitStatus> + 'a;
+    dyn Fn(&mut std::process::Command, Duration) -> Result<ExitStatus> + Send + Sync + 'a;
 
+/// Runs `cmd`, waiting up to `timeout` for it to exit.
+///
+/// `Ok(None)` means Ctrl+C killed the child, which is *not* a merge failure: the
+/// caller records that pair as interrupted so it stays pending for `--resume`.
+/// A child that outlives the timeout is an error.
 pub(super) fn run_with_timeout(
     cmd: &mut std::process::Command,
     timeout: Duration,
-) -> Result<ExitStatus> {
+) -> Result<Option<ExitStatus>> {
     // SIGCHLD reset is now done once in main.rs run() before rayon pool creation
 
     let mut child = cmd.spawn().context(t("failed_to_spawn"))?;
 
     match child.wait_with_timeout(timeout, POLL_INITIAL) {
-        Ok(Some(status)) => Ok(status),
-        Ok(None) => {
+        Ok(WaitOutcome::Exited(status)) => Ok(Some(status)),
+        Ok(WaitOutcome::Interrupted) => Ok(None),
+        Ok(WaitOutcome::TimedOut) => {
             let _ = child.kill();
             let _ = child.wait();
             anyhow::bail!("{}", t("timed_out"));
@@ -116,10 +138,10 @@ mod tests {
             .spawn()
             .expect("timeout command should be available");
 
-        let result = child.wait_with_timeout(Duration::from_secs(5), POLL_INITIAL);
-        assert!(result.is_ok());
-        let status = result.unwrap();
-        assert!(status.is_some());
+        let outcome = child
+            .wait_with_timeout(Duration::from_secs(5), POLL_INITIAL)
+            .expect("wait should succeed");
+        assert!(matches!(outcome, WaitOutcome::Exited(_)));
     }
 
     #[test]
@@ -138,11 +160,11 @@ mod tests {
             .spawn()
             .expect("timeout command should be available");
 
-        let result = child.wait_with_timeout(Duration::from_millis(50), POLL_INITIAL);
-        assert!(result.is_ok());
-        // Should return None indicating timeout
-        let status = result.unwrap();
-        assert!(status.is_none());
+        let outcome = child
+            .wait_with_timeout(Duration::from_millis(50), POLL_INITIAL)
+            .expect("wait should succeed");
+        // Distinct from an interrupt: only a timeout counts as a merge failure.
+        assert!(matches!(outcome, WaitOutcome::TimedOut));
     }
 
     #[test]
@@ -165,9 +187,10 @@ mod tests {
         // Wait a bit for it to finish
         std::thread::sleep(Duration::from_millis(150));
 
-        let result = child.wait_with_timeout(Duration::from_secs(5), POLL_INITIAL);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_some());
+        let outcome = child
+            .wait_with_timeout(Duration::from_secs(5), POLL_INITIAL)
+            .expect("wait should succeed");
+        assert!(matches!(outcome, WaitOutcome::Exited(_)));
     }
 
     #[test]
@@ -240,12 +263,15 @@ mod tests {
             .expect("timeout command should be available");
 
         let started = std::time::Instant::now();
-        let status = child
+        let outcome = child
             .wait_with_timeout(Duration::from_secs(5), POLL_INITIAL)
             .expect("wait should succeed");
         let elapsed = started.elapsed();
 
-        assert!(status.is_some(), "child should have exited");
+        assert!(
+            matches!(outcome, WaitOutcome::Exited(_)),
+            "child should have exited"
+        );
         assert!(
             elapsed < Duration::from_millis(150),
             "fast child took {elapsed:?} to detect; poll backoff may be too slow"

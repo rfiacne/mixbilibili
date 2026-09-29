@@ -79,10 +79,7 @@ fn scan_and_filter(args: &Args) -> Result<Option<(ScanContext, state::MergeState
     // anchor (possible external modification). Non-blocking: resume proceeds.
     if let Some(ref state) = existing_state {
         for (stem, recorded, actual) in check_modified_outputs(state, &args.output, args.format) {
-            let safe_stem = scanner::safe_stem(&stem);
-            let output_path =
-                args.output
-                    .join(format!("{}.{}", safe_stem, args.format.extension()));
+            let output_path = merger::output_path(&args.output, &stem, args.format);
             eprintln!(
                 "{}",
                 tf(
@@ -161,11 +158,7 @@ fn check_modified_outputs(
     let mut modified = Vec::new();
     for stem in &state.completed {
         if let Some(recorded) = state.anchor_for(stem) {
-            let output_path = output_dir.join(format!(
-                "{}.{}",
-                scanner::safe_stem(stem),
-                format.extension()
-            ));
+            let output_path = merger::output_path(output_dir, stem, format);
             if let Ok(m) = std::fs::metadata(&output_path) {
                 if m.len() != recorded {
                     modified.push((stem.clone(), recorded, m.len()));
@@ -205,15 +198,22 @@ fn run_once(args: &Args, format: OutputFormat, stem: &str) -> Result<()> {
         stem: stem.to_string(),
     };
 
+    if args.dry_run {
+        print_dry_run(args, format, std::slice::from_ref(&pair), None);
+        return Ok(());
+    }
+
     let result = merger::merge_pair(
         &pair,
         0,
-        &args.output,
-        format,
-        None,
-        args.verbose,
-        args.retry,
-        None,
+        &merger::MergeOptions {
+            output_dir: &args.output,
+            format,
+            progress: None,
+            verbose: args.verbose,
+            max_retries: args.retry,
+            runner: None,
+        },
     );
 
     if result.success {
@@ -222,25 +222,53 @@ fn run_once(args: &Args, format: OutputFormat, stem: &str) -> Result<()> {
                 eprintln!("{} {}", t("warning_prefix").yellow(), e);
             }
         }
-        Ok(())
-    } else {
-        // Clean up partial output file if merge failed
-        let output_path = args.output.join(format!(
-            "{}.{}",
-            scanner::safe_stem(stem),
-            format.extension()
-        ));
-        if output_path.exists() {
-            if let Err(e) = std::fs::remove_file(&output_path) {
-                eprintln!(
-                    "{} Failed to clean up partial output: {}",
-                    t("warning_prefix").yellow(),
-                    e
-                );
-            }
-        }
-        Err(AppError::MergeFailed { count: 1 }.into())
+        return Ok(());
     }
+
+    // Clean up the partial output left by a failed or interrupted merge.
+    let output_path = merger::output_path(&args.output, stem, format);
+    if output_path.exists() {
+        if let Err(e) = std::fs::remove_file(&output_path) {
+            eprintln!(
+                "{} {}",
+                t("warning_prefix").yellow(),
+                tf(
+                    "failed_cleanup_partial",
+                    &[&output_path.display().to_string(), &e.to_string()]
+                )
+            );
+        }
+    }
+
+    // Ctrl+C is the user's doing, not a merge failure. `--once` writes no
+    // checkpoint, so there is nothing to resume from, but it still stops the same
+    // way the batch path does instead of reporting a failed merge.
+    if result.was_interrupted {
+        println!("{}", t("interrupted_cleanup").yellow());
+        return Ok(());
+    }
+
+    Err(AppError::MergeFailed { count: 1 }.into())
+}
+
+/// Prints the dry-run preview for `pairs`: what would be merged, and what would
+/// be deleted. Shared by the scan path and `--once`, so `-n` means the same thing
+/// in both modes (and touches no files in either).
+fn print_dry_run(
+    args: &Args,
+    format: OutputFormat,
+    pairs: &[scanner::FilePair],
+    time_estimate: Option<&str>,
+) {
+    if args.quiet {
+        return;
+    }
+    crate::ui::print_preview_pairs(pairs, format, &t("dry_run_header"), time_estimate);
+    if args.sdel {
+        crate::ui::print_deletion_preview(pairs, &t("dry_run_sdel_header"));
+    }
+    println!("\n{}", tf("dry_run_summary", &[&pairs.len().to_string()]));
+    println!("{}", t("dry_run_complete").cyan());
 }
 
 /// Merges between incremental state saves to limit progress loss on interrupt.
@@ -267,29 +295,52 @@ fn execute(
         None
     };
 
-    let mut final_summary = merger::MergeSummary::default();
+    let results = merge_all_pairs(args, &ctx.pairs, merge_state, format, progress.as_ref());
 
-    // Run all pairs in one parallel batch with periodic state saves
+    if let Some(p) = &progress {
+        p.finish();
+    }
+
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        cleanup_interrupted_outputs(args, &ctx.pairs, format, &results);
+    }
+
+    let deletion_failures = if args.sdel {
+        delete_succeeded_sources(&ctx.pairs, &results)
+    } else {
+        0
+    };
+
+    Ok(summarize(&ctx, &results, deletion_failures))
+}
+
+/// Run every pair in one parallel batch, updating the shared state after each
+/// merge and saving a snapshot every [`STATE_SAVE_INTERVAL`] completions.
+fn merge_all_pairs(
+    args: &Args,
+    pairs: &[scanner::FilePair],
+    merge_state: &mut state::MergeState,
+    format: OutputFormat,
+    progress: Option<&progress::MergeProgress>,
+) -> Vec<merger::MergeResult> {
+    let options = merger::MergeOptions {
+        output_dir: &args.output,
+        format,
+        progress,
+        verbose: args.verbose,
+        max_retries: args.retry,
+        runner: None,
+    };
+
     let state_mutex = std::sync::Arc::new(std::sync::Mutex::new(merge_state));
     let completed_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let save_interval = STATE_SAVE_INTERVAL;
     let source = args.source.clone();
 
-    let results: Vec<merger::MergeResult> = ctx
-        .pairs
+    let results: Vec<merger::MergeResult> = pairs
         .par_iter()
         .enumerate()
         .map(|(idx, pair)| {
-            let result = merger::merge_pair(
-                pair,
-                idx,
-                &args.output,
-                format,
-                progress.as_ref(),
-                args.verbose,
-                args.retry,
-                None,
-            );
+            let result = merger::merge_pair(pair, idx, &options);
 
             // Update state and periodically save
             let snapshot = {
@@ -299,10 +350,7 @@ fn execute(
                     if result.success {
                         state.mark_completed(&pair.stem);
                         // Record the merged output size as a resume-time anchor.
-                        let safe_stem = scanner::safe_stem(&pair.stem);
-                        let output_path =
-                            args.output
-                                .join(format!("{}.{}", safe_stem, format.extension()));
+                        let output_path = merger::output_path(&args.output, &pair.stem, format);
                         if let Ok(m) = std::fs::metadata(&output_path) {
                             state.record_anchor(&pair.stem, m.len());
                         }
@@ -311,11 +359,9 @@ fn execute(
                     }
                 }
                 let count = completed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                if count.is_multiple_of(save_interval) {
-                    Some(state.clone())
-                } else {
-                    None
-                }
+                count
+                    .is_multiple_of(STATE_SAVE_INTERVAL)
+                    .then(|| state.clone())
             }; // lock dropped here
 
             // Save outside the lock so parallel workers aren't blocked by file I/O
@@ -338,74 +384,89 @@ fn execute(
         }
     }
 
-    // Finish progress bar
-    if let Some(p) = &progress {
-        p.finish();
-    }
+    results
+}
 
-    // Cleanup partial output files on interrupt
-    if INTERRUPTED.load(Ordering::SeqCst) {
-        for result in &results {
-            if result.was_interrupted {
-                let pair = &ctx.pairs[result.pair_index];
-                // stem is composite key "parent/stem", safe_stem flattens it for the filename
-                let safe_stem = scanner::safe_stem(&pair.stem);
-                let output_path = args
-                    .output
-                    .join(format!("{}.{}", safe_stem, format.extension()));
-                if output_path.exists() {
-                    if let Err(e) = std::fs::remove_file(&output_path) {
-                        eprintln!("{} {}", t("warning_prefix").yellow(), e);
-                    } else if args.verbose {
-                        eprintln!(
-                            "{}",
-                            tf("cleanup_partial", &[&output_path.display().to_string()]).yellow()
-                        );
-                    }
-                }
-                // NOTE: Do NOT delete source files on interrupt.
-                // ffmpeg -c copy doesn't consume source files, so they remain valid.
-                // Deleting them would cause data loss. Keep them for --resume.
-            }
+/// Delete the half-written outputs of merges that Ctrl+C interrupted.
+///
+/// Source files are deliberately kept: `ffmpeg -c copy` never consumes them, so
+/// they remain valid for `--resume`.
+fn cleanup_interrupted_outputs(
+    args: &Args,
+    pairs: &[scanner::FilePair],
+    format: OutputFormat,
+    results: &[merger::MergeResult],
+) {
+    for result in results {
+        if !result.was_interrupted {
+            continue;
+        }
+
+        let pair = &pairs[result.pair_index];
+        let output_path = merger::output_path(&args.output, &pair.stem, format);
+        if !output_path.exists() {
+            continue;
+        }
+
+        if let Err(e) = std::fs::remove_file(&output_path) {
+            eprintln!("{} {}", t("warning_prefix").yellow(), e);
+        } else if args.verbose {
+            eprintln!(
+                "{}",
+                tf("cleanup_partial", &[&output_path.display().to_string()]).yellow()
+            );
         }
     }
+}
 
-    // Handle source file deletion if requested
-    let mut deletion_failures = 0;
-    if args.sdel {
-        for result in &results {
-            if result.success {
-                let pair = &ctx.pairs[result.pair_index];
-                if let Err(e) = merger::delete_source_files(pair) {
-                    eprintln!("{} {}", t("warning_prefix").yellow(), e);
-                    deletion_failures += 1;
-                }
-            }
+/// Delete the source files of every successful merge.
+/// Returns how many deletions failed.
+fn delete_succeeded_sources(pairs: &[scanner::FilePair], results: &[merger::MergeResult]) -> usize {
+    let mut failures = 0;
+    for result in results {
+        if !result.success {
+            continue;
+        }
+        if let Err(e) = merger::delete_source_files(&pairs[result.pair_index]) {
+            eprintln!("{} {}", t("warning_prefix").yellow(), e);
+            failures += 1;
         }
     }
+    failures
+}
 
-    // Accumulate results into final_summary
-    for result in &results {
+/// Fold the per-pair results and scan statistics into the final report.
+fn summarize(
+    ctx: &ScanContext,
+    results: &[merger::MergeResult],
+    deletion_failures: usize,
+) -> merger::MergeSummary {
+    let mut summary = merger::MergeSummary {
+        deletion_failures,
+        skipped_count: ctx.stats.skipped,
+        orphaned_count: ctx.stats.orphaned,
+        ..Default::default()
+    };
+
+    for result in results {
         if result.success {
-            final_summary.success_count += 1;
-            final_summary.merge_count += 1;
-            final_summary.total_duration += result.duration;
-        } else if !result.was_interrupted {
-            // Only count non-interrupted failures; interrupted items stay pending for resume
-            final_summary.failed_count += 1;
+            summary.success_count += 1;
+            summary.merge_count += 1;
+            summary.total_duration += result.duration;
+        } else if result.was_interrupted {
+            // Not a failure: the pair stays pending and `--resume` retries it.
+            summary.interrupted_count += 1;
+        } else {
+            summary.failed_count += 1;
             if let Some(ref err) = result.error {
-                final_summary
+                summary
                     .failures
                     .push((result.pair_name.clone(), err.clone()));
             }
         }
     }
-    final_summary.deletion_failures = deletion_failures;
 
-    final_summary.skipped_count = ctx.stats.skipped;
-    final_summary.orphaned_count = ctx.stats.orphaned;
-
-    Ok(final_summary)
+    summary
 }
 
 /// Finalize: clear state on full success, save otherwise.
@@ -420,6 +481,10 @@ fn finalize(
         return Ok(());
     }
 
+    // The state file is the resume checkpoint, so it may only be dropped once
+    // every scanned pair is finished. `all_success()` counts interrupted pairs as
+    // unfinished: Ctrl+C during a batch leaves work pending, and deleting the
+    // checkpoint would make the `--resume` hint printed right after it useless.
     if summary.all_success() {
         state::MergeState::clear(&args.source)?;
     } else {
@@ -481,7 +546,7 @@ pub fn run() -> Result<()> {
 
         crate::ui::print_preview_pairs(
             &ctx.pairs,
-            format.extension(),
+            format,
             &t("interactive_preview_header"),
             ctx.format_time_estimate().as_deref(),
         );
@@ -510,22 +575,12 @@ pub fn run() -> Result<()> {
 
     // Phase 3: Dry-run preview or execute merges
     if args.dry_run {
-        if !args.quiet {
-            crate::ui::print_preview_pairs(
-                &ctx.pairs,
-                format.extension(),
-                &t("dry_run_header"),
-                ctx.format_time_estimate().as_deref(),
-            );
-            if args.sdel {
-                crate::ui::print_deletion_preview(&ctx.pairs, &t("dry_run_sdel_header"));
-            }
-            println!(
-                "\n{}",
-                tf("dry_run_summary", &[&ctx.pairs.len().to_string()])
-            );
-            println!("{}", t("dry_run_complete").cyan());
-        }
+        print_dry_run(
+            &args,
+            format,
+            &ctx.pairs,
+            ctx.format_time_estimate().as_deref(),
+        );
         return Ok(());
     }
 
@@ -555,6 +610,27 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
+    /// `Args` for a test: quiet, single-job, MKV, source and output both `dir`.
+    fn test_args(dir: &std::path::Path, once: Option<&str>) -> cli::Args {
+        cli::Args {
+            source: dir.to_path_buf(),
+            output: dir.to_path_buf(),
+            recursive: false,
+            format: cli::OutputFormat::Mkv,
+            jobs: 1,
+            sdel: false,
+            dry_run: false,
+            interactive: false,
+            resume: false,
+            progress: false,
+            quiet: true,
+            verbose: false,
+            retry: 0,
+            once: once.map(str::to_string),
+            ascii: false,
+        }
+    }
+
     #[test]
     fn test_state_save_interval_constant() {
         // Ensure reasonable batch size for incremental saves
@@ -572,23 +648,7 @@ mod tests {
         File::create(dir.path().join("test.mp4")).unwrap();
         File::create(dir.path().join("test.m4a")).unwrap();
 
-        let args = cli::Args {
-            source: dir.path().to_path_buf(),
-            output: dir.path().to_path_buf(),
-            recursive: false,
-            format: cli::OutputFormat::Mkv,
-            jobs: 1,
-            sdel: false,
-            dry_run: false,
-            interactive: false,
-            resume: false,
-            progress: false,
-            quiet: true,
-            verbose: false,
-            retry: 0,
-            once: Some("../escape".to_string()),
-            ascii: false,
-        };
+        let args = test_args(dir.path(), Some("../escape"));
 
         let result = run_once(&args, cli::OutputFormat::Mkv, "../escape");
         assert!(result.is_err());
@@ -606,23 +666,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
 
-        let args = cli::Args {
-            source: dir.path().to_path_buf(),
-            output: dir.path().to_path_buf(),
-            recursive: false,
-            format: cli::OutputFormat::Mkv,
-            jobs: 1,
-            sdel: false,
-            dry_run: false,
-            interactive: false,
-            resume: false,
-            progress: false,
-            quiet: true,
-            verbose: false,
-            retry: 0,
-            once: Some("/etc/passwd".to_string()),
-            ascii: false,
-        };
+        let args = test_args(dir.path(), Some("/etc/passwd"));
 
         let result = run_once(&args, cli::OutputFormat::Mkv, "/etc/passwd");
         assert!(result.is_err());
@@ -634,23 +678,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
 
-        let args = cli::Args {
-            source: dir.path().to_path_buf(),
-            output: dir.path().to_path_buf(),
-            recursive: false,
-            format: cli::OutputFormat::Mkv,
-            jobs: 1,
-            sdel: false,
-            dry_run: false,
-            interactive: false,
-            resume: false,
-            progress: false,
-            quiet: true,
-            verbose: false,
-            retry: 0,
-            once: Some("..\\escape".to_string()),
-            ascii: false,
-        };
+        let args = test_args(dir.path(), Some("..\\escape"));
 
         let result = run_once(&args, cli::OutputFormat::Mkv, "..\\escape");
         assert!(result.is_err());
@@ -662,23 +690,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
 
-        let args = cli::Args {
-            source: dir.path().to_path_buf(),
-            output: dir.path().to_path_buf(),
-            recursive: false,
-            format: cli::OutputFormat::Mkv,
-            jobs: 1,
-            sdel: false,
-            dry_run: false,
-            interactive: false,
-            resume: false,
-            progress: false,
-            quiet: true,
-            verbose: false,
-            retry: 0,
-            once: Some("evil\0path".to_string()),
-            ascii: false,
-        };
+        let args = test_args(dir.path(), Some("evil\0path"));
 
         let result = run_once(&args, cli::OutputFormat::Mkv, "evil\0path");
         assert!(result.is_err());
@@ -701,23 +713,7 @@ mod tests {
         File::create(dir.path().join("video.mp4")).unwrap();
         File::create(dir.path().join("video.m4a")).unwrap();
 
-        let args = cli::Args {
-            source: dir.path().to_path_buf(),
-            output: dir.path().to_path_buf(),
-            recursive: false,
-            format: cli::OutputFormat::Mkv,
-            jobs: 1,
-            sdel: false,
-            dry_run: false,
-            interactive: false,
-            resume: false,
-            progress: false,
-            quiet: true,
-            verbose: false,
-            retry: 0,
-            once: Some("video".to_string()),
-            ascii: false,
-        };
+        let args = test_args(dir.path(), Some("video"));
 
         // Should not error on validation (may error on ffmpeg, but that's OK)
         let result = run_once(&args, cli::OutputFormat::Mkv, "video");
@@ -753,23 +749,9 @@ mod tests {
         state.mark_failed("video2");
         state.save(&source).unwrap();
 
-        let args = cli::Args {
-            source: source.clone(),
-            output: output.clone(),
-            recursive: false,
-            format: cli::OutputFormat::Mkv,
-            jobs: 1,
-            sdel: false,
-            dry_run: false,
-            interactive: false,
-            resume: false,
-            progress: false,
-            quiet: true,
-            verbose: false,
-            retry: 0,
-            once: None,
-            ascii: false,
-        };
+        let mut args = test_args(dir.path(), None);
+        args.source = source.clone();
+        args.output = output.clone();
 
         // video3 remains pending (never processed, e.g. interrupted)
         let summary = merger::MergeSummary {
@@ -778,6 +760,7 @@ mod tests {
             merge_count: 2,
             skipped_count: 0,
             orphaned_count: 0,
+            interrupted_count: 0,
             deletion_failures: 0,
             total_duration: std::time::Duration::ZERO,
             failures: vec![("video2".to_string(), "mock error".to_string())],
@@ -801,6 +784,126 @@ mod tests {
         assert!(
             !loaded.is_completed("video3"),
             "finalize should not mark unprocessed pending items as completed"
+        );
+    }
+
+    #[test]
+    fn test_summarize_separates_interrupted_from_failed() {
+        let ctx = ScanContext {
+            pairs: Vec::new(),
+            stats: scanner::ScanStats {
+                pairs: 3,
+                skipped: 2,
+                orphaned: 1,
+            },
+            estimated_duration: Duration::ZERO,
+        };
+        let results = vec![
+            merger::MergeResult {
+                pair_index: 0,
+                pair_name: "merged".to_string(),
+                success: true,
+                error: None,
+                duration: Duration::from_millis(10),
+                was_interrupted: false,
+            },
+            merger::MergeResult {
+                pair_index: 1,
+                pair_name: "stopped".to_string(),
+                success: false,
+                error: None,
+                duration: Duration::ZERO,
+                was_interrupted: true,
+            },
+            merger::MergeResult {
+                pair_index: 2,
+                pair_name: "broken".to_string(),
+                success: false,
+                error: Some("boom".to_string()),
+                duration: Duration::ZERO,
+                was_interrupted: false,
+            },
+        ];
+
+        let summary = summarize(&ctx, &results, 0);
+
+        assert_eq!(summary.success_count, 1);
+        assert_eq!(summary.interrupted_count, 1);
+        assert_eq!(summary.failed_count, 1);
+        assert_eq!(summary.merge_count, 1);
+        assert_eq!(summary.skipped_count, 2);
+        assert_eq!(summary.orphaned_count, 1);
+        assert_eq!(
+            summary.failures,
+            vec![("broken".to_string(), "boom".to_string())],
+            "an interrupted pair is not a failure and must not be reported as one"
+        );
+        assert!(
+            !summary.all_success(),
+            "an interrupted pair leaves the batch unfinished"
+        );
+    }
+
+    /// Regression: Ctrl+C leaves pairs pending, so the checkpoint must survive.
+    /// `run()` prints a `--resume` hint immediately after `finalize()`, which used
+    /// to delete the state file because no merge had *failed*.
+    #[test]
+    fn test_finalize_keeps_checkpoint_when_run_was_interrupted() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let args = test_args(&source, None);
+
+        let mut state = state::MergeState::new(&source, &source);
+        state.add_pending("done");
+        state.add_pending("unfinished");
+        state.mark_completed("done");
+
+        let summary = merger::MergeSummary {
+            success_count: 1,
+            interrupted_count: 1,
+            merge_count: 1,
+            ..Default::default()
+        };
+        finalize(&args, state, &summary).unwrap();
+
+        let loaded = state::MergeState::load(&source)
+            .unwrap()
+            .expect("state file must survive an interrupt, or --resume redoes finished work");
+        assert!(loaded.is_completed("done"), "finished pair stays recorded");
+        assert!(
+            loaded.pending.contains("unfinished"),
+            "interrupted pair stays pending for --resume"
+        );
+    }
+
+    /// The other direction: a batch with nothing left over drops the checkpoint.
+    #[test]
+    fn test_finalize_clears_checkpoint_when_everything_finished() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let args = test_args(&source, None);
+
+        let mut state = state::MergeState::new(&source, &source);
+        state.add_pending("a");
+        state.mark_completed("a");
+        state.save(&source).unwrap();
+
+        let summary = merger::MergeSummary {
+            success_count: 1,
+            merge_count: 1,
+            ..Default::default()
+        };
+        finalize(&args, state, &summary).unwrap();
+
+        assert!(
+            state::MergeState::load(&source).unwrap().is_none(),
+            "a finished batch should leave no checkpoint behind"
         );
     }
 

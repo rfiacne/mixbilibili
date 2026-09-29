@@ -62,6 +62,14 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "error_prefix"), "Error:"),
     ((Lang::Cn, "warning_prefix"), "警告："),
     ((Lang::En, "warning_prefix"), "Warning:"),
+    (
+        (Lang::Cn, "failed_cleanup_partial"),
+        "清理未完成的输出文件 {0} 失败：{1}",
+    ),
+    (
+        (Lang::En, "failed_cleanup_partial"),
+        "Failed to clean up partial output {0}: {1}",
+    ),
     // Scan phase
     ((Lang::Cn, "no_pairs"), "没有找到可合并的文件对"),
     ((Lang::En, "no_pairs"), "No file pairs to merge"),
@@ -79,21 +87,15 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "dry_run_summary"), "Would merge {0} pair(s)."),
     ((Lang::Cn, "dry_run_complete"), "预览完成。未修改任何文件。"),
     ((Lang::En, "dry_run_complete"), "Dry-run complete. No files were modified."),
-    ((Lang::Cn, "dry_run_marker"), "[预览]"),
-    ((Lang::En, "dry_run_marker"), "[dry-run]"),
     ((Lang::Cn, "dry_run_time_estimate"), "预计时间：{0}"),
     ((Lang::En, "dry_run_time_estimate"), "Estimated time: {0}"),
     ((Lang::Cn, "cli_interactive"), "交互式模式：显示预览并等待确认"),
     ((Lang::En, "cli_interactive"), "Interactive mode: show preview and wait for confirmation"),
     ((Lang::Cn, "interactive_preview_header"), "预览合并操作："),
     ((Lang::En, "interactive_preview_header"), "Preview merge operations:"),
-    ((Lang::Cn, "interactive_confirm"), "是否继续？(y/N)"),
-    ((Lang::En, "interactive_confirm"), "Continue? (y/N)"),
     ((Lang::Cn, "interactive_cancelled"), "操作已取消"),
     ((Lang::En, "interactive_cancelled"), "Operation cancelled"),
     // Interrupt / resume
-    ((Lang::Cn, "interrupted"), "\n已中断。状态已保存，可恢复。"),
-    ((Lang::En, "interrupted"), "\nInterrupted. State saved for resume."),
     ((Lang::Cn, "interrupted_cleanup"), "\n已中断。部分文件已清理。"),
     ((Lang::En, "interrupted_cleanup"), "\nInterrupted. Partial files cleaned up."),
     ((Lang::Cn, "interrupted_resume_hint"), "使用 --resume 从上次中断处继续。"),
@@ -131,17 +133,11 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::Cn, "verbose_retry"), "正在重试 {0}（第 {1} 次）"),
     ((Lang::En, "verbose_retry"), "Retrying {0} (attempt {1})"),
     // Symbols
-    ((Lang::Cn, "separator"), "================================"),
-    ((Lang::En, "separator"), "================================"),
     ((Lang::Cn, "checkmark"), "✓"),
     ((Lang::En, "checkmark"), "✓"),
     ((Lang::Cn, "cross"), "✗"),
     ((Lang::En, "cross"), "✗"),
-    ((Lang::Cn, "circle"), "○"),
-    ((Lang::En, "circle"), "○"),
     // ffmpeg install
-    ((Lang::Cn, "installing_ffmpeg"), "未找到 ffmpeg。是否安装？[Y/n]"),
-    ((Lang::En, "installing_ffmpeg"), "ffmpeg not found. Install it? [Y/n]"),
     ((Lang::Cn, "ffmpeg_installed"), "ffmpeg 安装成功！"),
     ((Lang::En, "ffmpeg_installed"), "ffmpeg installed successfully!"),
     ((Lang::Cn, "ffmpeg_not_found_path"), "安装完成但 PATH 中未找到 ffmpeg。可能需要重启终端。"),
@@ -206,8 +202,6 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "failed_to_wait"), "Failed to wait for ffmpeg process"),
     ((Lang::Cn, "timed_out"), "ffmpeg 进程超时（5 分钟）"),
     ((Lang::En, "timed_out"), "ffmpeg process timed out after 5 minutes"),
-    ((Lang::Cn, "failed_delete"), "无法删除 {0}"),
-    ((Lang::En, "failed_delete"), "Failed to delete {0}"),
     ((Lang::Cn, "failed_create_output"), "无法创建输出目录"),
     ((Lang::En, "failed_create_output"), "Failed to create output directory"),
     ((Lang::Cn, "failed_set_signal"), "无法设置信号处理器"),
@@ -281,45 +275,26 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "once_missing_video"), "Video file not found: {0}"),
     ((Lang::Cn, "once_missing_audio"), "未找到音频文件：{0}"),
     ((Lang::En, "once_missing_audio"), "Audio file not found: {0}"),
-    // UI 组件 - 报告头部
-    ((Lang::Cn, "report_border_top"), "┌"),
-    ((Lang::En, "report_border_top"), "┌"),
-    ((Lang::Cn, "report_border_bottom"), "└"),
-    ((Lang::En, "report_border_bottom"), "└"),
-    ((Lang::Cn, "report_border_middle"), "├"),
-    ((Lang::En, "report_border_middle"), "├"),
-    ((Lang::Cn, "report_border_vertical"), "│"),
-    ((Lang::En, "report_border_vertical"), "│"),
-    // UI 组件 - 预览列表
-    ((Lang::Cn, "preview_list_title"), "预览列表 ({} 项)"),
-    ((Lang::En, "preview_list_title"), "Preview ({} items)"),
-    ((Lang::Cn, "preview_item_prefix"), "{}."),
-    ((Lang::En, "preview_item_prefix"), "{}."),
-    // UI 组件 - 交互确认
+    // Interactive confirmation
     ((Lang::Cn, "prompt_continue"), "继续吗？"),
     ((Lang::En, "prompt_continue"), "Continue?"),
     ((Lang::Cn, "prompt_default_yes"), "Y"),
     ((Lang::En, "prompt_default_yes"), "Y"),
     ((Lang::Cn, "prompt_default_no"), "n"),
     ((Lang::En, "prompt_default_no"), "n"),
-    // UI 组件 - 错误消息
-    ((Lang::Cn, "error_context_file"), "文件"),
-    ((Lang::En, "error_context_file"), "File"),
-    ((Lang::Cn, "error_context_reason"), "原因"),
-    ((Lang::En, "error_context_reason"), "Reason"),
-    // 路径安全检查
+    // Path-safety checks
     ((Lang::Cn, "same_source_output"), "源目录和输出目录相同且格式为 {0} 时，输出文件会覆盖源视频。请使用不同的输出目录。"),
     ((Lang::En, "same_source_output"), "Output directory is the same as source and format is {0}; output would overwrite source video. Use a different output directory."),
     ((Lang::Cn, "same_source_output_runtime"), "输出路径与输入视频路径相同，跳过以防止覆盖"),
     ((Lang::En, "same_source_output_runtime"), "Output path identical to input video, skipping to prevent overwrite"),
     ((Lang::Cn, "output_name_collision"), "输出文件名冲突：'{0}' 与 '{1}' 都会扁平化为 '{2}'。请重命名其中一个后重试。"),
     ((Lang::En, "output_name_collision"), "Output name collision: '{0}' and '{1}' both flatten to '{2}'. Rename one of them and retry."),
-    // 输出校验 / 锚点
+    // Output validation / anchors
     ((Lang::Cn, "output_too_small"), "输出文件 {0} 大小 {1} 字节小于源视频 {2} 字节，可能合并不完整"),
     ((Lang::En, "output_too_small"), "Output {0} is {1} bytes, smaller than source video {2} bytes; merge may be incomplete"),
     ((Lang::Cn, "output_modified_warning"), "警告：{0} 输出文件大小与上次记录不一致（{1}），可能已被外部修改"),
     ((Lang::En, "output_modified_warning"), "Warning: {0} output size differs from the recorded value ({1}); it may have been modified externally"),
-    // 参数冲突
+    // Argument conflicts
     ((Lang::Cn, "verbose_quiet_conflict"), "不能同时使用 --verbose 和 --quiet"),
     ((Lang::En, "verbose_quiet_conflict"), "Cannot use --verbose with --quiet"),
 ];
@@ -580,25 +555,17 @@ mod tests {
     }
 
     #[test]
-    fn test_new_ui_keys_exist_cn() {
-        assert_eq!(t_for(Lang::Cn, "report_border_top").as_ref(), "┌");
-        assert_eq!(t_for(Lang::Cn, "report_border_bottom").as_ref(), "└");
-        assert_eq!(
-            t_for(Lang::Cn, "preview_list_title").as_ref(),
-            "预览列表 ({} 项)"
-        );
+    fn test_interactive_prompt_keys_cn() {
         assert_eq!(t_for(Lang::Cn, "prompt_continue").as_ref(), "继续吗？");
+        assert_eq!(t_for(Lang::Cn, "prompt_default_yes").as_ref(), "Y");
+        assert_eq!(t_for(Lang::Cn, "prompt_default_no").as_ref(), "n");
     }
 
     #[test]
-    fn test_new_ui_keys_exist_en() {
-        assert_eq!(t_for(Lang::En, "report_border_top").as_ref(), "┌");
-        assert_eq!(t_for(Lang::En, "report_border_bottom").as_ref(), "└");
-        assert_eq!(
-            t_for(Lang::En, "preview_list_title").as_ref(),
-            "Preview ({} items)"
-        );
+    fn test_interactive_prompt_keys_en() {
         assert_eq!(t_for(Lang::En, "prompt_continue").as_ref(), "Continue?");
+        assert_eq!(t_for(Lang::En, "prompt_default_yes").as_ref(), "Y");
+        assert_eq!(t_for(Lang::En, "prompt_default_no").as_ref(), "n");
     }
 
     #[test]

@@ -36,24 +36,18 @@ impl AppError {
 /// Extract the exit code from an anyhow error.
 /// Tries downcasting to AppError first, then returns GENERAL_ERROR.
 pub fn get_exit_code(e: &anyhow::Error) -> i32 {
-    if let Some(app_err) = e.downcast_ref::<AppError>() {
-        return app_err.exit_code();
-    }
-
-    exit_codes::GENERAL_ERROR
+    e.downcast_ref::<AppError>()
+        .map_or(exit_codes::GENERAL_ERROR, AppError::exit_code)
 }
 
 /// Translate AppError messages for user-facing output.
 /// Returns the original error string for non-AppError types.
 pub fn translate_error(e: &anyhow::Error) -> String {
-    if let Some(app_err) = e.downcast_ref::<AppError>() {
-        match app_err {
-            AppError::FfmpegNotFound => t("ffmpeg_not_found").to_string(),
-            AppError::MergeFailed { count } => tf("merge_failed", &[&count.to_string()]),
-            AppError::UnreadableSource { path } => tf("unreadable_source", &[path]),
-        }
-    } else {
-        e.to_string()
+    match e.downcast_ref::<AppError>() {
+        Some(AppError::FfmpegNotFound) => t("ffmpeg_not_found").into_owned(),
+        Some(AppError::MergeFailed { count }) => tf("merge_failed", &[&count.to_string()]),
+        Some(AppError::UnreadableSource { path }) => tf("unreadable_source", &[path]),
+        None => e.to_string(),
     }
 }
 
