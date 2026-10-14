@@ -7,85 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.1] - 2026-09-20
+Reconciled two diverged development lines (local v0.8.1 and upstream v0.9.1)
+on the upstream architecture. Upstream's `MergeRunner` seam, library interface
+and pipeline are the base; the local line's independent improvements were
+carried over on top of it.
 
 ### Changed
-- `main.rs` split (1137 → 28 lines): 4-phase orchestration moved to new `workflow` module, `AppError`/exit-code mapping to new `error` module; exit codes 1/2/3 unchanged
-- State schema upgraded to v2 with a per-version migration chain (`migrations()`); v1 files (with or without `version`) migrate forward transparently on load
-- Output validation upgraded from "non-zero size" to size consistency: output must be >= source video size (invalid undersized outputs are cleaned up)
-- `merger.rs` split into `merger/` submodules (merge/runner/summary/delete) with no public API change
-- Stem normalization unified into `scanner::make_key` / `scanner::safe_stem`; `--once` and directory scan no longer maintain separate composite-key rules
-- Preview/report renderers now take an explicit `Symbols` argument instead of each calling `supports_unicode()` internally, making them deterministic under test
-- ffmpeg commands now use the path resolved by `which`, so a minimal PATH (e.g. aria2 hook) invokes the same binary that detection validated
-- Child-process waiting now polls with exponential backoff (1 ms → 50 ms) instead of a fixed 100 ms interval, removing up to one full interval of dead time from every merge
-- `merger::merge_pair` takes a `MergeOptions` struct instead of eight positional arguments, dropping both `#[allow(clippy::too_many_arguments)]` allows. The injectable runner callback is now `Send + Sync`, since one options value is shared across rayon workers
-- The output-name rule lives in `merger::output_file_name` / `merger::output_path`; `join(format!("{}.{}", safe_stem(..), ext))` had been inlined at five call sites across `merger` and `workflow`
-- `workflow::execute` is orchestration only: the parallel batch, interrupt cleanup, source deletion, and summary accumulation moved into `merge_all_pairs` / `cleanup_interrupted_outputs` / `delete_succeeded_sources` / `summarize`
-- `cli::parse_args` reads options through `path_arg` / `flag_default_true` helpers and fills the struct literal in declaration order; `Args::validate` canonicalizes source and output unconditionally, since `canonicalize()` already fails for the missing directory the old `exists()` guard tested for
-- `ffmpeg::prompt_and_install` inspects the package-manager list once instead of re-reading `pms[0]` inside `run_install`, and process exit codes are formatted by the new `ffmpeg::exit_status_text` (previously duplicated in `ffmpeg` and `merger`)
-- `error::translate_error` matches `downcast_ref::<AppError>()` directly instead of nesting an `if let` around a `match`; `get_exit_code` uses `map_or`
-- `state::MergeState::load` no longer repeats the version check `apply_migrations` already performs
-- `progress::MergeProgress::new_text` is `#[cfg(test)]` rather than `#[allow(dead_code)]`; the bar template and fill characters are named constants
-- Comments in `progress.rs` are in English, matching the rest of the codebase
-
-### Removed
-- Test-only dead code: `ffmpeg::ffmpeg_path`, `ffmpeg::get_install_command` (with its `#[allow(dead_code)]`), and `cli::OutputFormat::parse` — the last also asserted case-insensitive parsing that `parse_args` does not implement
-- `scanner::is_downloading`, a one-line wrapper over `HashSet::contains`, along with its three tests
-- 15 translation keys with no remaining callers, removing 30 table entries: `report_border_top/bottom/middle/vertical`, `preview_list_title`, `preview_item_prefix`, `interactive_confirm`, `separator`, `circle`, `dry_run_marker`, `interrupted`, `installing_ffmpeg`, `failed_delete`, `error_context_file`, `error_context_reason`. The `report_border_*`/`preview_*` symbols come from `ui::Symbols` since the box renderers were rewritten
-- Test scaffolding: `cli` and `workflow` tests build `Args` through the shared `args_from` / `test_args` helpers instead of repeating full literals, and the per-flag default tests were consolidated into one defaults test. `test_progress_bar_template_uses_new_style` asserted nothing (tests are not a TTY, so it never reached the template); it is replaced by `test_progress_bar_template_parses`, which validates the real constant
-
-### Performance
-- Batch merge throughput improved ~39% on a 200-pair `-c copy` benchmark (200 merges: 2.64s → 1.61s on 8 threads), now within ~9% of the raw `xargs -P8 ffmpeg` ceiling. The fixed 100 ms poll interval dominated merges that finish in ~30 ms.
-- Scan/pairing phase roughly 2x faster on large trees (20000 pairs: preview 210 ms → 120 ms, quiet scan 130 ms → 60 ms). Three causes, all per-entry work in the hot loop:
-  - `entry.context(t("...").into_owned())` built the error message — a hash lookup plus a `String` — for *every* directory entry, on the happy path. Now lazy via `with_context`.
-  - The relative-parent key was re-derived from each file's path (`strip_prefix` + allocation per file). It is a property of the directory, so it is now carried down the recursion.
-  - `path.is_dir()` issued a second `stat()` per entry even though `read_dir` already reported the type; the entry's `file_type()` is now used once for both the symlink and directory checks.
-- Preview rendering writes through one buffered, locked stdout: `println!` per row meant a `write()` syscall per row (std's stdout is line-buffered), which dominated the scan phase on large lists. Column padding is also written straight to the buffer instead of allocating a `String` per column per row.
-- The dry-run deletion list is buffered the same way: it printed one `println!` per pair, so 20000 pairs cost 40000 `write()` syscalls. On a 20000-pair tree, that list now costs 1.3 ms instead of 43.2 ms, taking the whole `-n --sdel` preview from 126.5 ms to 83.0 ms (~34% faster).
-- `Colors::*` return the lazily-rendered `ColoredString` instead of `String`, so a colourised fragment no longer copies itself into a heap `String` just to be handed to a `write!`. Row names also use `Cow` instead of `into_owned()`, and the row index is formatted into a stack buffer.
-
-### Added
-- Per-stem output size anchors recorded on merge success; `--resume` warns (non-blocking) when a completed output's size differs from its recorded anchor
-- `--once` stem validation (`validate_stem`) rejecting path separators, null bytes, empty input, and `.`/`..`
-- Unit tests for the poll backoff schedule (doubling, `POLL_MAX` clamp, zero-delay guard) plus a fast-child detection regression test
-- Tests pinning the recursive composite-key format for multi-level trees (nested keys decide output filenames) and the preview's exact two-column CJK alignment
-- Tests asserting each display box is closed and that all of its lines share one display width (preview and merge report), that a box widens for a long header or row, that the extension stays beside its stem, and that failure connectors follow `Symbols`. Renderers take an explicit symbol set, so these tests are deterministic on every platform instead of depending on terminal capabilities.
-- Integration tests for both interrupt paths, driven by a real `SIGINT` instead of a timeout: a batch cancel (checkpoint kept, sources intact, no partial output) and a `--once` cancel (clean exit 0). The batch test waits for observed merge progress rather than sleeping a fixed delay, and the `--once` test feeds ffmpeg named pipes so it blocks indefinitely — neither depends on machine speed. The shared `wait_bounded` helper fails the test if the process ignores the signal, so a regression cannot hang the suite.
+- Child-process waiting now polls with exponential backoff (1 ms → 50 ms)
+  instead of a fixed 100 ms interval, removing up to one full interval of dead
+  time from every merge. The schedule is extracted into `next_poll_delay()` so
+  it is unit-testable without timing assertions
+- Output validation upgraded from "non-zero size" to size consistency: the
+  output must be >= the source video size, since `-c copy` output carries the
+  video stream plus the audio stream plus container headers. Truncated merges
+  that ffmpeg reported as successful are now caught and cleaned up
+- Scanning no longer builds error context eagerly per entry (`with_context`
+  runs the closure only on failure), derives the relative-parent key once per
+  *directory* instead of once per file, and takes a single `file_type()` per
+  entry instead of a second `stat()` via `Path::is_dir()`
 
 ### Fixed
-- The dry-run and interactive previews showed the raw composite key as a filename for nested pairs (`season1/ep.mkv`), while the merge actually writes the flattened name (`season1_ep.mkv`). The preview promised a file that never appears. `merger::output_file_name` is now the one place the output name is built — `output_path` and the preview renderer both use it — so the previews, including the `--once` one, list exactly the files the merge creates.
-- `--once` ignored `--dry-run`: the `--once` branch returned before the dry-run phase, so `mixbilibili --once ep -n` merged for real and — with the default `--sdel` — deleted both source files, contradicting the flag's own help text ("no files created/deleted"). `--once` now previews and stops. The preview moved into `workflow::print_dry_run`, shared by the scan and `--once` paths, so `-n` and `-q` mean the same thing in both. Covered by an integration test asserting nothing on disk changes.
-- Ctrl+C during `--once` was reported as a merge failure (`1 个合并失败`, exit code 3) even though the user had just cancelled it. `run_once` now detects the interrupted pair, prints the same interrupt notice as the batch path, and exits 0; a genuine merge failure still exits 3. The partial-output cleanup also runs for interrupted merges, and its warning is translated (`failed_cleanup_partial`) instead of being a hardcoded English string.
-- Ctrl+C during a batch deleted the resume checkpoint. `workflow::finalize` dropped the state file whenever no merge had *failed*, and interrupted pairs were never counted as failures, so cancelling a run wiped exactly the resume state that the hint printed one line later depends on: the next `--resume` re-merged pairs that had already finished. Interrupted pairs are now counted in `MergeSummary::interrupted_count`, making `all_success()` mean "every pair reached a terminal state"; the checkpoint only disappears when the batch is genuinely finished. Covered by unit tests on `all_success`/`finalize` and by an integration test that signals a running merge with `kill -INT`.
-- The pair whose ffmpeg process Ctrl+C killed was reported as a merge *failure*, counted in `失败 N 个`, and blamed on ffmpeg with the `timed out` message, although nothing was wrong with the file. The cause was `ChildExt::wait_with_timeout` returning `None` for both an interrupt and a timeout, leaving them indistinguishable downstream; it now returns a `WaitOutcome` (`Exited`/`Interrupted`/`TimedOut`), and `run_with_timeout` reports an interrupt as `Ok(None)` instead of an error. Such a pair now stays pending for `--resume`, and its partial output is cleaned up with the other interrupted pairs instead of being left behind.
-- Preview and merge-report boxes are now closed on all four sides. The preview omitted the stem and extension columns from its width calculation and never drew a right border, so the top/bottom borders were far shorter than the rows. The report row was left unpadded and its mid separator was drawn with the *top* corners, producing a second `┌───┐` line; its width was also pinned at 40 columns, so wider rows overflowed. Both boxes now size to their content and every line of a box shares one display width, asserted by tests.
-- `--ascii` leaked Unicode box characters (`├`, `└`, `─`) into the merge report's failure list, and re-implemented the vertical rule with a hardcoded `│` in the report title row. Both now come from `Symbols`.
-- Translation-completeness test only scanned top-level `src/*.rs`, so the `src/merger/` submodules added in the module split were silently never validated. The scan is now recursive and asserts it visited those files, so it cannot go blind again.
-- State migration driver stamped `CURRENT_SCHEMA_VERSION` from inside `migrate_v1_to_v2`; on the next schema bump, a v1 file would have been marked current while every later migration was skipped, loading state that claims a version whose fields it does not have. The driver now owns the version bump, and a new test fails if `CURRENT_SCHEMA_VERSION` is raised without a matching migration entry.
-- Silent data loss: distinct composite keys that flatten to the same output filename (`sub/a` vs `sub_a`) are now rejected upfront instead of overwriting
+- An explicitly set, non-UTF-8 locale (`LANG=C`, `LC_ALL=POSIX`) now selects
+  ASCII symbols on every platform. Previously the macOS fallback overrode it,
+  so a macOS terminal with `LANG=C` still got Unicode output
+- The preview box is closed on all four sides. Its width calculation omitted
+  the output-name column and the right border was never drawn, so the top and
+  bottom borders were far shorter than the rows
+- The merge report box is closed on all four sides. Its title row was unpadded,
+  the mid separator was drawn with the *top* corners (a second `┌───┐` line),
+  and the width was pinned at 40 columns so wider rows overflowed. Its failure
+  connectors also hardcoded Unicode box characters even under `--ascii`
+
+### Performance
+- Preview, deletion-preview and report rendering are buffered. `println!` per
+  row cost one `write()` syscall per row (std's stdout flushes on every
+  newline), so a 20000-row preview spent ~70ms in syscalls alone
+- Row rendering writes padding straight to the buffer instead of allocating a
+  `String` per column per row, and the row index goes through a stack buffer
+
+## [0.9.1] - 2026-09-09
+
+### Fixed
+- `--dry-run --once <stem>` no longer merges and deletes sources; it previews the
+  pair like the batch path does (regression introduced when `--once` became a
+  batch of one)
+- Windows: hand-written state-file tests escape path backslashes, symlink
+  scanner tests skip instead of failing without developer-mode privileges, and
+  the progress-record test accepts the ASCII symbol fallback
+
+## [0.9.0] - 2026-08-30
+
+### Fixed
+- Ctrl+C no longer deletes the resume state file: an interrupted batch keeps its
+  pending pairs and its sources, so the `--resume` hint it prints is real
+- A failed merge now says what ffmpeg said ("...after 0 retries: Error opening
+  input files: Invalid data found when processing input") instead of an exit code
+- A failed merge no longer leaves a partial output file behind
+- `C.utf8` (no dash) now counts as a UTF-8 locale for symbol output
+
+### Changed
+- `-q/--quiet` really suppresses the per-pair lines — the documented promise —
+  and ffmpeg's stderr is captured rather than inherited, so it cannot leak past
+  `-q` or scramble the progress bar
+- The crate is a library plus a thin `main.rs` adapter: tests drive
+  `mixbilibili::run()` and the module interfaces directly
+- The ffmpeg invocation sits behind an injected `MergeRunner`; retry, timeout,
+  output validation, partial cleanup, source deletion and resume state are
+  tested without ffmpeg (`tests/merge_policy.rs`)
+- A cancelled merge is distinct from a timed-out one: the pair stays pending
+  instead of being recorded as a timeout failure
+- `--once` is a batch of one pair through the same pipeline as a scan; it does
+  not start a thread pool
+- The global `INTERRUPTED` flag is replaced by an injected `Interrupt` token,
+  which also reaches the poll loop that kills a running ffmpeg
+- `MergeSummary` and `MergeState` fields are private; reports are built by
+  `from_results`, state is read through `is_completed`/`is_failed`/`is_pending`
+- `FilePair` owns the naming convention, so the preview can no longer promise a
+  file name the run does not write
+- The CLI is declared once via clap derive; a bad `--format` is rejected by clap
+  instead of silently becoming `mkv`
+- Unknown i18n keys panic in debug builds; every key must exist in both
+  languages; 15 unreferenced keys removed
 
 ## [0.8.0] - 2026-07-19
 
 ### Added
-- `--ascii` flag to force ASCII symbols (disable Unicode output)
-- UI foundation module: terminal symbols (Unicode/ASCII dual-mode) and semantic colors
-- Box-drawing preview list with two-column video/audio alignment and CJK-aware width calculation
-- UI component translation keys (report header, preview list, interactive confirmation)
-
-### Changed
-- Redesigned report header, progress bar, and interactive confirmation with highlighted defaults
-- Interactive confirmation now default-rejects when `--sdel` is enabled (destructive mode)
-- Error messages refactored to use Symbols and Colors for consistent styling
-- Consolidated ffmpeg translation keys and removed stale dead_code allows
-- Documentation structure reorganized
+- `src/ui` module: `Symbols` and `Colors` for box-drawing, Unicode/ASCII-aware
+  output, and a `--ascii` flag (`MIXBILIBILI_ASCII`) that forces ASCII symbols
+- Redesigned preview list, interactive confirmation and merge report
+- Merge state file carries a schema version, checked on load
 
 ### Fixed
-- Hardened recursive scan: deterministic pair ordering, composite key safety
-- Source-overwrite safety: reject source == output when format would overwrite video
-- CJK display width corrected via unicode-width in preview alignment
-- Reset SIGCHLD to SIG_DFL before spawning ffmpeg (aria2 hook sets SIG_IGN, causing waitpid ECHILD)
-- Prevent source file deletion on interrupt
-- Resolved TOCTOU races, i18n regression, and cleanup bugs
+- SIGCHLD is reset to `SIG_DFL` before any thread starts, so `waitpid` works
+  when the tool is invoked from aria2's on-download-complete hook
+- Source files are no longer deleted for a pair whose merge was interrupted
+- Recursive scans key pairs by `subdir/stem`, so same-named files in different
+  directories no longer collide; scan order is deterministic
+- Refusing a source==output run when the output format would overwrite the
+  source video, checked at start-up and again per merge
 
 ## [0.7.0] - 2026-06-24
 

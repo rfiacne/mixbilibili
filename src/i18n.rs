@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Lang {
     Cn,
     En,
@@ -62,14 +62,6 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "error_prefix"), "Error:"),
     ((Lang::Cn, "warning_prefix"), "警告："),
     ((Lang::En, "warning_prefix"), "Warning:"),
-    (
-        (Lang::Cn, "failed_cleanup_partial"),
-        "清理未完成的输出文件 {0} 失败：{1}",
-    ),
-    (
-        (Lang::En, "failed_cleanup_partial"),
-        "Failed to clean up partial output {0}: {1}",
-    ),
     // Scan phase
     ((Lang::Cn, "no_pairs"), "没有找到可合并的文件对"),
     ((Lang::En, "no_pairs"), "No file pairs to merge"),
@@ -135,8 +127,6 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     // Symbols
     ((Lang::Cn, "checkmark"), "✓"),
     ((Lang::En, "checkmark"), "✓"),
-    ((Lang::Cn, "cross"), "✗"),
-    ((Lang::En, "cross"), "✗"),
     // ffmpeg install
     ((Lang::Cn, "ffmpeg_installed"), "ffmpeg 安装成功！"),
     ((Lang::En, "ffmpeg_installed"), "ffmpeg installed successfully!"),
@@ -196,10 +186,6 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "merge_failed"), "{0} merge(s) failed"),
     ((Lang::Cn, "unreadable_source"), "源目录不可读：{0}"),
     ((Lang::En, "unreadable_source"), "source directory is not readable: {0}"),
-    ((Lang::Cn, "failed_to_spawn"), "无法启动 ffmpeg 进程"),
-    ((Lang::En, "failed_to_spawn"), "Failed to spawn ffmpeg process"),
-    ((Lang::Cn, "failed_to_wait"), "无法等待 ffmpeg 进程"),
-    ((Lang::En, "failed_to_wait"), "Failed to wait for ffmpeg process"),
     ((Lang::Cn, "timed_out"), "ffmpeg 进程超时（5 分钟）"),
     ((Lang::En, "timed_out"), "ffmpeg process timed out after 5 minutes"),
     ((Lang::Cn, "failed_create_output"), "无法创建输出目录"),
@@ -226,6 +212,8 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "failed_create_output_file"), "Output file was not created: {0}"),
     ((Lang::Cn, "output_file_empty"), "输出文件为空：{0}"),
     ((Lang::En, "output_file_empty"), "Output file is empty: {0}"),
+    ((Lang::Cn, "output_too_small"), "输出文件 {0} 大小 {1} 字节小于源视频 {2} 字节，可能合并不完整"),
+    ((Lang::En, "output_too_small"), "Output {0} is {1} bytes, smaller than source video {2} bytes; merge may be incomplete"),
     ((Lang::Cn, "source_missing"), "无法删除源文件：{0} '{1}' 不存在"),
     ((Lang::En, "source_missing"), "Cannot delete source files: {0} '{1}' is missing"),
     ((Lang::Cn, "failed_delete_audio"), "无法删除音频 '{0}'：{1}。视频保留于 '{2}'"),
@@ -271,30 +259,32 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "cli_once"), "Merge only the specified stem (skip scanning)"),
     ((Lang::Cn, "cli_ascii"), "强制使用 ASCII 符号（禁用 Unicode 字符）"),
     ((Lang::En, "cli_ascii"), "Force ASCII mode (disable Unicode characters)"),
-    ((Lang::Cn, "once_missing_video"), "未找到视频文件：{0}"),
-    ((Lang::En, "once_missing_video"), "Video file not found: {0}"),
-    ((Lang::Cn, "once_missing_audio"), "未找到音频文件：{0}"),
-    ((Lang::En, "once_missing_audio"), "Audio file not found: {0}"),
-    // Interactive confirmation
+    ((Lang::Cn, "missing_video"), "未找到视频文件：{0}"),
+    ((Lang::En, "missing_video"), "Video file not found: {0}"),
+    ((Lang::Cn, "missing_audio"), "未找到音频文件：{0}"),
+    ((Lang::En, "missing_audio"), "Audio file not found: {0}"),
+    // UI 组件 - 报告头部
+    ((Lang::Cn, "report_border_top"), "┌"),
+    ((Lang::En, "report_border_top"), "┌"),
+    ((Lang::Cn, "report_border_bottom"), "└"),
+    ((Lang::En, "report_border_bottom"), "└"),
+    // UI 组件 - 预览列表
+    ((Lang::Cn, "preview_list_title"), "预览列表 ({} 项)"),
+    ((Lang::En, "preview_list_title"), "Preview ({} items)"),
+    // UI 组件 - 交互确认
     ((Lang::Cn, "prompt_continue"), "继续吗？"),
     ((Lang::En, "prompt_continue"), "Continue?"),
     ((Lang::Cn, "prompt_default_yes"), "Y"),
     ((Lang::En, "prompt_default_yes"), "Y"),
     ((Lang::Cn, "prompt_default_no"), "n"),
     ((Lang::En, "prompt_default_no"), "n"),
-    // Path-safety checks
+    // UI 组件 - 错误消息
+    // 路径安全检查
     ((Lang::Cn, "same_source_output"), "源目录和输出目录相同且格式为 {0} 时，输出文件会覆盖源视频。请使用不同的输出目录。"),
     ((Lang::En, "same_source_output"), "Output directory is the same as source and format is {0}; output would overwrite source video. Use a different output directory."),
     ((Lang::Cn, "same_source_output_runtime"), "输出路径与输入视频路径相同，跳过以防止覆盖"),
     ((Lang::En, "same_source_output_runtime"), "Output path identical to input video, skipping to prevent overwrite"),
-    ((Lang::Cn, "output_name_collision"), "输出文件名冲突：'{0}' 与 '{1}' 都会扁平化为 '{2}'。请重命名其中一个后重试。"),
-    ((Lang::En, "output_name_collision"), "Output name collision: '{0}' and '{1}' both flatten to '{2}'. Rename one of them and retry."),
-    // Output validation / anchors
-    ((Lang::Cn, "output_too_small"), "输出文件 {0} 大小 {1} 字节小于源视频 {2} 字节，可能合并不完整"),
-    ((Lang::En, "output_too_small"), "Output {0} is {1} bytes, smaller than source video {2} bytes; merge may be incomplete"),
-    ((Lang::Cn, "output_modified_warning"), "警告：{0} 输出文件大小与上次记录不一致（{1}），可能已被外部修改"),
-    ((Lang::En, "output_modified_warning"), "Warning: {0} output size differs from the recorded value ({1}); it may have been modified externally"),
-    // Argument conflicts
+    // 参数冲突
     ((Lang::Cn, "verbose_quiet_conflict"), "不能同时使用 --verbose 和 --quiet"),
     ((Lang::En, "verbose_quiet_conflict"), "Cannot use --verbose with --quiet"),
 ];
@@ -306,30 +296,34 @@ fn translation_map() -> &'static HashMap<TranslationKey, &'static str> {
 }
 
 fn translate(lang: Lang, key: &str) -> Cow<'static, str> {
-    translation_map()
-        .get(&(lang, key))
-        .map(|s| Cow::Borrowed(*s))
-        .unwrap_or_else(|| Cow::Owned(key.to_string()))
+    let found = translation_map().get(&(lang, key));
+    debug_assert!(found.is_some(), "unknown translation key: {key} ({lang:?})");
+    match found {
+        Some(s) => Cow::Borrowed(*s),
+        // Release builds keep working, but the key name is the tell.
+        None => Cow::Owned(key.to_string()),
+    }
 }
 
 pub fn t(key: &str) -> Cow<'static, str> {
     translate(lang(), key)
 }
 
-#[cfg(test)]
+/// `t_for` with `{0}`-style placeholders filled.
+pub fn tf_for(for_lang: Lang, key: &str, args: &[&str]) -> String {
+    let mut result = translate(for_lang, key).into_owned();
+    for (i, arg) in args.iter().enumerate() {
+        result = result.replace(&format!("{{{i}}}"), arg);
+    }
+    result
+}
+
 pub fn t_for(for_lang: Lang, key: &str) -> Cow<'static, str> {
     translate(for_lang, key)
 }
 
 pub fn tf(key: &str, args: &[&str]) -> String {
-    if args.is_empty() {
-        return t(key).into_owned();
-    }
-    let mut result = t(key).into_owned();
-    for (i, arg) in args.iter().enumerate() {
-        result = result.replace(&format!("{{{i}}}"), arg);
-    }
-    result
+    tf_for(lang(), key, args)
 }
 
 #[cfg(test)]
@@ -348,9 +342,29 @@ mod tests {
         assert_eq!(translate(Lang::En, "checkmark"), "✓");
     }
 
+    /// A key missing in one language is how a half-translated release ships.
     #[test]
-    fn test_translate_fallback() {
-        assert_eq!(translate(Lang::En, "nonexistent_key"), "nonexistent_key");
+    fn every_key_exists_in_both_languages() {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for ((lang, key), _) in TRANSLATIONS {
+            let _ = lang;
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        let one_sided: Vec<&&str> = counts
+            .iter()
+            .filter(|(_, n)| **n != 2)
+            .map(|(k, _)| k)
+            .collect();
+        assert!(
+            one_sided.is_empty(),
+            "keys missing a translation in one language: {one_sided:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown translation key")]
+    fn unknown_key_is_a_bug_not_a_fallback() {
+        let _ = t_for(Lang::En, "totally_nonexistent_key_xyz");
     }
 
     #[test]
@@ -397,117 +411,6 @@ mod tests {
         assert!(map.contains_key(&(Lang::En, "error_prefix")));
     }
 
-    /// Extract string-literal keys from t()/tf() calls in source text.
-    /// Keys are simple identifiers without escapes, so a closing-quote scan suffices.
-    /// Matches are only counted when not preceded by an identifier char (skips
-    /// lookalikes like .expect()/.context()/.insert() taking a string literal),
-    /// and // comment text is ignored.
-    fn extract_t_keys(content: &str) -> Vec<String> {
-        // \u{22} keeps the marker text from matching itself during the scan.
-        let markers = ["t(\u{22}", "tf(\u{22}"];
-        let mut keys = Vec::new();
-        for raw_line in content.lines() {
-            let line = match raw_line.find("//") {
-                Some(i) => &raw_line[..i],
-                None => raw_line,
-            };
-            for marker in markers {
-                let mut rest = line;
-                while let Some(pos) = rest.find(marker) {
-                    let after = &rest[pos + marker.len()..];
-                    let Some(end) = after.find('"') else { break };
-                    let preceded_by_ident = pos > 0
-                        && rest[..pos]
-                            .chars()
-                            .next_back()
-                            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-                    if !preceded_by_ident {
-                        keys.push(after[..end].to_string());
-                    }
-                    rest = &after[end..];
-                }
-            }
-        }
-        keys
-    }
-
-    /// Collect every `.rs` file under `dir`, recursing into subdirectories.
-    /// Results are sorted so failure messages stay deterministic.
-    fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_rs_files(&path, out);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                out.push(path);
-            }
-        }
-        out.sort();
-    }
-
-    #[test]
-    fn test_table_keys_paired_and_source_keys_exist() {
-        use std::collections::HashSet;
-
-        // (a) Every key in TRANSLATIONS must have both Cn and En entries.
-        let mut cn: HashSet<&str> = HashSet::new();
-        let mut en: HashSet<&str> = HashSet::new();
-        for &((lang, key), _) in TRANSLATIONS {
-            match lang {
-                Lang::Cn => {
-                    cn.insert(key);
-                }
-                Lang::En => {
-                    en.insert(key);
-                }
-            }
-        }
-        for key in &cn {
-            assert!(en.contains(key), "missing En entry for key '{key}'");
-        }
-        for key in &en {
-            assert!(cn.contains(key), "missing Cn entry for key '{key}'");
-        }
-
-        // (b) Every t("...")/tf("...") literal used in src/ must exist in the table.
-        //     Catches misspelled keys at test time instead of silent runtime fallback.
-        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        collect_rs_files(&src_dir, &mut files);
-
-        // Guard against the scan silently covering nothing: `merger` is a
-        // *directory* module, so a non-recursive walk would skip it entirely
-        // and this test would keep passing while validating fewer files.
-        for required in ["merger/merge.rs", "merger/delete.rs", "scanner.rs"] {
-            assert!(
-                files.iter().any(|f| f.ends_with(required)),
-                "translation scan did not visit src/{required}; is it still recursive?"
-            );
-        }
-
-        let mut keys_checked = 0usize;
-        for path in &files {
-            let content = std::fs::read_to_string(path).expect("read source file");
-            for key in extract_t_keys(&content) {
-                keys_checked += 1;
-                assert!(
-                    cn.contains(key.as_str()),
-                    "key '{}' used in {} is missing from the translation table",
-                    key,
-                    path.display()
-                );
-            }
-        }
-        assert!(
-            keys_checked > 0,
-            "extracted no translation keys at all; the scanner is broken"
-        );
-    }
-
     #[test]
     fn test_tf_no_placeholders_returns_translation() {
         let result = tf("checkmark", &[]);
@@ -537,12 +440,6 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_unknown_key_returns_key_name() {
-        let result = t_for(Lang::En, "totally_nonexistent_key_xyz");
-        assert_eq!(result.as_ref(), "totally_nonexistent_key_xyz");
-    }
-
-    #[test]
     fn test_dry_run_time_estimate_en() {
         let result = t_for(Lang::En, "dry_run_time_estimate");
         assert_eq!(result.as_ref(), "Estimated time: {0}");
@@ -555,17 +452,25 @@ mod tests {
     }
 
     #[test]
-    fn test_interactive_prompt_keys_cn() {
+    fn test_new_ui_keys_exist_cn() {
+        assert_eq!(t_for(Lang::Cn, "report_border_top").as_ref(), "┌");
+        assert_eq!(t_for(Lang::Cn, "report_border_bottom").as_ref(), "└");
+        assert_eq!(
+            t_for(Lang::Cn, "preview_list_title").as_ref(),
+            "预览列表 ({} 项)"
+        );
         assert_eq!(t_for(Lang::Cn, "prompt_continue").as_ref(), "继续吗？");
-        assert_eq!(t_for(Lang::Cn, "prompt_default_yes").as_ref(), "Y");
-        assert_eq!(t_for(Lang::Cn, "prompt_default_no").as_ref(), "n");
     }
 
     #[test]
-    fn test_interactive_prompt_keys_en() {
+    fn test_new_ui_keys_exist_en() {
+        assert_eq!(t_for(Lang::En, "report_border_top").as_ref(), "┌");
+        assert_eq!(t_for(Lang::En, "report_border_bottom").as_ref(), "└");
+        assert_eq!(
+            t_for(Lang::En, "preview_list_title").as_ref(),
+            "Preview ({} items)"
+        );
         assert_eq!(t_for(Lang::En, "prompt_continue").as_ref(), "Continue?");
-        assert_eq!(t_for(Lang::En, "prompt_default_yes").as_ref(), "Y");
-        assert_eq!(t_for(Lang::En, "prompt_default_no").as_ref(), "n");
     }
 
     #[test]

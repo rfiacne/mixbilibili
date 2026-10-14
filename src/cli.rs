@@ -1,10 +1,10 @@
 use anyhow::{bail, Result};
-use clap::{Arg, ArgAction, Command};
+use clap::{ArgAction, Parser, ValueEnum};
 use std::path::PathBuf;
 
 use crate::i18n::{t, tf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     Mkv,
     Mp4,
@@ -12,6 +12,16 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
+    #[cfg(test)]
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "mkv" => Ok(Self::Mkv),
+            "mp4" => Ok(Self::Mp4),
+            "mov" => Ok(Self::Mov),
+            _ => bail!("Invalid format '{}'. Supported: mkv, mp4, mov", s),
+        }
+    }
+
     pub fn extension(self) -> &'static str {
         match self {
             Self::Mkv => "mkv",
@@ -31,34 +41,30 @@ impl std::fmt::Display for OutputFormat {
     }
 }
 
-/// Validate `--once` stem argument to prevent path traversal attacks.
-pub fn validate_stem(stem: &str) -> Result<()> {
-    // Reject path separators
-    if stem.contains('/') || stem.contains('\\') {
-        bail!("Invalid stem '{}': must not contain path separators", stem);
-    }
-
-    // Reject null bytes (path injection)
-    if stem.contains('\0') {
-        bail!("Invalid stem: must not contain null bytes");
-    }
-
-    // Reject empty or whitespace-only stems
-    if stem.trim().is_empty() {
-        bail!("Invalid stem: cannot be empty");
-    }
-
-    // Reject special directory names
-    if stem == "." || stem == ".." {
-        bail!("Invalid stem '{}': cannot be . or ..", stem);
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_valid_formats_lowercase() {
+        assert_eq!(OutputFormat::parse("mkv").unwrap(), OutputFormat::Mkv);
+        assert_eq!(OutputFormat::parse("mp4").unwrap(), OutputFormat::Mp4);
+        assert_eq!(OutputFormat::parse("mov").unwrap(), OutputFormat::Mov);
+    }
+
+    #[test]
+    fn test_parse_valid_formats_case_insensitive() {
+        assert_eq!(OutputFormat::parse("MKV").unwrap(), OutputFormat::Mkv);
+        assert_eq!(OutputFormat::parse("Mp4").unwrap(), OutputFormat::Mp4);
+        assert_eq!(OutputFormat::parse("MOV").unwrap(), OutputFormat::Mov);
+    }
+
+    #[test]
+    fn test_parse_invalid_format() {
+        let result = OutputFormat::parse("avi");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid format"));
+    }
 
     #[test]
     fn test_extension() {
@@ -92,195 +98,91 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone)]
+/// The whole CLI interface: one field per flag, defaults declared once.
+#[derive(Debug, Clone, Parser)]
+#[command(name = "mixbilibili", version, about = t("cli_about"))]
 pub struct Args {
+    #[arg(short = 's', long, default_value = ".", help = t("cli_source"), value_name = "DIR")]
     pub source: PathBuf,
+
+    #[arg(short = 'o', long, default_value = ".", help = t("cli_output"), value_name = "DIR")]
     pub output: PathBuf,
+
+    #[arg(
+        short = 'd',
+        long,
+        help = t("cli_sdel"),
+        default_value_t = true,
+        action = ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_name = "BOOL"
+    )]
     pub sdel: bool,
+
+    #[arg(short = 'f', long, default_value = "mkv", help = t("cli_format"), value_name = "FMT")]
     pub format: OutputFormat,
+
+    #[arg(short = 'j', long, default_value_t = default_jobs(), help = t("cli_jobs"), value_name = "N")]
     pub jobs: usize,
+
+    #[arg(
+        short = 'p',
+        long,
+        help = t("cli_progress"),
+        default_value_t = true,
+        action = ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_name = "BOOL"
+    )]
     pub progress: bool,
+
+    #[arg(short = 'n', long, help = t("cli_dry_run"))]
     pub dry_run: bool,
+
+    #[arg(short = 'i', long, help = t("cli_interactive"))]
     pub interactive: bool,
+
+    #[arg(short = 'v', long, help = t("cli_verbose"))]
     pub verbose: bool,
+
+    #[arg(short = 'q', long, help = t("cli_quiet"))]
     pub quiet: bool,
+
+    #[arg(short = 'r', long, help = t("cli_resume"))]
     pub resume: bool,
+
+    #[arg(long, default_value_t = 0, help = t("cli_retry"), value_name = "N")]
     pub retry: usize,
+
+    #[arg(short = 'R', long, help = t("cli_recursive"))]
     pub recursive: bool,
+
+    #[arg(long, help = t("cli_once"), value_name = "STEM")]
     pub once: Option<String>,
+
+    #[arg(long, help = t("cli_ascii"))]
     pub ascii: bool,
 }
 
+/// Defaults to the machine's parallelism; validate() clamps it.
 fn default_jobs() -> usize {
     std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(1)
 }
 
-/// Build the CLI command with translated help text.
-pub fn build_cli() -> Command {
-    Command::new("mixbilibili")
-        .version(env!("CARGO_PKG_VERSION"))
-        .about(t("cli_about"))
-        .arg(
-            Arg::new("source")
-                .short('s')
-                .long("source")
-                .help(t("cli_source"))
-                .default_value("."),
-        )
-        .arg(
-            Arg::new("output")
-                .short('o')
-                .long("output")
-                .help(t("cli_output"))
-                .default_value("."),
-        )
-        .arg(
-            Arg::new("sdel")
-                .short('d')
-                .long("sdel")
-                .help(t("cli_sdel"))
-                .default_value("true")
-                .action(ArgAction::Set)
-                .num_args(0..=1)
-                .default_missing_value("true"),
-        )
-        .arg(
-            Arg::new("format")
-                .short('f')
-                .long("format")
-                .help(t("cli_format"))
-                .default_value("mkv")
-                .value_parser(["mkv", "mp4", "mov"]),
-        )
-        .arg(
-            Arg::new("jobs")
-                .short('j')
-                .long("jobs")
-                .help(t("cli_jobs"))
-                .value_parser(clap::value_parser!(usize)),
-        )
-        .arg(
-            Arg::new("progress")
-                .short('p')
-                .long("progress")
-                .help(t("cli_progress"))
-                .default_value("true")
-                .action(ArgAction::Set)
-                .num_args(0..=1)
-                .default_missing_value("true"),
-        )
-        .arg(
-            Arg::new("dry_run")
-                .short('n')
-                .long("dry-run")
-                .help(t("cli_dry_run"))
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("interactive")
-                .short('i')
-                .long("interactive")
-                .help(t("cli_interactive"))
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("verbose")
-                .short('v')
-                .long("verbose")
-                .help(t("cli_verbose"))
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("quiet")
-                .short('q')
-                .long("quiet")
-                .help(t("cli_quiet"))
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("resume")
-                .short('r')
-                .long("resume")
-                .help(t("cli_resume"))
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("retry")
-                .long("retry")
-                .help(t("cli_retry"))
-                .default_value("0")
-                .value_parser(clap::value_parser!(usize)),
-        )
-        .arg(
-            Arg::new("recursive")
-                .short('R')
-                .long("recursive")
-                .help(t("cli_recursive"))
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("once")
-                .long("once")
-                .help(t("cli_once"))
-                .value_name("STEM"),
-        )
-        .arg(
-            Arg::new("ascii")
-                .long("ascii")
-                .help(t("cli_ascii"))
-                .action(ArgAction::SetTrue),
-        )
-}
-
-/// A path-valued option. Falls back to the current directory when absent — the
-/// same default the clap definitions declare.
-fn path_arg(matches: &clap::ArgMatches, name: &str) -> PathBuf {
-    matches
-        .get_one::<String>(name)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// A boolean option that clap stores as a string so `--flag=false` is
-/// expressible. Only an explicit "false" turns it off.
-fn flag_default_true(matches: &clap::ArgMatches, name: &str) -> bool {
-    matches
-        .get_one::<String>(name)
-        .is_none_or(|value| value != "false")
-}
-
-/// Parse ArgMatches into Args struct.
-pub fn parse_args(matches: &clap::ArgMatches) -> Args {
-    Args {
-        source: path_arg(matches, "source"),
-        output: path_arg(matches, "output"),
-        sdel: flag_default_true(matches, "sdel"),
-        format: match matches
-            .get_one::<String>("format")
-            .map(String::as_str)
-            .unwrap_or("mkv")
-        {
-            "mp4" => OutputFormat::Mp4,
-            "mov" => OutputFormat::Mov,
-            _ => OutputFormat::Mkv,
-        },
-        jobs: matches
-            .get_one::<usize>("jobs")
-            .copied()
-            .unwrap_or_else(default_jobs),
-        progress: flag_default_true(matches, "progress"),
-        dry_run: matches.get_flag("dry_run"),
-        interactive: matches.get_flag("interactive"),
-        verbose: matches.get_flag("verbose"),
-        quiet: matches.get_flag("quiet"),
-        resume: matches.get_flag("resume"),
-        retry: matches.get_one::<usize>("retry").copied().unwrap_or(0),
-        recursive: matches.get_flag("recursive"),
-        once: matches.get_one::<String>("once").cloned(),
-        ascii: matches.get_flag("ascii"),
+/// A `--once` stem becomes a filename, so it must not carry a path, a null
+/// byte, or a directory shorthand.
+fn is_plain_stem(stem: &str) -> bool {
+    if stem.contains('\0') {
+        return false;
     }
+    if stem.trim().is_empty() || stem == "." || stem == ".." {
+        return false;
+    }
+    !stem.contains('/') && !stem.contains('\\')
 }
 
 impl Args {
@@ -309,30 +211,29 @@ impl Args {
             );
         }
 
-        // Prevent source==output + mp4/mov format from overwriting source video files.
-        // canonicalize() only succeeds for paths that exist, so a missing output
-        // directory simply skips the check.
+        // Prevent source==output + mp4/mov format from overwriting source video files
         if self.format == OutputFormat::Mp4 || self.format == OutputFormat::Mov {
             let src = std::fs::canonicalize(&self.source).ok();
-            let out = std::fs::canonicalize(&self.output).ok();
-            if src.is_some() && src == out {
-                bail!("{}", tf("same_source_output", &[&self.format.to_string()]));
+            let out = self
+                .output
+                .exists()
+                .then(|| std::fs::canonicalize(&self.output).ok())
+                .flatten();
+            if let (Some(s), Some(o)) = (src, out) {
+                if s == o {
+                    bail!("{}", tf("same_source_output", &[&self.format.to_string()]));
+                }
+            }
+        }
+
+        if let Some(stem) = &self.once {
+            if !is_plain_stem(stem) {
+                bail!("{}", tf("invalid_stem", &[stem]));
             }
         }
 
         Ok(())
     }
-}
-
-/// Parse `argv` (without the program name) into `Args` through the real CLI.
-#[cfg(test)]
-fn args_from(argv: &[&str]) -> Args {
-    let mut full = vec!["mixbilibili"];
-    full.extend_from_slice(argv);
-    let matches = build_cli()
-        .try_get_matches_from(full)
-        .expect("test argv should parse");
-    parse_args(&matches)
 }
 
 #[cfg(test)]
@@ -384,47 +285,111 @@ mod args_tests {
     }
 
     #[test]
+    fn test_dry_run_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.dry_run);
+    }
+
+    #[test]
     fn test_dry_run_flag_enabled() {
-        assert!(args_from(&["--dry-run"]).dry_run);
+        let args = Args::try_parse_from(["mixbilibili", "--dry-run"]).unwrap();
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn test_verbose_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.verbose);
     }
 
     #[test]
     fn test_verbose_flag_enabled() {
-        assert!(args_from(&["--verbose"]).verbose);
+        let args = Args::try_parse_from(["mixbilibili", "--verbose"]).unwrap();
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn test_resume_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.resume);
     }
 
     #[test]
     fn test_resume_flag_enabled() {
-        assert!(args_from(&["--resume"]).resume);
+        let args = Args::try_parse_from(["mixbilibili", "--resume"]).unwrap();
+        assert!(args.resume);
+    }
+
+    #[test]
+    fn test_retry_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert_eq!(args.retry, 0);
     }
 
     #[test]
     fn test_retry_custom() {
-        assert_eq!(args_from(&["--retry", "3"]).retry, 3);
+        let args = Args::try_parse_from(["mixbilibili", "--retry", "3"]).unwrap();
+        assert_eq!(args.retry, 3);
     }
 
     #[test]
-    fn test_quiet_flag_short_and_long() {
-        assert!(args_from(&["-q"]).quiet);
-        assert!(args_from(&["--quiet"]).quiet);
+    fn test_quiet_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.quiet);
     }
 
     #[test]
-    fn test_sdel_bare_uses_default_missing_value() {
-        assert!(args_from(&["--sdel"]).sdel);
-        assert!(args_from(&["-d"]).sdel);
-        assert!(args_from(&["--sdel", "true"]).sdel);
+    fn test_quiet_flag_enabled() {
+        let args = Args::try_parse_from(["mixbilibili", "-q"]).unwrap();
+        assert!(args.quiet);
     }
 
     #[test]
-    fn test_progress_bare_uses_default_missing_value() {
-        assert!(args_from(&["--progress"]).progress);
-        assert!(args_from(&["-p"]).progress);
+    fn test_quiet_flag_long() {
+        let args = Args::try_parse_from(["mixbilibili", "--quiet"]).unwrap();
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_sdel_bare() {
+        let args = Args::try_parse_from(["mixbilibili", "--sdel"]).unwrap();
+        assert!(args.sdel); // bare --sdel uses default_missing_value("true")
+    }
+
+    #[test]
+    fn test_sdel_bare_short() {
+        let args = Args::try_parse_from(["mixbilibili", "-d"]).unwrap();
+        assert!(args.sdel); // bare -d uses default_missing_value("true")
+    }
+
+    #[test]
+    fn test_sdel_explicit_true() {
+        let args = Args::try_parse_from(["mixbilibili", "--sdel", "true"]).unwrap();
+        assert!(args.sdel);
+    }
+
+    #[test]
+    fn test_progress_bare() {
+        let args = Args::try_parse_from(["mixbilibili", "--progress"]).unwrap();
+        assert!(args.progress);
+    }
+
+    #[test]
+    fn test_progress_bare_short() {
+        let args = Args::try_parse_from(["mixbilibili", "-p"]).unwrap();
+        assert!(args.progress);
+    }
+
+    #[test]
+    fn test_ascii_flag_default() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
+        assert!(!args.ascii);
     }
 
     #[test]
     fn test_ascii_flag_enabled() {
-        assert!(args_from(&["--ascii"]).ascii);
+        let args = Args::try_parse_from(["mixbilibili", "--ascii"]).unwrap();
+        assert!(args.ascii);
     }
 }
 
@@ -433,28 +398,32 @@ mod builder_tests {
     use super::*;
 
     #[test]
-    fn test_cli_defaults() {
-        let args = args_from(&[]);
+    fn test_build_cli_defaults() {
+        let args = Args::try_parse_from(["mixbilibili"]).unwrap();
         assert_eq!(args.source, PathBuf::from("."));
         assert_eq!(args.output, PathBuf::from("."));
-        // --sdel and --progress are on by default.
         assert!(args.sdel);
-        assert!(args.progress);
         assert!(!args.dry_run);
-        assert!(!args.interactive);
         assert!(!args.quiet);
         assert!(!args.verbose);
         assert!(!args.resume);
-        assert!(!args.recursive);
-        assert!(!args.ascii);
         assert_eq!(args.retry, 0);
-        assert_eq!(args.once, None);
-        assert_eq!(args.format, OutputFormat::Mkv);
     }
 
     #[test]
-    fn test_cli_short_flags() {
-        let args = args_from(&["-s", "/tmp", "-o", "/out", "-j", "4", "-f", "mp4"]);
+    fn test_build_cli_short_flags() {
+        let args = Args::try_parse_from([
+            "mixbilibili",
+            "-s",
+            "/tmp",
+            "-o",
+            "/out",
+            "-j",
+            "4",
+            "-f",
+            "mp4",
+        ])
+        .unwrap();
         assert_eq!(args.source, PathBuf::from("/tmp"));
         assert_eq!(args.output, PathBuf::from("/out"));
         assert_eq!(args.jobs, 4);
@@ -462,8 +431,9 @@ mod builder_tests {
     }
 
     #[test]
-    fn test_cli_long_flags() {
-        let args = args_from(&[
+    fn test_build_cli_long_flags() {
+        let args = Args::try_parse_from([
+            "mixbilibili",
             "--dry-run",
             "--quiet",
             "--verbose",
@@ -474,7 +444,8 @@ mod builder_tests {
             "false",
             "--progress",
             "false",
-        ]);
+        ])
+        .unwrap();
         assert!(args.dry_run);
         assert!(args.quiet);
         assert!(args.verbose);
@@ -486,9 +457,9 @@ mod builder_tests {
 
     #[test]
     fn test_help_contains_translated_text() {
+        use clap::CommandFactory;
         let l = crate::i18n::lang();
-        let mut cmd = build_cli();
-        let help = cmd.render_help().to_string();
+        let help = Args::command().render_help().to_string();
         if matches!(l, crate::i18n::Lang::Cn) {
             assert!(help.contains("批量合并"));
         } else {

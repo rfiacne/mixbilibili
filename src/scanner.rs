@@ -1,46 +1,64 @@
-use crate::ffmpeg;
+use crate::cli::OutputFormat;
 use crate::i18n::{t, tf};
 use anyhow::{Context, Result};
-use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-/// Build the composite key for a file: bare stem for non-recursive,
-/// "relative_parent/stem" for recursive scans.
-pub(crate) fn make_key(recursive: bool, relative_parent: &str, stem: &str) -> String {
-    if recursive && !relative_parent.is_empty() {
-        format!("{}/{}", relative_parent, stem)
-    } else {
-        stem.to_string()
-    }
-}
-
-/// Flatten a composite key "parent/stem" into a safe output filename.
-/// Single source of truth for the key → filename rule, shared by merger and workflow.
-pub(crate) fn safe_stem(key: &str) -> String {
-    key.replace('/', "_")
-}
-
-/// Relative-parent string for a child directory of `rel_parent`.
-fn child_rel_parent(rel_parent: &str, child_name: &str) -> String {
-    if rel_parent.is_empty() {
-        child_name.to_string()
-    } else {
-        let mut out = String::with_capacity(rel_parent.len() + 1 + child_name.len());
-        out.push_str(rel_parent);
-        out.push('/');
-        out.push_str(child_name);
-        out
-    }
-}
-
+/// A video/audio pair, identified by its stem.
+///
+/// This module owns the naming convention: which suffixes pair up, how the
+/// aria2 control file is spelled, and where merged output belongs. Everything
+/// else asks for paths instead of formatting them.
 #[derive(Debug, Clone)]
 pub struct FilePair {
     pub video: PathBuf,
     pub audio: PathBuf,
+    /// Bare stem in a flat scan; a composite "subdir/stem" when recursive, so
+    /// same-named files in different directories stay distinct.
     pub stem: String,
+}
+
+impl FilePair {
+    pub const VIDEO_SUFFIX: &'static str = ".mp4";
+    pub const AUDIO_SUFFIX: &'static str = ".m4a";
+    /// aria2 leaves `<name>.<ext>.aria2` next to an in-flight download.
+    pub const ARIA2_SUFFIX: &'static str = ".aria2";
+
+    pub fn video_path(dir: &Path, stem: &str) -> PathBuf {
+        dir.join(format!("{stem}{}", Self::VIDEO_SUFFIX))
+    }
+
+    pub fn audio_path(dir: &Path, stem: &str) -> PathBuf {
+        dir.join(format!("{stem}{}", Self::AUDIO_SUFFIX))
+    }
+
+    /// The pair for `stem` in `dir`, or an error naming the source missing.
+    pub fn sources_in(dir: &Path, stem: &str) -> Result<Self> {
+        let video = Self::video_path(dir, stem);
+        let audio = Self::audio_path(dir, stem);
+        if !video.is_file() {
+            anyhow::bail!("{}", tf("missing_video", &[&video.display().to_string()]));
+        }
+        if !audio.is_file() {
+            anyhow::bail!("{}", tf("missing_audio", &[&audio.display().to_string()]));
+        }
+        Ok(Self {
+            video,
+            audio,
+            stem: stem.to_string(),
+        })
+    }
+
+    /// A composite key is flattened into one file name; the directory
+    /// structure is not reproduced under the output directory.
+    pub fn output_name(&self, format: OutputFormat) -> String {
+        format!("{}.{}", self.stem.replace('/', "_"), format.extension())
+    }
+
+    pub fn output_path(&self, dir: &Path, format: OutputFormat) -> PathBuf {
+        dir.join(self.output_name(format))
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -54,15 +72,25 @@ pub struct ScanStats {
 pub struct ScanResult {
     pub pairs: Vec<FilePair>,
     pub stats: ScanStats,
-    pub estimated_duration: Duration,
 }
 
-/// Walks `dir` and records candidate files into the keyed maps.
+/// Relative-parent string for a child directory of `rel_parent`.
 ///
-/// `rel_parent` is `dir`'s path relative to the scan root (`""` at the root).
-/// It is carried down the recursion because it is a property of the *directory*:
-/// deriving it per entry cost a `strip_prefix` walk plus an allocation for every
-/// file in the tree, which dominated the scan on large directories.
+/// The relative parent is a property of the *directory*, so it is built once
+/// per directory and threaded down the recursion instead of being re-derived
+/// from each file's path.
+fn child_rel_parent(rel_parent: &str, child_name: &str) -> String {
+    if rel_parent.is_empty() {
+        child_name.to_string()
+    } else {
+        let mut out = String::with_capacity(rel_parent.len() + 1 + child_name.len());
+        out.push_str(rel_parent);
+        out.push('/');
+        out.push_str(child_name);
+        out
+    }
+}
+
 fn collect_files(
     dir: &Path,
     rel_parent: &str,
@@ -77,6 +105,7 @@ fn collect_files(
         // Lazy context: the closure only runs on failure. Building the message
         // eagerly allocated a String for every entry in the tree.
         let entry = entry.with_context(|| t("failed_read_entry"))?;
+        let path = entry.path();
 
         // One `file_type()` for the whole entry. Unlike `metadata()` it does not
         // follow symlinks, and unlike `Path::is_dir()` it reuses the type already
@@ -91,35 +120,39 @@ fn collect_files(
         if file_type.is_dir() {
             if recursive {
                 let child = child_rel_parent(rel_parent, &entry.file_name().to_string_lossy());
-                collect_files(
-                    &entry.path(),
-                    &child,
-                    mp4_files,
-                    m4a_files,
-                    aria2_files,
-                    true,
-                )?;
+                collect_files(&path, &child, mp4_files, m4a_files, aria2_files, true)?;
             }
             continue;
         }
 
-        let name = entry.file_name();
-        let Some(filename) = name.to_str() else {
-            continue;
+        let filename = match path.file_name().and_then(|n| n.to_str()) {
+            Some(f) => f,
+            None => continue,
         };
 
-        if let Some(stem) = filename.strip_suffix(".aria2") {
-            // Normalize: strip the .mp4/.m4a suffix so the pairing check below
-            // needs only one set lookup.
+        // Build key: bare stem for non-recursive, relative path prefix for
+        // recursive. `rel_parent` is a property of the *directory*, so it is
+        // threaded down the recursion rather than re-derived per file.
+        let make_key = |stem: &str| -> String {
+            if recursive && !rel_parent.is_empty() {
+                format!("{}/{}", rel_parent, stem)
+            } else {
+                stem.to_string()
+            }
+        };
+
+        if let Some(stem) = filename.strip_suffix(FilePair::ARIA2_SUFFIX) {
+            // Normalize: strip the source suffix so one lookup covers
+            // "foo.aria2", "foo.mp4.aria2" and "foo.m4a.aria2".
             let bare = stem
-                .strip_suffix(".mp4")
-                .or_else(|| stem.strip_suffix(".m4a"))
+                .strip_suffix(FilePair::VIDEO_SUFFIX)
+                .or_else(|| stem.strip_suffix(FilePair::AUDIO_SUFFIX))
                 .unwrap_or(stem);
-            aria2_files.insert(make_key(recursive, rel_parent, bare));
-        } else if let Some(stem) = filename.strip_suffix(".mp4") {
-            mp4_files.insert(make_key(recursive, rel_parent, stem), entry.path());
-        } else if let Some(stem) = filename.strip_suffix(".m4a") {
-            m4a_files.insert(make_key(recursive, rel_parent, stem), entry.path());
+            aria2_files.insert(make_key(bare));
+        } else if let Some(stem) = filename.strip_suffix(FilePair::VIDEO_SUFFIX) {
+            mp4_files.insert(make_key(stem), path);
+        } else if let Some(stem) = filename.strip_suffix(FilePair::AUDIO_SUFFIX) {
+            m4a_files.insert(make_key(stem), path);
         }
     }
 
@@ -149,7 +182,6 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
     all_keys.dedup();
 
     for key in all_keys {
-        // An .aria2 sidecar means aria2 is still writing this stem — skip it.
         if aria2_files.contains(key) {
             stats.skipped += 1;
             continue;
@@ -167,30 +199,7 @@ pub fn scan_directory(source_dir: &Path, recursive: bool) -> Result<ScanResult> 
         }
     }
 
-    // Guard against silent overwrite: distinct composite keys (e.g. "a/b" and
-    // "a_b") can flatten to the same output filename. The second pair would
-    // overwrite the first's output (unrecoverable with --sdel), so reject upfront.
-    let mut seen_flat: HashMap<String, String> = HashMap::new();
-    for pair in &pairs {
-        let flat = safe_stem(&pair.stem);
-        if let Some(prev) = seen_flat.insert(flat.clone(), pair.stem.clone()) {
-            anyhow::bail!(
-                "{}",
-                tf("output_name_collision", &[&prev, &pair.stem, &flat])
-            );
-        }
-    }
-
-    let estimated_duration: std::time::Duration = pairs
-        .par_iter()
-        .map(|p| ffmpeg::estimate_merge_duration(&p.video))
-        .sum();
-
-    Ok(ScanResult {
-        pairs,
-        stats,
-        estimated_duration,
-    })
+    Ok(ScanResult { pairs, stats })
 }
 
 #[cfg(test)]
@@ -207,35 +216,79 @@ mod tests {
         let debug_str = format!("{:?}", pair);
         assert!(debug_str.contains("video"));
     }
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
 
     #[test]
-    fn test_scan_stats_default() {
-        let stats = ScanStats::default();
-        assert_eq!(stats.pairs, 0);
-        assert_eq!(stats.skipped, 0);
-        assert_eq!(stats.orphaned, 0);
+    fn source_paths_follow_the_convention() {
+        let dir = Path::new("/downloads");
+        assert_eq!(
+            FilePair::video_path(dir, "ep01"),
+            PathBuf::from("/downloads/ep01.mp4")
+        );
+        assert_eq!(
+            FilePair::audio_path(dir, "ep01"),
+            PathBuf::from("/downloads/ep01.m4a")
+        );
     }
 
     #[test]
-    fn test_make_key_non_recursive() {
-        assert_eq!(make_key(false, "parent", "stem"), "stem");
+    fn output_path_flattens_a_composite_key() {
+        let pair = FilePair {
+            video: PathBuf::from("/in/season1/ep01.mp4"),
+            audio: PathBuf::from("/in/season1/ep01.m4a"),
+            stem: "season1/ep01".to_string(),
+        };
+        // One file name, not a recreated directory tree.
+        assert_eq!(
+            pair.output_path(Path::new("/out"), OutputFormat::Mkv),
+            PathBuf::from("/out/season1_ep01.mkv")
+        );
     }
 
     #[test]
-    fn test_make_key_recursive_with_parent() {
-        assert_eq!(make_key(true, "parent", "stem"), "parent/stem");
+    fn sources_in_finds_a_complete_pair() {
+        let dir = tempdir().unwrap();
+        File::create(dir.path().join("ep01.mp4")).unwrap();
+        File::create(dir.path().join("ep01.m4a")).unwrap();
+
+        let pair = FilePair::sources_in(dir.path(), "ep01").unwrap();
+        assert_eq!(pair.stem, "ep01");
+        assert_eq!(pair.video, dir.path().join("ep01.mp4"));
+        assert_eq!(pair.audio, dir.path().join("ep01.m4a"));
     }
 
     #[test]
-    fn test_make_key_recursive_root() {
-        assert_eq!(make_key(true, "", "stem"), "stem");
+    fn sources_in_names_the_missing_video() {
+        let dir = tempdir().unwrap();
+        File::create(dir.path().join("ep01.m4a")).unwrap();
+
+        let err = FilePair::sources_in(dir.path(), "ep01")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ep01.mp4"),
+            "should name the video file: {err}"
+        );
     }
 
     #[test]
-    fn test_safe_stem_flattens_composite_key() {
-        assert_eq!(safe_stem("parent/stem"), "parent_stem");
-        assert_eq!(safe_stem("stem"), "stem");
-        assert_eq!(safe_stem("a/b/c"), "a_b_c");
+    fn sources_in_names_the_missing_audio() {
+        let dir = tempdir().unwrap();
+        File::create(dir.path().join("ep01.mp4")).unwrap();
+
+        let err = FilePair::sources_in(dir.path(), "ep01")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ep01.m4a"),
+            "should name the audio file: {err}"
+        );
     }
 }
 
@@ -251,26 +304,6 @@ mod scan_tests {
         let result = scan_directory(dir.path(), false).unwrap();
         assert_eq!(result.pairs.len(), 0);
         assert_eq!(result.stats.pairs, 0);
-    }
-
-    #[test]
-    fn test_scan_rejects_output_name_collision() {
-        let dir = tempdir().unwrap();
-
-        // "sub/a" and "sub_a" both flatten to "sub_a" → silent overwrite risk
-        std::fs::create_dir(dir.path().join("sub")).unwrap();
-        for f in ["sub/a.mp4", "sub/a.m4a", "sub_a.mp4", "sub_a.m4a"] {
-            File::create(dir.path().join(f)).unwrap();
-        }
-
-        let result = scan_directory(dir.path(), true);
-        assert!(result.is_err(), "should reject flattened-name collision");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("collision") || err.contains("冲突"),
-            "Error should mention collision: {}",
-            err
-        );
     }
 
     #[test]
@@ -424,66 +457,6 @@ mod scan_tests {
     }
 
     #[test]
-    fn test_scan_recursive_nested_keys_use_relative_parent_path() {
-        // The composite key decides the output filename, so pin the exact format
-        // for multi-level nesting (including a file directly in the scan root).
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-
-        let season1 = root.join("season1");
-        let deeper = season1.join("extra");
-        fs::create_dir_all(&deeper).unwrap();
-
-        for (parent, stem) in [
-            (root.to_path_buf(), "ep03"),
-            (season1.clone(), "ep01"),
-            (deeper.clone(), "ep02"),
-        ] {
-            File::create(parent.join(format!("{stem}.mp4"))).unwrap();
-            File::create(parent.join(format!("{stem}.m4a"))).unwrap();
-        }
-
-        let result = scan_directory(root, true).unwrap();
-        let mut stems: Vec<&str> = result.pairs.iter().map(|p| p.stem.as_str()).collect();
-        stems.sort_unstable();
-
-        assert_eq!(
-            stems,
-            vec!["ep03", "season1/ep01", "season1/extra/ep02"],
-            "recursive keys must be the path relative to the scan root"
-        );
-    }
-
-    #[test]
-    fn test_scan_recursive_keys_flatten_to_distinct_output_names() {
-        // Guards the pipeline that follows scan: each distinct key must map to a
-        // distinct flattened filename, or pairs would overwrite each other.
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-
-        let nested = root.join("a").join("b");
-        let x_y = root.join("x_y");
-        fs::create_dir_all(&nested).unwrap();
-        fs::create_dir_all(&x_y).unwrap();
-        for (parent, stem) in [
-            (root.join("a"), "b"),
-            (nested.clone(), "c"),
-            (x_y.clone(), "c"),
-        ] {
-            File::create(parent.join(format!("{stem}.mp4"))).unwrap();
-            File::create(parent.join(format!("{stem}.m4a"))).unwrap();
-        }
-
-        let result = scan_directory(root, true).unwrap();
-        let mut flat: Vec<String> = result.pairs.iter().map(|p| safe_stem(&p.stem)).collect();
-        flat.sort();
-        flat.dedup();
-
-        assert_eq!(flat.len(), result.pairs.len(), "flat names must be unique");
-        assert_eq!(flat, vec!["a_b", "a_b_c", "x_y_c"]);
-    }
-
-    #[test]
     fn test_scan_directory_matches_mp4_with_m4a() {
         let dir = tempdir().unwrap();
         let path = dir.path();
@@ -584,41 +557,11 @@ mod scan_tests {
         assert!(stems.iter().any(|s| s.ends_with("/deep")));
     }
 
-    #[test]
-    fn test_scan_includes_estimated_duration() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        File::create(path.join("video1.mp4")).unwrap();
-        File::create(path.join("video1.m4a")).unwrap();
-        File::create(path.join("video2.mp4")).unwrap();
-        File::create(path.join("video2.m4a")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        // Empty files → 0 duration
-        assert_eq!(result.estimated_duration.as_secs(), 0);
-    }
-
-    #[test]
-    fn test_scan_estimated_duration_with_data() {
-        use std::io::Write;
-
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        // Create ~10 MB video file
-        let mut video1 = File::create(path.join("video1.mp4")).unwrap();
-        video1.write_all(&vec![0u8; 10 * 1024 * 1024]).unwrap();
-        File::create(path.join("video1.m4a")).unwrap();
-
-        // Create ~20 MB video file
-        let mut video2 = File::create(path.join("video2.mp4")).unwrap();
-        video2.write_all(&vec![0u8; 20 * 1024 * 1024]).unwrap();
-        File::create(path.join("video2.m4a")).unwrap();
-
-        let result = scan_directory(path, false).unwrap();
-        // 10 MB / 10 MB/s = 1s, 20 MB / 10 MB/s = 2s, total = 3s
-        assert_eq!(result.estimated_duration.as_secs(), 3);
+    /// Windows symlinks need developer mode / elevated privileges; skip
+    /// rather than fail when the OS refuses (error 1314).
+    #[cfg(windows)]
+    fn symlink_dir_supported(from: &std::path::Path, to: &std::path::Path) -> bool {
+        std::os::windows::fs::symlink_dir(from, to).is_ok()
     }
 
     #[test]
@@ -635,7 +578,12 @@ mod scan_tests {
         std::os::unix::fs::symlink(path, path.join("loop_link")).unwrap();
 
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(path, path.join("loop_link")).unwrap();
+        {
+            if !symlink_dir_supported(path, &path.join("loop_link")) {
+                eprintln!("Skipping: Windows symlink creation needs developer mode");
+                return;
+            }
+        }
 
         // Should complete without hanging or stack overflow
         let result = scan_directory(path, true);
@@ -660,7 +608,12 @@ mod scan_tests {
         std::os::unix::fs::symlink(external.path(), path.join("external_link")).unwrap();
 
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(external.path(), path.join("external_link")).unwrap();
+        {
+            if !symlink_dir_supported(external.path(), &path.join("external_link")) {
+                eprintln!("Skipping: Windows symlink creation needs developer mode");
+                return;
+            }
+        }
 
         // Create valid pair in main directory
         File::create(path.join("video.mp4")).unwrap();

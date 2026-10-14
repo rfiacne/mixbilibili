@@ -47,27 +47,6 @@ fn create_test_media(dir: &std::path::Path, name: &str) {
         .expect("Failed to create test audio");
 }
 
-/// Waits for a child, killing it and failing the test if it outlives `timeout`,
-/// so a binary that ignores Ctrl+C cannot hang the whole test suite.
-#[cfg(unix)]
-fn wait_bounded(
-    child: &mut std::process::Child,
-    timeout: std::time::Duration,
-) -> std::process::ExitStatus {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait().expect("try_wait failed") {
-            return status;
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("process did not exit within {timeout:?} after SIGINT");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
 #[test]
 fn test_help_flag() {
     let output = Command::new(get_binary_path())
@@ -262,6 +241,135 @@ fn test_merge_with_delete_source() {
 }
 
 #[test]
+fn test_dry_run_once_previews_without_touching_files() {
+    // Regression: --once used to bypass --dry-run entirely and really merge
+    // (and with default --sdel, really delete) the pair.
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("output");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&output).unwrap();
+    create_test_media(&source, "once_video");
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--dry-run",
+            "--once",
+            "once_video",
+        ])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(result.status.success());
+    assert!(
+        source.join("once_video.mp4").exists() && source.join("once_video.m4a").exists(),
+        "--dry-run --once must not delete sources"
+    );
+    assert!(
+        !output.join("once_video.mkv").exists(),
+        "--dry-run --once must not produce output"
+    );
+}
+
+#[test]
+fn test_once_merges_single_pair() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("output");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&output).unwrap();
+    create_test_media(&source, "one");
+    create_test_media(&source, "two");
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--sdel",
+            "false",
+            "--once",
+            "one",
+        ])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(result.status.success());
+    assert!(output.join("one.mkv").exists(), "--once merges its stem");
+    assert!(
+        !output.join("two.mkv").exists(),
+        "--once must not touch other pairs"
+    );
+}
+
+#[test]
+fn test_once_rejects_path_traversal_stem() {
+    let dir = tempdir().unwrap();
+    let result = Command::new(get_binary_path())
+        .args(["-s", &dir.path().display().to_string(), "--once", "../evil"])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(!result.status.success(), "traversal stem must fail");
+    assert!(
+        !result.stderr.is_empty(),
+        "traversal rejection should explain itself"
+    );
+}
+
+// Same stem in two subdirs must produce two distinct outputs, never one
+// silently overwriting the other. Naming follows the documented contract:
+// the composite key flattens (season1/ep01 -> season1_ep01.mkv).
+#[test]
+fn test_recursive_same_stem_pairs_both_survive() {
+    if !ffmpeg_available() {
+        eprintln!("Skipping: ffmpeg not available");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("output");
+    fs::create_dir_all(source.join("season1")).unwrap();
+    fs::create_dir_all(source.join("season2")).unwrap();
+    create_test_media(&source.join("season1"), "ep01");
+    create_test_media(&source.join("season2"), "ep01");
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--sdel",
+            "false",
+            "--recursive",
+        ])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(result.status.success());
+    assert!(
+        output.join("season1_ep01.mkv").exists(),
+        "season1/ep01 must merge to its own output"
+    );
+    assert!(
+        output.join("season2_ep01.mkv").exists(),
+        "season2/ep01 must merge to its own output"
+    );
+}
+
+#[test]
 fn test_recursive_flag() {
     let dir = tempdir().unwrap();
     let source = dir.path().join("source");
@@ -368,50 +476,6 @@ fn test_once_mode_merge() {
     );
 }
 
-/// `--dry-run` promises "no files created or deleted". `--once` used to return
-/// before the dry-run branch, so `-n` merged for real and — with the default
-/// `--sdel` — deleted both sources.
-#[test]
-fn test_once_dry_run_does_not_touch_files() {
-    if !ffmpeg_available() {
-        eprintln!("Skipping: ffmpeg not available");
-        return;
-    }
-
-    let dir = tempdir().unwrap();
-    let source = dir.path().join("source");
-    let output = dir.path().join("output");
-    fs::create_dir(&source).unwrap();
-    fs::create_dir(&output).unwrap();
-
-    create_test_media(&source, "once_video");
-
-    let result = Command::new(get_binary_path())
-        .args([
-            "-s",
-            &source.display().to_string(),
-            "-o",
-            &output.display().to_string(),
-            "--once",
-            "once_video",
-            "-n",
-        ])
-        .output()
-        .expect("Failed to execute binary");
-
-    assert!(result.status.success());
-
-    assert!(
-        source.join("once_video.mp4").exists() && source.join("once_video.m4a").exists(),
-        "a dry run must not delete sources"
-    );
-    assert_eq!(
-        fs::read_dir(&output).unwrap().count(),
-        0,
-        "a dry run must not create output"
-    );
-}
-
 #[test]
 fn test_resume_after_partial() {
     if !ffmpeg_available() {
@@ -451,7 +515,9 @@ fn test_resume_after_partial() {
     fs::remove_file(output.join("video1.mkv")).unwrap();
     fs::remove_file(output.join("video2.mkv")).unwrap();
 
-    // Create a state file marking video1 as completed (bare stem in non-recursive)
+    // Create a state file marking video1 as completed (bare stem in non-recursive).
+    // Escape backslashes so Windows temp paths embed validly in the JSON string.
+    let esc = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
     let state_content = format!(
         r#"{{
   "version": 1,
@@ -461,8 +527,8 @@ fn test_resume_after_partial() {
   "failed": [],
   "pending": []
 }}"#,
-        source.display(),
-        output.display()
+        esc(&source),
+        esc(&output)
     );
     fs::write(source.join(".mixbilibili_state.json"), state_content).unwrap();
 
@@ -501,121 +567,61 @@ fn test_resume_after_partial() {
     );
 }
 
-/// Ctrl+C during a batch must stop cleanly (exit 0), keep every source file, and
-/// keep the resume checkpoint — otherwise the `--resume` hint printed right after
-/// the interrupt is a lie and the next run redoes work that was already finished.
-///
-/// Regression: `finalize` dropped the state file whenever no merge had *failed*.
-/// Interrupted pairs are not failures, so cancelling wiped the checkpoint.
-#[cfg(unix)]
+/// `scripts/aria2-hook.sh` shells out to exactly this command once both
+/// downloads have landed. The hook is bash and so is untested by this suite,
+/// so the contract it depends on is pinned here: merge in place, remove both
+/// sources, stay silent, and leave nothing to resume.
 #[test]
-fn test_interrupt_keeps_checkpoint_and_sources() {
-    use std::process::Stdio;
-    use std::time::{Duration, Instant};
-
+fn test_once_quiet_contract_used_by_the_aria2_hook() {
     if !ffmpeg_available() {
         eprintln!("Skipping: ffmpeg not available");
         return;
     }
 
     let dir = tempdir().unwrap();
-    let source = dir.path().join("source");
-    let output = dir.path().join("output");
-    fs::create_dir(&source).unwrap();
-    fs::create_dir(&output).unwrap();
+    create_test_media(dir.path(), "hook_video");
 
-    // One real pair, copied many times. A `-c copy` merge takes ~45 ms, so this
-    // batch cannot finish while the signal is on its way.
-    const PAIRS: usize = 200;
-    create_test_media(&source, "template");
-    let video = fs::read(source.join("template.mp4")).unwrap();
-    let audio = fs::read(source.join("template.m4a")).unwrap();
-    fs::remove_file(source.join("template.mp4")).unwrap();
-    fs::remove_file(source.join("template.m4a")).unwrap();
-    for i in 0..PAIRS {
-        let stem = format!("video{i:03}");
-        fs::write(source.join(format!("{stem}.mp4")), &video).unwrap();
-        fs::write(source.join(format!("{stem}.m4a")), &audio).unwrap();
-    }
-
-    let mut child = Command::new(get_binary_path())
+    let dir_str = dir.path().display().to_string();
+    let output = Command::new(get_binary_path())
         .args([
+            "--once",
+            "hook_video",
             "-s",
-            &source.display().to_string(),
+            &dir_str,
             "-o",
-            &output.display().to_string(),
+            &dir_str,
             "--sdel",
-            "false",
-            "-j",
-            "1",
-            "-q",
+            "true",
+            "--quiet",
         ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("Failed to spawn binary");
+        .output()
+        .expect("Failed to execute binary");
 
-    // Interrupt once the batch is demonstrably under way instead of after a fixed
-    // delay: with `-j 1` only one merge runs at a time, so seeing 10 outputs means
-    // at least 9 pairs finished. Waiting on progress keeps this independent of how
-    // fast the machine is, while still guaranteeing work is left over to interrupt.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while fs::read_dir(&output).unwrap().count() < 10 {
-        assert!(
-            Instant::now() < deadline,
-            "no merge progress within 60s; ffmpeg may be hanging"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-
-    let signalled = Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
-        .status()
-        .expect("Failed to run kill");
-    assert!(signalled.success(), "SIGINT should be delivered");
-
-    let status = wait_bounded(&mut child, Duration::from_secs(30));
+    assert!(output.status.success(), "hook call must succeed");
     assert!(
-        status.success(),
-        "Ctrl+C is a clean stop, not a merge failure"
-    );
-
-    // Sources must all survive: `ffmpeg -c copy` never consumes them, and the
-    // pending pairs still need them for `--resume`.
-    assert!(source.join("video000.mp4").exists());
-    assert!(source.join("video199.m4a").exists());
-
-    // Interrupted merges leave no partial output behind.
-    let outputs = fs::read_dir(&output).unwrap().count();
-    assert!(outputs < PAIRS, "unfinished outputs left behind: {outputs}");
-
-    let state_path = source.join(".mixbilibili_state.json");
-    assert!(
-        state_path.exists(),
-        "the interrupt must keep the resume checkpoint at {}",
-        state_path.display()
-    );
-
-    let json = fs::read_to_string(&state_path).unwrap();
-    assert!(
-        !json.contains("\"completed\": []"),
-        "pairs finished before the interrupt must be recorded: {json}"
+        output.stdout.is_empty(),
+        "--quiet must stay silent for the hook: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
     assert!(
-        !json.contains("\"pending\": []"),
-        "pairs skipped by the interrupt must stay pending: {json}"
+        dir.path().join("hook_video.mkv").exists(),
+        "merged in place"
+    );
+    assert!(
+        !dir.path().join("hook_video.mp4").exists() && !dir.path().join("hook_video.m4a").exists(),
+        "--sdel true removes both sources"
+    );
+    assert!(
+        !dir.path().join(".mixbilibili_state.json").exists(),
+        "--once leaves no resume state behind"
     );
 }
 
-/// Ctrl+C during `--once` must exit cleanly too. There is no checkpoint to keep
-/// in single-pair mode, but an interrupt is still the user's doing rather than a
-/// merge failure, so it must not be reported (or counted) as one.
-#[cfg(unix)]
+/// `-q` promises summary-only. ffmpeg's stderr is captured rather than
+/// inherited, so its diagnostics cannot leak past the promise — and cannot
+/// scramble the progress bar, which draws on the same stream.
 #[test]
-fn test_interrupt_during_once_exits_cleanly() {
-    use std::process::Stdio;
-    use std::time::Duration;
-
+fn test_quiet_mode_leaks_no_ffmpeg_diagnostics() {
     if !ffmpeg_available() {
         eprintln!("Skipping: ffmpeg not available");
         return;
@@ -627,58 +633,38 @@ fn test_interrupt_during_once_exits_cleanly() {
     fs::create_dir(&source).unwrap();
     fs::create_dir(&output).unwrap();
 
-    // Named pipes instead of real media: ffmpeg blocks on them forever, so the
-    // interrupt is guaranteed to land while a merge is in flight rather than
-    // racing a copy that finishes in milliseconds. (With `--once` the pair is
-    // addressed directly, so the scanner's symlink/skip rules never apply.)
-    for name in ["video.mp4", "video.m4a"] {
-        let created = Command::new("mkfifo")
-            .arg(source.join(name))
-            .status()
-            .expect("Failed to run mkfifo");
-        assert!(created.success(), "mkfifo should succeed");
-    }
+    create_test_media(&source, "good_video");
+    // Not a video: ffmpeg will refuse it, which is exactly what used to leak.
+    fs::write(source.join("bad_video.mp4"), b"not a video").unwrap();
+    fs::write(source.join("bad_video.m4a"), b"not audio").unwrap();
 
-    let mut child = Command::new(get_binary_path())
+    let result = Command::new(get_binary_path())
         .args([
             "-s",
             &source.display().to_string(),
             "-o",
             &output.display().to_string(),
-            "--once",
-            "video",
+            "-q",
             "--sdel",
             "false",
-            "-q",
         ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("Failed to spawn binary");
+        .output()
+        .expect("Failed to execute binary");
 
-    // Either the merge is already blocked on the fifo, or Ctrl+C arrives first
-    // and the pair is skipped — both must end in the same clean exit.
-    std::thread::sleep(Duration::from_millis(500));
-
-    let signalled = Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
-        .status()
-        .expect("Failed to run kill");
-    assert!(signalled.success(), "SIGINT should be delivered");
-
-    let status = wait_bounded(&mut child, Duration::from_secs(30));
-    assert!(
-        status.success(),
-        "Ctrl+C during --once is not a merge failure"
+    assert!(!result.status.success(), "the bad pair should fail the run");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
     );
-
+    for leak in ["moov atom", "Error opening", "Invalid data"] {
+        assert!(
+            !combined.contains(leak),
+            "-q leaked ffmpeg's own output ({leak}): {combined}"
+        );
+    }
     assert!(
-        source.join("video.mp4").exists(),
-        "the interrupted source must survive"
-    );
-    assert_eq!(
-        fs::read_dir(&output).unwrap().count(),
-        0,
-        "no output should be left behind"
+        !combined.contains("✓ good_video"),
+        "-q should not list pairs: {combined}"
     );
 }

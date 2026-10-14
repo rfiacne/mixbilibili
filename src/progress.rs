@@ -279,10 +279,15 @@ mod tests {
     }
 
     #[test]
-    fn test_format_record_uses_unicode_symbols() {
+    fn test_format_record_marks_success() {
+        // The symbol set follows locale detection (ASCII fallback on Windows
+        // without a UTF-8 LANG), so accept either spelling.
         let result = format_record("test", true, Duration::from_millis(500), None, None, true);
-        assert!(result.contains("✓"));
         assert!(result.contains("test"));
+        assert!(
+            result.contains("✓") || result.contains("[OK]"),
+            "record must carry a success marker: {result}"
+        );
     }
 }
 

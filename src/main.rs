@@ -1,31 +1,13 @@
-mod cli;
-mod error;
-mod ffmpeg;
-mod i18n;
-#[path = "merger/mod.rs"]
-mod merger;
-mod progress;
-mod scanner;
-mod state;
-mod ui;
-mod workflow;
+//! Process adapter: run the library, print what it says failed, exit.
 
-use crate::error::{get_exit_code, translate_error};
-use crate::i18n::t;
-use crate::ui::{Colors, Symbols};
-use std::sync::atomic::AtomicBool;
-
-/// Shared flag set by the Ctrl+C handler.
-pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+use mixbilibili::i18n::t;
+use mixbilibili::ui::{Colors, Symbols};
 
 fn main() {
-    if let Err(e) = workflow::run() {
-        let symbols = Symbols::new(ui::supports_unicode());
-        // Bind the text before colourising: `Colors` borrows it rather than
-        // allocating a copy, so the temporary must outlive the coloured view.
-        let prefix_text = format!("{} {}", symbols.failure, t("error_prefix"));
-        let error_prefix = Colors::failure(&prefix_text);
-        eprintln!("{} {}", error_prefix, translate_error(&e));
-        std::process::exit(get_exit_code(&e));
+    if let Err(failure) = mixbilibili::run() {
+        let symbols = Symbols::new(mixbilibili::ui::supports_unicode());
+        let prefix = Colors::failure(&format!("{} {}", symbols.failure, t("error_prefix")));
+        eprintln!("{} {}", prefix, failure);
+        std::process::exit(failure.exit_code);
     }
 }
