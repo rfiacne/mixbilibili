@@ -562,6 +562,12 @@ fn run_once(
         return print_dry_run(args, std::slice::from_ref(&pair));
     }
 
+    // --once is a batch of one, so it asks the same question a batch would.
+    if args.interactive && !confirm(args, std::slice::from_ref(&pair))? {
+        println!("{}", Colors::warning(&t("interactive_cancelled")));
+        return Ok(());
+    }
+
     prepare(args)?;
 
     let opts = pipeline::BatchOpts::from_args(args, interrupt);
@@ -572,6 +578,15 @@ fn run_once(
         &opts,
         runner,
     )?;
+
+    // --once reports like a batch, including the quiet summary the aria2 hook
+    // relies on (no per-pair lines, but still one final line).
+    summary.print_report(args.quiet);
+
+    if interrupt.is_triggered() {
+        println!("{}", t("interrupted_cleanup").yellow());
+        return Ok(());
+    }
 
     if let Some(err) = merge_error(&summary) {
         return Err(err);

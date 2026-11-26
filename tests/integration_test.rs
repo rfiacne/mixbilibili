@@ -310,6 +310,12 @@ fn test_once_merges_single_pair() {
         !output.join("two.mkv").exists(),
         "--once must not touch other pairs"
     );
+    // A batch of one still prints the batch report.
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        stdout.contains("✓") || stdout.contains("[OK]"),
+        "--once should print the report: {stdout}"
+    );
 }
 
 #[test]
@@ -569,7 +575,7 @@ fn test_resume_after_partial() {
 /// `scripts/aria2-hook.sh` shells out to exactly this command once both
 /// downloads have landed. The hook is bash and so is untested by this suite,
 /// so the contract it depends on is pinned here: merge in place, remove both
-/// sources, stay silent, and leave nothing to resume.
+/// sources, print only the final summary, and leave nothing to resume.
 #[test]
 fn test_once_quiet_contract_used_by_the_aria2_hook() {
     if !ffmpeg_available() {
@@ -597,10 +603,14 @@ fn test_once_quiet_contract_used_by_the_aria2_hook() {
         .expect("Failed to execute binary");
 
     assert!(output.status.success(), "hook call must succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        output.stdout.is_empty(),
-        "--quiet must stay silent for the hook: {}",
-        String::from_utf8_lossy(&output.stdout)
+        stdout.contains("1/1"),
+        "--quiet keeps the final summary: {stdout}"
+    );
+    assert!(
+        !stdout.contains("hook_video"),
+        "--quiet must not list the pair: {stdout}"
     );
     assert!(
         dir.path().join("hook_video.mkv").exists(),
@@ -777,4 +787,43 @@ fn test_interactive_decline_creates_no_output_dir() {
     );
     assert!(source.join("keep.mp4").exists());
     assert!(source.join("keep.m4a").exists());
+}
+
+#[test]
+fn test_once_interactive_decline_merges_nothing() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("declined-output");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("once_keep.mp4"), b"video").unwrap();
+    fs::write(source.join("once_keep.m4a"), b"audio").unwrap();
+
+    let answer = dir.path().join("answer.txt");
+    fs::write(&answer, "n\n").unwrap();
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--once",
+            "once_keep",
+            "--interactive",
+        ])
+        .stdin(std::process::Stdio::from(fs::File::open(&answer).unwrap()))
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(
+        result.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        !output.exists(),
+        "a declined --once --interactive must not create the output directory"
+    );
+    assert!(source.join("once_keep.mp4").exists());
+    assert!(source.join("once_keep.m4a").exists());
 }
