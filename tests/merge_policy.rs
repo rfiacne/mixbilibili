@@ -30,6 +30,10 @@ struct Scripted {
     scripts: Mutex<HashMap<String, Vec<RunOutcome>>>,
     calls: AtomicUsize,
     payload: &'static [u8],
+    /// What a *failed* run leaves in the output path, if anything. ffmpeg can
+    /// die after creating the output file (bad input mid-stream, killed on
+    /// timeout), and the batch has to clean that up.
+    partial: Option<&'static [u8]>,
 }
 
 impl Scripted {
@@ -42,6 +46,7 @@ impl Scripted {
             ),
             calls: AtomicUsize::new(0),
             payload: b"merged stream",
+            partial: None,
         }
     }
 
@@ -49,6 +54,12 @@ impl Scripted {
     /// claiming success.
     fn leaves_empty(mut self) -> Self {
         self.payload = b"";
+        self
+    }
+
+    /// Leaves a half-written output behind when a run fails.
+    fn leaves_partial(mut self) -> Self {
+        self.partial = Some(b"half a file");
         self
     }
 
@@ -94,6 +105,8 @@ impl MergeRunner for Scripted {
 
         if matches!(outcome, RunOutcome::Success) {
             fs::write(&output, self.payload).unwrap();
+        } else if let Some(partial) = self.partial {
+            fs::write(&output, partial).unwrap();
         }
 
         Ok(outcome)
@@ -281,8 +294,40 @@ fn a_failed_merge_leaves_no_partial_output_behind() {
     let dir = tempdir().unwrap();
     let interrupt = Interrupt::new();
     let pairs = vec![pair(dir.path(), "ep01")];
-    fs::write(dir.path().join("ep01.mkv"), b"half a file").unwrap();
 
+    // The runner dies after creating the output file, as ffmpeg does on a bad
+    // input mid-stream or when it is killed on timeout.
+    let summary = pipeline::process(
+        &pairs,
+        &ScanStats::default(),
+        &opts(dir.path(), &interrupt),
+        &Scripted::new(vec![(
+            "ep01",
+            vec![RunOutcome::Failed {
+                code: None,
+                message: String::new(),
+            }],
+        )])
+        .leaves_partial(),
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed_count(), 1);
+    assert!(
+        !dir.path().join("ep01.mkv").exists(),
+        "the partial file must not survive the batch"
+    );
+}
+
+#[test]
+fn a_failed_merge_preserves_an_output_it_never_touched() {
+    let dir = tempdir().unwrap();
+    let interrupt = Interrupt::new();
+    let pairs = vec![pair(dir.path(), "ep01")];
+    let existing = dir.path().join("ep01.mkv");
+    fs::write(&existing, b"a complete merge from an earlier run").unwrap();
+
+    // This run fails without ever writing the output path.
     let summary = pipeline::process(
         &pairs,
         &ScanStats::default(),
@@ -298,9 +343,41 @@ fn a_failed_merge_leaves_no_partial_output_behind() {
     .unwrap();
 
     assert_eq!(summary.failed_count(), 1);
+    assert_eq!(
+        fs::read(&existing).unwrap(),
+        b"a complete merge from an earlier run",
+        "a failed run must not delete an output it never wrote"
+    );
+}
+
+#[test]
+fn a_failed_merge_removes_an_output_it_overwrote() {
+    let dir = tempdir().unwrap();
+    let interrupt = Interrupt::new();
+    let pairs = vec![pair(dir.path(), "ep01")];
+    let existing = dir.path().join("ep01.mkv");
+    fs::write(&existing, b"previous").unwrap();
+
+    // Overwrites the slot with half a file, then fails.
+    let summary = pipeline::process(
+        &pairs,
+        &ScanStats::default(),
+        &opts(dir.path(), &interrupt),
+        &Scripted::new(vec![(
+            "ep01",
+            vec![RunOutcome::Failed {
+                code: None,
+                message: String::new(),
+            }],
+        )])
+        .leaves_partial(),
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed_count(), 1);
     assert!(
-        !dir.path().join("ep01.mkv").exists(),
-        "the partial file must not survive the batch"
+        !existing.exists(),
+        "a slot this run overwrote is a partial file and must go"
     );
 }
 

@@ -109,6 +109,48 @@ impl<'a> BatchOpts<'a> {
     }
 }
 
+/// What an output slot looked like before the batch ran.
+///
+/// Size and mtime are enough to tell "a file that was already there and the
+/// run never touched" from "a partial file this run left behind".
+#[derive(Debug)]
+struct OutputSnapshot {
+    existed: bool,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl OutputSnapshot {
+    fn of(pair: &FilePair, plan: &MergePlan) -> Self {
+        match std::fs::metadata(pair.output_path(plan.output_dir, plan.format)) {
+            Ok(meta) => Self {
+                existed: true,
+                len: meta.len(),
+                modified: meta.modified().ok(),
+            },
+            Err(_) => Self {
+                existed: false,
+                len: 0,
+                modified: None,
+            },
+        }
+    }
+
+    /// True when `path` differs from what was there before the batch started —
+    /// either a slot the run created, or one whose contents it replaced.
+    fn was_written(&self, path: &Path) -> bool {
+        match std::fs::metadata(path) {
+            Err(_) => false,
+            Ok(meta) => {
+                if !self.existed {
+                    return true;
+                }
+                meta.len() != self.len || meta.modified().ok() != self.modified
+            }
+        }
+    }
+}
+
 /// Merge every pair, then clean up, delete sources and report.
 ///
 /// This is the whole life cycle of a batch — the single place that decides
@@ -128,6 +170,14 @@ pub fn process(
         progress: opts.progress,
         interrupt: opts.interrupt,
     };
+
+    // Snapshot the output slots before anything runs. A merge that fails before
+    // ffmpeg touches the file leaves an earlier, valid output alone; only a slot
+    // this run created or overwrote is a partial file to remove.
+    let before: Vec<OutputSnapshot> = pairs
+        .iter()
+        .map(|pair| OutputSnapshot::of(pair, &plan))
+        .collect();
 
     let merge_one = |pair_index: usize, pair: &FilePair| {
         let result = merger::merge_pair(pair, pair_index, &plan, runner);
@@ -157,9 +207,16 @@ pub fn process(
     }
 
     // Anything that did not finish leaves a partial file behind; its sources
-    // are never deleted, so it can be resumed.
+    // are never deleted, so it can be resumed. A pre-existing output the failed
+    // run never touched is not a partial file: keep it.
     for result in &results {
         if result.success {
+            continue;
+        }
+        let untouched = before
+            .get(result.pair_index)
+            .is_some_and(|snapshot| !snapshot.was_written(&result.output_path));
+        if untouched {
             continue;
         }
         match merger::remove_partial(&result.output_path) {
