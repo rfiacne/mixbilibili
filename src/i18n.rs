@@ -287,6 +287,28 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     // 参数冲突
     ((Lang::Cn, "verbose_quiet_conflict"), "不能同时使用 --verbose 和 --quiet"),
     ((Lang::En, "verbose_quiet_conflict"), "Cannot use --verbose with --quiet"),
+    ((Lang::Cn, "interactive_dry_run_conflict"), "不能同时使用 --interactive 和 --dry-run"),
+    ((Lang::En, "interactive_dry_run_conflict"), "Cannot use --interactive with --dry-run"),
+    // 报告表格
+    ((Lang::Cn, "report_skipped_note"), "（aria2）"),
+    ((Lang::En, "report_skipped_note"), "(aria2)"),
+    ((Lang::Cn, "report_orphaned_note"), "（无匹配）"),
+    ((Lang::En, "report_orphaned_note"), "(orphan)"),
+    ((Lang::Cn, "report_warning_note"), "（警告）"),
+    ((Lang::En, "report_warning_note"), "(warn)"),
+    ((Lang::Cn, "throughput_fmt"), "{0} 对/秒"),
+    ((Lang::En, "throughput_fmt"), "{0} pairs/sec"),
+    // 运行期状态
+    ((Lang::Cn, "verbose_running"), "运行：ffmpeg -i {0} -i {1} -> {2}"),
+    ((Lang::En, "verbose_running"), "Running: ffmpeg -i {0} -i {1} -> {2}"),
+    ((Lang::Cn, "skipped_interrupted"), "已跳过（中断）"),
+    ((Lang::En, "skipped_interrupted"), "Skipped (interrupted)"),
+    ((Lang::Cn, "unknown_exit_code"), "未知"),
+    ((Lang::En, "unknown_exit_code"), "unknown"),
+    ((Lang::Cn, "failed_remove_empty_output"), "无法删除空输出文件：{0}"),
+    ((Lang::En, "failed_remove_empty_output"), "Failed to remove empty output file: {0}"),
+    ((Lang::Cn, "failed_remove_undersized_output"), "无法删除过小的输出文件：{0}"),
+    ((Lang::En, "failed_remove_undersized_output"), "Failed to remove undersized output file: {0}"),
 ];
 
 static TRANSLATION_MAP: OnceLock<HashMap<TranslationKey, &'static str>> = OnceLock::new();
@@ -492,5 +514,41 @@ mod tests {
             "ffmpeg installed successfully!"
         );
         assert_eq!(t_for(Lang::En, "ffmpeg_not_found_path").as_ref(), "Installation completed but ffmpeg not found in PATH. You may need to restart your terminal.");
+    }
+
+    /// These were hardcoded English in the source until every user-visible
+    /// string went through the table.
+    #[test]
+    fn test_report_and_runtime_keys_exist_in_both_languages() {
+        for lang in [Lang::Cn, Lang::En] {
+            for key in [
+                "interactive_dry_run_conflict",
+                "report_skipped_note",
+                "report_orphaned_note",
+                "report_warning_note",
+                "throughput_fmt",
+                "verbose_running",
+                "skipped_interrupted",
+                "unknown_exit_code",
+                "failed_remove_empty_output",
+                "failed_remove_undersized_output",
+            ] {
+                assert!(
+                    translation_map().contains_key(&(lang, key)),
+                    "missing {key} for {lang:?}"
+                );
+            }
+        }
+
+        assert_eq!(
+            t_for(Lang::Cn, "interactive_dry_run_conflict").as_ref(),
+            "不能同时使用 --interactive 和 --dry-run"
+        );
+        assert_eq!(t_for(Lang::En, "throughput_fmt").as_ref(), "{0} pairs/sec");
+        assert_eq!(t_for(Lang::Cn, "throughput_fmt").as_ref(), "{0} 对/秒");
+        assert_eq!(
+            t_for(Lang::En, "verbose_running").as_ref(),
+            "Running: ffmpeg -i {0} -i {1} -> {2}"
+        );
     }
 }

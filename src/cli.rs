@@ -190,7 +190,7 @@ impl Args {
         self.jobs = self.jobs.clamp(1, 32);
 
         if self.interactive && self.dry_run {
-            bail!("Cannot use --interactive with --dry-run");
+            bail!("{}", t("interactive_dry_run_conflict"));
         }
 
         if self.verbose && self.quiet {

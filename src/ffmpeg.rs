@@ -308,7 +308,7 @@ fn run_install(pms: &[(&str, &str)]) -> bool {
                     &[&status
                         .code()
                         .map(|c| c.to_string())
-                        .unwrap_or_else(|| "unknown".to_string())]
+                        .unwrap_or_else(|| t("unknown_exit_code").into_owned())]
                 )
             );
         }
