@@ -2,6 +2,7 @@
 name = "mixbilibili"
 version = "0.9.1"
 edition = "2021"
+rust-version = "1.87"
 description = "A CLI tool for batch merging Bilibili video and audio files"
 license = "MIT"
 
