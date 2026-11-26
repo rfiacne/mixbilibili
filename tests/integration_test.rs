@@ -3,11 +3,10 @@ use std::process::Command;
 use tempfile::tempdir;
 
 fn get_binary_path() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop();
-    path.pop();
-    path.push("mixbilibili");
-    path
+    // Cargo sets this to the built binary for integration tests. Deriving it from
+    // `current_exe()` assumes the flat `target/debug/deps` layout and breaks on
+    // toolchains that use a different build directory layout.
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_mixbilibili"))
 }
 
 fn ffmpeg_available() -> bool {

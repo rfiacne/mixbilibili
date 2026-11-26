@@ -726,20 +726,18 @@ mod state_logic_tests {
     #[test]
     fn test_load_old_format_gets_default_version() {
         let dir = tempdir().unwrap();
-        // Escape backslashes so Windows temp paths embed validly in the JSON string.
-        let dir_str = dir.path().to_string_lossy().replace('\\', "\\\\");
-        // Old format JSON without "version" field
-        let json = format!(
-            r#"{{
-  "source_dir": "{dir_str}",
-  "output_dir": "{dir_str}",
-  "completed": [],
-  "failed": [],
-  "pending": []
-}}"#
-        );
+        // Old format JSON without "version" field. Built through serde_json so
+        // Windows paths are escaped exactly as the production writer escapes them.
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let json = serde_json::json!({
+            "source_dir": dir_str.clone(),
+            "output_dir": dir_str,
+            "completed": [],
+            "failed": [],
+            "pending": []
+        });
         let path = MergeState::state_file_path(dir.path());
-        fs::write(&path, json).unwrap();
+        fs::write(&path, json.to_string()).unwrap();
 
         let loaded = MergeState::load(dir.path()).unwrap().unwrap();
         // Old format defaults to v1, then migrates forward to the current version.
@@ -756,20 +754,19 @@ mod state_logic_tests {
     #[test]
     fn test_load_v1_migrates_to_v2() {
         let dir = tempdir().unwrap();
+        // Explicit version 1 state file. Built through serde_json so Windows
+        // paths (with backslashes) produce valid JSON on every platform.
         let dir_str = dir.path().to_string_lossy().to_string();
-        // Explicit version 1 state file
-        let json = format!(
-            r#"{{
-  "version": 1,
-  "source_dir": "{dir_str}",
-  "output_dir": "{dir_str}",
-  "completed": ["video1"],
-  "failed": [],
-  "pending": []
-}}"#
-        );
+        let json = serde_json::json!({
+            "version": 1,
+            "source_dir": dir_str.clone(),
+            "output_dir": dir_str,
+            "completed": ["video1"],
+            "failed": [],
+            "pending": []
+        });
         let path = MergeState::state_file_path(dir.path());
-        fs::write(&path, json).unwrap();
+        fs::write(&path, json.to_string()).unwrap();
 
         let loaded = MergeState::load(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.version, CURRENT_SCHEMA_VERSION);
