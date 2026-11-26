@@ -98,11 +98,18 @@ impl From<anyhow::Error> for Failure {
     }
 }
 
-/// Initialize the application: parse args, verify ffmpeg, ensure directories.
+/// Parse and validate the arguments.
 fn init() -> Result<Args> {
     let mut args = cli::Args::parse();
     args.validate()?;
+    Ok(args)
+}
 
+/// Prepare what a real merge needs: ffmpeg, and the output directory.
+///
+/// Dry runs and declined interactive runs never reach this: a preview must not
+/// create the output directory or require ffmpeg.
+fn prepare(args: &Args) -> Result<()> {
     if !ffmpeg::ensure_ffmpeg()? {
         return Err(AppError::FfmpegNotFound.into());
     }
@@ -111,7 +118,7 @@ fn init() -> Result<Args> {
         std::fs::create_dir_all(&args.output).context(t("failed_create_output").into_owned())?;
     }
 
-    Ok(args)
+    Ok(())
 }
 
 /// Rough wall-clock estimate, or None when the batch is too small for the
@@ -415,6 +422,8 @@ fn run_batch(args: &Args, interrupt: &Interrupt, runner: &dyn ffmpeg::MergeRunne
         return print_dry_run(args, &pairs);
     }
 
+    prepare(args)?;
+
     // Size the shared pool to --jobs; only the batch path needs it.
     if let Err(e) = rayon::ThreadPoolBuilder::new()
         .num_threads(args.jobs)
@@ -552,6 +561,8 @@ fn run_once(
     if args.dry_run {
         return print_dry_run(args, std::slice::from_ref(&pair));
     }
+
+    prepare(args)?;
 
     let opts = pipeline::BatchOpts::from_args(args, interrupt);
 

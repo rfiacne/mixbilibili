@@ -667,3 +667,114 @@ fn test_quiet_mode_leaks_no_ffmpeg_diagnostics() {
         "-q should not list pairs: {combined}"
     );
 }
+
+#[test]
+fn test_dry_run_does_not_create_missing_output_dir_or_require_ffmpeg() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("missing-output");
+    fs::create_dir(&source).unwrap();
+    // Scanner only cares about the suffixes; a preview never opens the media.
+    fs::write(source.join("preview.mp4"), b"video").unwrap();
+    fs::write(source.join("preview.m4a"), b"audio").unwrap();
+
+    // An empty PATH makes `which::which("ffmpeg")` fail: a preview must not care.
+    let empty_path = dir.path().join("empty-path");
+    fs::create_dir(&empty_path).unwrap();
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--dry-run",
+        ])
+        .env("PATH", &empty_path)
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(
+        result.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        !output.exists(),
+        "--dry-run must not create the output directory"
+    );
+}
+
+#[test]
+fn test_merge_creates_missing_output_dir() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("new-output");
+    fs::create_dir(&source).unwrap();
+    create_test_media(&source, "mkdir_video");
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--sdel",
+            "false",
+        ])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(
+        result.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        output.is_dir(),
+        "a real merge must create the output directory"
+    );
+    assert!(output.join("mkdir_video.mkv").exists());
+}
+
+#[test]
+fn test_interactive_decline_creates_no_output_dir() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("declined-output");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("keep.mp4"), b"video").unwrap();
+    fs::write(source.join("keep.m4a"), b"audio").unwrap();
+
+    // Answer "n" from a file: no ffmpeg is needed because the run stops before
+    // the merge phase.
+    let answer = dir.path().join("answer.txt");
+    fs::write(&answer, "n\n").unwrap();
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--interactive",
+        ])
+        .stdin(std::process::Stdio::from(fs::File::open(&answer).unwrap()))
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(
+        result.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        !output.exists(),
+        "a declined interactive run must not create the output directory"
+    );
+    assert!(source.join("keep.mp4").exists());
+    assert!(source.join("keep.m4a").exists());
+}
