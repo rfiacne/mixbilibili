@@ -7,10 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-27
+
 Reconciled two diverged development lines (local v0.8.1 and upstream v0.9.1)
 on the upstream architecture. Upstream's `MergeRunner` seam, library interface
 and pipeline are the base; the local line's independent improvements were
-carried over on top of it.
+carried over on top of it. A review pass over that result follows; its fixes
+are listed under Changed and Fixed below.
 
 ### Changed
 - Child-process waiting now polls with exponential backoff (1 ms → 50 ms)
@@ -25,6 +28,9 @@ carried over on top of it.
   runs the closure only on failure), derives the relative-parent key once per
   *directory* instead of once per file, and takes a single `file_type()` per
   entry instead of a second `stat()` via `Path::is_dir()`
+- The declared minimum Rust version is 1.88, matching what the dependency graph
+  actually requires (`which` → `home 0.5.12`), and a CI job now builds on that
+  version with `--locked` so the claim is verified rather than asserted
 
 ### Fixed
 - An explicitly set, non-UTF-8 locale (`LANG=C`, `LC_ALL=POSIX`) now selects
@@ -37,6 +43,28 @@ carried over on top of it.
   the mid separator was drawn with the *top* corners (a second `┌───┐` line),
   and the width was pinned at 40 columns so wider rows overflowed. Its failure
   connectors also hardcoded Unicode box characters even under `--ascii`
+- `--dry-run` no longer creates the output directory and no longer requires
+  ffmpeg to be installed; a declined `--interactive` prompt no longer leaves an
+  output directory behind either
+- `--once` behaves as the batch of one it is documented to be: it prints the
+  report (with `-q`, one summary line and nothing else), honours
+  `--interactive`, and reports an interrupt. It still writes no resume state,
+  so it does not print the `--resume` hint
+- A failed merge no longer deletes an output file it never touched. An earlier
+  run's finished merge at that path used to be removed when the new run failed
+  before ffmpeg opened it
+- A run that cannot merge no longer rewrites `.mixbilibili_state.json`. With
+  ffmpeg missing, the state was saved (and, without `--resume`, rebuilt) before
+  the failure was detected, discarding earlier progress
+- Cancelling an `--interactive` run no longer deletes a resume state it did not
+  create
+- The ffmpeg install prompt is skipped when stdin is not a terminal, so a
+  download hook or CI run no longer blocks on it or consumes the stdin its
+  parent handed it. The exit code for a missing ffmpeg is still 2
+- Two translation keys that were called but no longer present in the table
+  (`starting_merges`, `invalid_stem`) are restored; in debug builds they
+  panicked, in release builds the key name reached the user. Every remaining
+  hardcoded user-visible string now goes through the translation table
 
 ### Performance
 - Preview, deletion-preview and report rendering are buffered. `println!` per
