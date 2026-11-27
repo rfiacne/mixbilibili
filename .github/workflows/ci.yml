@@ -62,6 +62,20 @@ jobs:
       - name: Run tests
         run: cargo test
 
+  msrv:
+    # The declared `rust-version` has to be proven, not asserted: without this
+    # job a dependency can quietly raise the floor, as `home 0.5.12` did to 1.88.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+
+      - name: Build on the declared minimum
+        run: cargo build --locked --all-targets
+
   build:
     needs: test
     strategy:

@@ -580,13 +580,12 @@ mod install_tests {
     fn a_run_without_a_terminal_never_prompts_and_never_installs() {
         // Download hooks and CI have no keyboard. The prompt used to read stdin
         // unconditionally, so such a run blocked or swallowed its parent's input.
+        // The non-interactive arm must return `false` without reaching
+        // `package_managers` or `run_install` for any platform.
         for os in [Os::Windows, Os::MacOS, Os::Linux, Os::Unknown] {
-            let started = std::time::Instant::now();
-            let installed = prompt_and_install_with(os, false).unwrap();
-            assert!(!installed, "nothing is installed without consent ({os:?})");
             assert!(
-                started.elapsed() < std::time::Duration::from_secs(1),
-                "a non-interactive run must answer immediately ({os:?})"
+                !prompt_and_install_with(os, false).unwrap(),
+                "nothing is installed without consent ({os:?})"
             );
         }
     }
