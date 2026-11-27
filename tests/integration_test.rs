@@ -521,20 +521,16 @@ fn test_resume_after_partial() {
     fs::remove_file(output.join("video2.mkv")).unwrap();
 
     // Create a state file marking video1 as completed (bare stem in non-recursive).
-    // Escape backslashes so Windows temp paths embed validly in the JSON string.
-    let esc = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
-    let state_content = format!(
-        r#"{{
-  "version": 1,
-  "source_dir": "{}",
-  "output_dir": "{}",
-  "completed": ["video1"],
-  "failed": [],
-  "pending": []
-}}"#,
-        esc(&source),
-        esc(&output)
-    );
+    // Built through serde_json so Windows paths embed as valid JSON.
+    let state_content = serde_json::json!({
+        "version": 1,
+        "source_dir": source.to_string_lossy(),
+        "output_dir": output.to_string_lossy(),
+        "completed": ["video1"],
+        "failed": [],
+        "pending": []
+    })
+    .to_string();
     fs::write(source.join(".mixbilibili_state.json"), state_content).unwrap();
 
     // Second run with --resume: should only merge video2
@@ -826,4 +822,117 @@ fn test_once_interactive_decline_merges_nothing() {
     );
     assert!(source.join("once_keep.mp4").exists());
     assert!(source.join("once_keep.m4a").exists());
+}
+
+/// A run that cannot merge must not touch the resume state on its way to
+/// failing. Now that the ffmpeg check runs before the scan, an absent ffmpeg
+/// leaves the state file exactly as it was.
+#[test]
+fn test_missing_ffmpeg_preserves_the_resume_state() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("output");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&output).unwrap();
+    fs::write(source.join("a.mp4"), b"video").unwrap();
+    fs::write(source.join("a.m4a"), b"audio").unwrap();
+    fs::write(source.join("b.mp4"), b"video").unwrap();
+    fs::write(source.join("b.m4a"), b"audio").unwrap();
+
+    // A state file from an earlier interrupted run, which `--resume` would read.
+    let state_path = source.join(".mixbilibili_state.json");
+    let before = serde_json::json!({
+        "version": 2,
+        "source_dir": source.to_string_lossy(),
+        "output_dir": output.to_string_lossy(),
+        "completed": ["a"],
+        "failed": [],
+        "pending": ["b"]
+    })
+    .to_string();
+    fs::write(&state_path, &before).unwrap();
+
+    let empty_path = dir.path().join("empty-path");
+    fs::create_dir(&empty_path).unwrap();
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--sdel",
+            "false",
+        ])
+        .env("PATH", &empty_path)
+        .output()
+        .expect("Failed to execute binary");
+
+    assert_eq!(
+        result.status.code(),
+        Some(2),
+        "a missing ffmpeg is exit code 2: {} {}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&state_path).unwrap(),
+        before,
+        "a run that cannot merge must not rewrite the resume state"
+    );
+    assert!(source.join("a.mp4").exists(), "nothing may be deleted");
+}
+
+/// Cancelling with `--interactive` must not destroy a resume point an earlier
+/// run wrote: the state file is not this run's to delete.
+#[test]
+fn test_interactive_decline_keeps_an_existing_state_file() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let output = dir.path().join("output");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&output).unwrap();
+    fs::write(source.join("a.mp4"), b"video").unwrap();
+    fs::write(source.join("a.m4a"), b"audio").unwrap();
+
+    let state_path = source.join(".mixbilibili_state.json");
+    let before = serde_json::json!({
+        "version": 2,
+        "source_dir": source.to_string_lossy(),
+        "output_dir": output.to_string_lossy(),
+        "completed": ["earlier"],
+        "failed": [],
+        "pending": ["a"]
+    })
+    .to_string();
+    fs::write(&state_path, &before).unwrap();
+
+    let answer = dir.path().join("answer.txt");
+    fs::write(&answer, "n\n").unwrap();
+
+    let result = Command::new(get_binary_path())
+        .args([
+            "-s",
+            &source.display().to_string(),
+            "-o",
+            &output.display().to_string(),
+            "--interactive",
+            "--sdel",
+            "false",
+        ])
+        .stdin(std::process::Stdio::from(fs::File::open(&answer).unwrap()))
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(
+        result.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&state_path).unwrap(),
+        before,
+        "a cancelled run must not delete a resume point it did not create"
+    );
+    assert!(source.join("a.mp4").exists());
 }
