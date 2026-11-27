@@ -175,7 +175,7 @@ impl MergeSummary {
             let mut row = ReportLine::default();
             row.text(&tf("skipped_fmt", &[&self.skipped_count.to_string()]))
                 .text(" ")
-                .styled(Style::Secondary, "(aria2)");
+                .styled(Style::Secondary, &t("report_skipped_note"));
             rows.push(row);
         }
 
@@ -183,7 +183,7 @@ impl MergeSummary {
             let mut row = ReportLine::default();
             row.text(&tf("orphaned_fmt", &[&self.orphaned_count.to_string()]))
                 .text(" ")
-                .styled(Style::Secondary, "(orphan)");
+                .styled(Style::Secondary, &t("report_orphaned_note"));
             rows.push(row);
         }
 
@@ -208,7 +208,8 @@ impl MergeSummary {
                 let label = t("throughput").into_owned();
                 let mut row = ReportLine::default();
                 row.styled(Style::Secondary, &label)
-                    .text(&format!(": {tp:.2} pairs/sec"));
+                    .text(": ")
+                    .text(&tf("throughput_fmt", &[&format!("{tp:.2}")]));
                 rows.push(row);
             }
         }
@@ -220,7 +221,7 @@ impl MergeSummary {
                 &[&self.deletion_failures.to_string()],
             ))
             .text(" ")
-            .styled(Style::Warning, "(warn)");
+            .styled(Style::Warning, &t("report_warning_note"));
             rows.push(row);
         }
 
@@ -351,7 +352,7 @@ pub fn merge_pair(
             pair_name: pair.stem.clone(),
             output_path,
             success: false,
-            error: Some("Skipped (interrupted)".to_string()),
+            error: Some(t("skipped_interrupted").into_owned()),
             duration: Duration::ZERO,
             was_interrupted: true,
         };
@@ -451,7 +452,7 @@ fn validate_output(output_path: &Path, min_expected: u64) -> Result<()> {
     };
     if metadata.len() == 0 {
         if let Err(e) = std::fs::remove_file(output_path) {
-            eprintln!("Warning: Failed to remove empty output file: {}", e);
+            eprintln!("{}", tf("failed_remove_empty_output", &[&e.to_string()]));
         }
         anyhow::bail!(
             "{}",
@@ -460,7 +461,10 @@ fn validate_output(output_path: &Path, min_expected: u64) -> Result<()> {
     }
     if metadata.len() < min_expected {
         if let Err(e) = std::fs::remove_file(output_path) {
-            eprintln!("Warning: Failed to remove undersized output file: {}", e);
+            eprintln!(
+                "{}",
+                tf("failed_remove_undersized_output", &[&e.to_string()])
+            );
         }
         anyhow::bail!(
             "{}",
@@ -505,10 +509,15 @@ fn do_merge(
             announce_retry(pair, attempt, plan);
         } else if plan.verbose {
             println!(
-                "Running: ffmpeg -i {} -i {} -> {}",
-                pair.video.display(),
-                pair.audio.display(),
-                output_path.display()
+                "{}",
+                tf(
+                    "verbose_running",
+                    &[
+                        &pair.video.display().to_string(),
+                        &pair.audio.display().to_string(),
+                        &output_path.display().to_string(),
+                    ]
+                )
             );
         }
 
@@ -615,7 +624,7 @@ fn failure_message(code: Option<i32>, stderr: &str, retries: usize) -> String {
 /// Render an exit code for a message, when there is one.
 fn exit_code_text(code: Option<i32>) -> String {
     code.map(|c| c.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .unwrap_or_else(|| t("unknown_exit_code").into_owned())
 }
 
 /// Remove a merge output that never completed, reporting whether anything was

@@ -1,4 +1,4 @@
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
@@ -115,9 +115,14 @@ impl MergeState {
         // Reject files written by a newer mixbilibili (forward compatibility).
         if state.version > CURRENT_SCHEMA_VERSION {
             anyhow::bail!(
-                "State file schema version {} is not supported (max: {}). Please upgrade mixbilibili.",
-                state.version,
-                CURRENT_SCHEMA_VERSION
+                "{}",
+                tf(
+                    "state_version_unsupported",
+                    &[
+                        &state.version.to_string(),
+                        &CURRENT_SCHEMA_VERSION.to_string(),
+                    ]
+                )
             );
         }
 
@@ -128,9 +133,8 @@ impl MergeState {
         let expected = source.to_string_lossy().to_string();
         if state.source_dir != expected {
             anyhow::bail!(
-                "Resume state source_dir mismatch: state has '{}', loaded from '{}'",
-                state.source_dir,
-                expected
+                "{}",
+                tf("state_source_mismatch", &[&state.source_dir, &expected])
             );
         }
         Ok(Some(state))
@@ -433,9 +437,12 @@ mod tests {
             "Loading state with mismatched source_dir should error"
         );
         let err_msg = result.unwrap_err().to_string();
+        // The wording is translated, so assert on the fact it names both paths.
+        let recorded = dir_a.path().to_string_lossy().to_string();
+        let loaded_from = dir_b.path().to_string_lossy().to_string();
         assert!(
-            err_msg.contains("source") || err_msg.contains("dir") || err_msg.contains("mismatch"),
-            "Error should mention source directory mismatch, got: {err_msg}"
+            err_msg.contains(&recorded) && err_msg.contains(&loaded_from),
+            "Error should name the recorded and the loading directory, got: {err_msg}"
         );
     }
 
@@ -726,20 +733,18 @@ mod state_logic_tests {
     #[test]
     fn test_load_old_format_gets_default_version() {
         let dir = tempdir().unwrap();
-        // Escape backslashes so Windows temp paths embed validly in the JSON string.
-        let dir_str = dir.path().to_string_lossy().replace('\\', "\\\\");
-        // Old format JSON without "version" field
-        let json = format!(
-            r#"{{
-  "source_dir": "{dir_str}",
-  "output_dir": "{dir_str}",
-  "completed": [],
-  "failed": [],
-  "pending": []
-}}"#
-        );
+        // Old format JSON without "version" field. Built through serde_json so
+        // Windows paths are escaped exactly as the production writer escapes them.
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let json = serde_json::json!({
+            "source_dir": dir_str.clone(),
+            "output_dir": dir_str,
+            "completed": [],
+            "failed": [],
+            "pending": []
+        });
         let path = MergeState::state_file_path(dir.path());
-        fs::write(&path, json).unwrap();
+        fs::write(&path, json.to_string()).unwrap();
 
         let loaded = MergeState::load(dir.path()).unwrap().unwrap();
         // Old format defaults to v1, then migrates forward to the current version.
@@ -756,20 +761,19 @@ mod state_logic_tests {
     #[test]
     fn test_load_v1_migrates_to_v2() {
         let dir = tempdir().unwrap();
+        // Explicit version 1 state file. Built through serde_json so Windows
+        // paths (with backslashes) produce valid JSON on every platform.
         let dir_str = dir.path().to_string_lossy().to_string();
-        // Explicit version 1 state file
-        let json = format!(
-            r#"{{
-  "version": 1,
-  "source_dir": "{dir_str}",
-  "output_dir": "{dir_str}",
-  "completed": ["video1"],
-  "failed": [],
-  "pending": []
-}}"#
-        );
+        let json = serde_json::json!({
+            "version": 1,
+            "source_dir": dir_str.clone(),
+            "output_dir": dir_str,
+            "completed": ["video1"],
+            "failed": [],
+            "pending": []
+        });
         let path = MergeState::state_file_path(dir.path());
-        fs::write(&path, json).unwrap();
+        fs::write(&path, json.to_string()).unwrap();
 
         let loaded = MergeState::load(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.version, CURRENT_SCHEMA_VERSION);
@@ -948,24 +952,27 @@ mod state_logic_tests {
     #[test]
     fn test_reject_future_version() {
         let dir = tempdir().unwrap();
-        // Escape backslashes so Windows temp paths embed validly in the JSON string.
-        let dir_str = dir.path().to_string_lossy().replace('\\', "\\\\");
-        // Future format with version > 1
-        let json = format!(
-            r#"{{
-  "version": 99,
-  "source_dir": "{dir_str}",
-  "output_dir": "{dir_str}",
-  "completed": [],
-  "failed": [],
-  "pending": []
-}}"#
-        );
+        // Built through serde_json so Windows paths stay valid JSON.
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let json = serde_json::json!({
+            "version": 99,
+            "source_dir": dir_str.clone(),
+            "output_dir": dir_str,
+            "completed": [],
+            "failed": [],
+            "pending": []
+        });
         let path = MergeState::state_file_path(dir.path());
-        fs::write(&path, json).unwrap();
+        fs::write(&path, json.to_string()).unwrap();
 
         let result = MergeState::load(dir.path());
-        assert!(result.is_err(), "should reject future schema version");
-        assert!(result.unwrap_err().to_string().contains("not supported"));
+        let message = result
+            .expect_err("should reject future schema version")
+            .to_string();
+        // The message is translated, so name the version rather than the wording.
+        assert!(
+            message.contains("99"),
+            "the rejected version should be named: {message}"
+        );
     }
 }

@@ -1,7 +1,7 @@
 use crate::cli::OutputFormat;
 use crate::i18n::{t, tf};
 use crate::interrupt::Interrupt;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -240,6 +240,22 @@ pub fn get_manual_instructions(os: Os) -> std::borrow::Cow<'static, str> {
 }
 
 pub fn prompt_and_install(os: Os) -> anyhow::Result<bool> {
+    prompt_and_install_with(os, io::stdin().is_terminal())
+}
+
+/// The prompt, with the terminal question answered by the caller.
+///
+/// Split out so the non-interactive arm — the one download hooks and CI hit —
+/// is testable without a pseudo-terminal.
+fn prompt_and_install_with(os: Os, interactive: bool) -> anyhow::Result<bool> {
+    // Nobody is at the keyboard: a download hook or CI run must not block on a
+    // prompt (nor consume the stdin its parent handed it). Print the manual
+    // instructions instead.
+    if !interactive {
+        println!("{}", get_manual_instructions(os));
+        return Ok(false);
+    }
+
     let pms = package_managers(os);
     if pms.is_empty() {
         println!("{}", get_manual_instructions(os));
@@ -292,7 +308,7 @@ fn run_install(pms: &[(&str, &str)]) -> bool {
                     &[&status
                         .code()
                         .map(|c| c.to_string())
-                        .unwrap_or_else(|| "unknown".to_string())]
+                        .unwrap_or_else(|| t("unknown_exit_code").into_owned())]
                 )
             );
         }
@@ -557,6 +573,20 @@ mod install_tests {
         // We can't easily test the prompt flow without mocking stdin
         if is_ffmpeg_available() {
             assert!(ensure_ffmpeg().unwrap());
+        }
+    }
+
+    #[test]
+    fn a_run_without_a_terminal_never_prompts_and_never_installs() {
+        // Download hooks and CI have no keyboard. The prompt used to read stdin
+        // unconditionally, so such a run blocked or swallowed its parent's input.
+        // The non-interactive arm must return `false` without reaching
+        // `package_managers` or `run_install` for any platform.
+        for os in [Os::Windows, Os::MacOS, Os::Linux, Os::Unknown] {
+            assert!(
+                !prompt_and_install_with(os, false).unwrap(),
+                "nothing is installed without consent ({os:?})"
+            );
         }
     }
 }

@@ -5,7 +5,7 @@ A cross-platform CLI tool for batch merging Bilibili downloaded video (`.mp4`) a
 ## Installation
 
 ### Prerequisites
-- Rust 1.70+
+- Rust 1.88+ (the `rust-version` in `Cargo.toml` is authoritative)
 - ffmpeg (will prompt to install if not found)
 
 ### Build from source

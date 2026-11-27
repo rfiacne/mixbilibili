@@ -98,11 +98,29 @@ impl From<anyhow::Error> for Failure {
     }
 }
 
-/// Initialize the application: parse args, verify ffmpeg, ensure directories.
+/// Parse and validate the arguments.
 fn init() -> Result<Args> {
     let mut args = cli::Args::parse();
     args.validate()?;
+    Ok(args)
+}
 
+/// Check that ffmpeg is there, without offering to install it.
+///
+/// This runs before anything touches the filesystem: a run that cannot merge
+/// must not write or overwrite the resume state on its way to failing.
+fn require_ffmpeg() -> Result<()> {
+    if ffmpeg::is_ffmpeg_available() {
+        return Ok(());
+    }
+    Err(AppError::FfmpegNotFound.into())
+}
+
+/// Prepare what a real merge needs: ffmpeg, and the output directory.
+///
+/// Dry runs and declined interactive runs never reach this: a preview must not
+/// create the output directory or require ffmpeg.
+fn prepare(args: &Args) -> Result<()> {
     if !ffmpeg::ensure_ffmpeg()? {
         return Err(AppError::FfmpegNotFound.into());
     }
@@ -111,7 +129,7 @@ fn init() -> Result<Args> {
         std::fs::create_dir_all(&args.output).context(t("failed_create_output").into_owned())?;
     }
 
-    Ok(args)
+    Ok(())
 }
 
 /// Rough wall-clock estimate, or None when the batch is too small for the
@@ -135,14 +153,17 @@ fn estimate_line(pairs: &[scanner::FilePair]) -> Option<String> {
 }
 
 /// Scan source directory and filter pairs based on resume state.
-/// Returns the scan context and initialized merge state.
+/// Returns the pairs, the stats, and the state the caller should persist once
+/// it knows the run will actually start.
+#[allow(clippy::type_complexity)]
 fn scan_and_filter(
     args: &Args,
 ) -> Result<
     Option<(
         Vec<scanner::FilePair>,
         scanner::ScanStats,
-        pipeline::StateSink,
+        state::MergeState,
+        std::path::PathBuf,
     )>,
 > {
     // Check for resume state
@@ -187,15 +208,13 @@ fn scan_and_filter(
         merge_state.add_pending(&pair.stem);
     }
 
-    // Save state before starting (in case of interruption)
-    if !args.dry_run {
-        merge_state.save(&args.source)?;
-    }
-
+    // The state is saved by the caller, once it knows the run will actually
+    // start: a preview or a declined prompt must not write it at all.
     Ok(Some((
         pairs_to_process,
         scan_result.stats,
-        pipeline::StateSink::new(merge_state, args.source.clone()),
+        merge_state,
+        args.source.clone(),
     )))
 }
 
@@ -402,18 +421,31 @@ fn run_inner() -> Result<()> {
 }
 
 fn run_batch(args: &Args, interrupt: &Interrupt, runner: &dyn ffmpeg::MergeRunner) -> Result<()> {
-    let Some((pairs, stats, sink)) = scan_and_filter(args)? else {
+    // Before the scan: `scan_and_filter` writes the resume state, and a run that
+    // cannot merge must not overwrite what `--resume` will read.
+    if !args.dry_run {
+        require_ffmpeg()?;
+    }
+
+    let Some((pairs, stats, merge_state, source)) = scan_and_filter(args)? else {
         return Ok(());
     };
     if args.interactive && !confirm(args, &pairs)? {
         println!("{}", Colors::warning(&t("interactive_cancelled")));
-        state::MergeState::clear(&args.source)?;
+        // Nothing was written yet, so there is nothing of this run's to undo —
+        // and an earlier run's resume point must survive a cancel.
         return Ok(());
     }
 
     if args.dry_run {
         return print_dry_run(args, &pairs);
     }
+
+    // Save the resume point only now: the run is really starting.
+    merge_state.save(&source)?;
+    let sink = pipeline::StateSink::new(merge_state, source.clone());
+
+    prepare(args)?;
 
     // Size the shared pool to --jobs; only the batch path needs it.
     if let Err(e) = rayon::ThreadPoolBuilder::new()
@@ -510,9 +542,14 @@ fn print_dry_run(args: &Args, pairs: &[scanner::FilePair]) -> Result<()> {
             for row in &rows {
                 let _ = writeln!(
                     out,
-                    "  {} (video)\n  {} (audio)",
-                    row.video.display(),
-                    row.audio.display()
+                    "{}",
+                    tf(
+                        "dry_run_delete_pair",
+                        &[
+                            &row.video.display().to_string(),
+                            &row.audio.display().to_string(),
+                        ]
+                    )
                 );
             }
         }
@@ -553,6 +590,16 @@ fn run_once(
         return print_dry_run(args, std::slice::from_ref(&pair));
     }
 
+    require_ffmpeg()?;
+
+    // --once is a batch of one, so it asks the same question a batch would.
+    if args.interactive && !confirm(args, std::slice::from_ref(&pair))? {
+        println!("{}", Colors::warning(&t("interactive_cancelled")));
+        return Ok(());
+    }
+
+    prepare(args)?;
+
     let opts = pipeline::BatchOpts::from_args(args, interrupt);
 
     let summary = pipeline::process(
@@ -561,6 +608,15 @@ fn run_once(
         &opts,
         runner,
     )?;
+
+    // --once reports like a batch, including the quiet summary the aria2 hook
+    // relies on (no per-pair lines, but still one final line).
+    summary.print_report(args.quiet);
+
+    if interrupt.is_triggered() {
+        println!("{}", t("interrupted_cleanup").yellow());
+        return Ok(());
+    }
 
     if let Some(err) = merge_error(&summary) {
         return Err(err);

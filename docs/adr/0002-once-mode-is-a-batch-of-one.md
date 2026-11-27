@@ -23,8 +23,11 @@ values, not separate code.
 
 - New batch behaviour applies to `--once` and vice versa. A feature that only
   makes sense for one mode belongs in `BatchOpts`, not in a new entry point.
-- Two deliberate differences remain, both at the interface: `--once` writes no
-  resume state, and it does not start a rayon pool (`process` runs a batch of
-  one inline).
-- `--once --quiet` is silent, which is the contract `scripts/aria2-hook.sh`
-  depends on; it is pinned by `test_once_quiet_contract_used_by_the_aria2_hook`.
+- Three deliberate differences remain, all at the interface: `--once` writes no
+  resume state, it does not start a rayon pool (`process` runs a batch of one
+  inline), and it does not print the `--resume` hint after an interrupt — there
+  is no resume point for it to point at.
+- `--once --quiet` prints the one-line summary and nothing else: no progress, no
+  per-pair lines, no ffmpeg diagnostics. `scripts/aria2-hook.sh` depends on that
+  and only on the exit code, which it does not parse further; the contract is
+  pinned by `test_once_quiet_contract_used_by_the_aria2_hook`.
