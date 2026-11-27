@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-27
+
+Documentation only: no behaviour change.
+
+### Changed
+- The README now matches the CLI. It lists all fifteen flags (`--interactive`,
+  `-R`, `--ascii` and `-p` were missing), documents the exit codes, the output
+  naming rule including how `-R` flattens a composite stem into one file name,
+  the size check that catches truncated merges, and the fact that `-f mp4` into
+  the source directory is refused rather than overwriting the source video. It
+  no longer promises macOS binaries, which are not built
+- `CONTRIBUTING.md` describes the checks CI actually runs, including
+  `deslop-please`, and the tag-only release split
+
+### Fixed
+- `AGENTS.md` stated the MSRV as "Rust 2021 edition", which names an edition
+  rather than a version. The real floor is 1.88, set by the dependency graph
+- Two archived `openspec` proposals listed fully checked tasks that the
+  `52ad585` reconciliation had since undone (`ffmpeg::Os`, `package_managers`,
+  `get_install_command` are present again). They now open with what no longer
+  holds, so an archived checklist cannot be mistaken for the current tree
+- The 2026-08-13 roadmap is marked as a v0.8.0 snapshot
+
 ## [0.10.0] - 2026-11-27
 
 Reconciled two diverged development lines (local v0.8.1 and upstream v0.9.1)
