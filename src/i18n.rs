@@ -289,6 +289,11 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "verbose_quiet_conflict"), "Cannot use --verbose with --quiet"),
     ((Lang::Cn, "interactive_dry_run_conflict"), "不能同时使用 --interactive 和 --dry-run"),
     ((Lang::En, "interactive_dry_run_conflict"), "Cannot use --interactive with --dry-run"),
+    ((Lang::Cn, "invalid_stem"), "非法的 --once 名称（不能包含路径分隔符或空字节，也不能是 . 或 ..）：{0}"),
+    ((Lang::En, "invalid_stem"), "Invalid --once name (no path separators or null bytes; not . or ..): {0}"),
+    // 批次开始
+    ((Lang::Cn, "starting_merges"), "开始合并 {0} 个文件（预计时间：{1}）"),
+    ((Lang::En, "starting_merges"), "Starting {0} merges (estimated time: {1})"),
     // 报告表格
     ((Lang::Cn, "report_skipped_note"), "（aria2）"),
     ((Lang::En, "report_skipped_note"), "(aria2)"),
@@ -309,6 +314,14 @@ const TRANSLATIONS: &[(TranslationKey, &str)] = &[
     ((Lang::En, "failed_remove_empty_output"), "Failed to remove empty output file: {0}"),
     ((Lang::Cn, "failed_remove_undersized_output"), "无法删除过小的输出文件：{0}"),
     ((Lang::En, "failed_remove_undersized_output"), "Failed to remove undersized output file: {0}"),
+    // 状态文件
+    ((Lang::Cn, "state_version_unsupported"), "状态文件 schema 版本 {0} 不受支持（最高 {1}）。请升级 mixbilibili。"),
+    ((Lang::En, "state_version_unsupported"), "State file schema version {0} is not supported (max: {1}). Please upgrade mixbilibili."),
+    ((Lang::Cn, "state_source_mismatch"), "恢复状态的源目录不匹配：状态记录为 '{0}'，却从 '{1}' 加载"),
+    ((Lang::En, "state_source_mismatch"), "Resume state source_dir mismatch: state has '{0}', loaded from '{1}'"),
+    // 预览
+    ((Lang::Cn, "dry_run_delete_pair"), "  {0}（视频）\n  {1}（音频）"),
+    ((Lang::En, "dry_run_delete_pair"), "  {0} (video)\n  {1} (audio)"),
 ];
 
 static TRANSLATION_MAP: OnceLock<HashMap<TranslationKey, &'static str>> = OnceLock::new();
@@ -387,6 +400,105 @@ mod tests {
     #[should_panic(expected = "unknown translation key")]
     fn unknown_key_is_a_bug_not_a_fallback() {
         let _ = t_for(Lang::En, "totally_nonexistent_key_xyz");
+    }
+
+    /// Every key the source actually calls must exist. `translate()` only has a
+    /// `debug_assert`, so a dropped key panics in debug builds and prints the
+    /// key name to users in release builds — exactly what happened when a key
+    /// cleanup removed `starting_merges` and `invalid_stem` from the table while
+    /// their call sites stayed.
+    #[test]
+    fn every_key_the_source_uses_exists_in_the_table() {
+        const SOURCES: &[(&str, &str)] = &[
+            ("lib.rs", include_str!("lib.rs")),
+            ("cli.rs", include_str!("cli.rs")),
+            ("ffmpeg.rs", include_str!("ffmpeg.rs")),
+            ("merger.rs", include_str!("merger.rs")),
+            ("pipeline.rs", include_str!("pipeline.rs")),
+            ("progress.rs", include_str!("progress.rs")),
+            ("scanner.rs", include_str!("scanner.rs")),
+            ("state.rs", include_str!("state.rs")),
+            ("ui.rs", include_str!("ui.rs")),
+            ("main.rs", include_str!("main.rs")),
+        ];
+
+        let map = translation_map();
+        let mut missing: Vec<String> = Vec::new();
+
+        for (file, text) in SOURCES {
+            for key in called_keys(text) {
+                let known = map.contains_key(&(Lang::Cn, key.as_str()))
+                    && map.contains_key(&(Lang::En, key.as_str()));
+                if !known {
+                    missing.push(format!("{file}: {key}"));
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "keys called in source but absent from the table: {missing:?}"
+        );
+    }
+
+    /// Keys passed to `t("…")` / `tf("…")`, including calls whose argument is on
+    /// the next line (rustfmt splits long calls).
+    fn called_keys(source: &str) -> Vec<String> {
+        let bytes = source.as_bytes();
+        let mut keys = Vec::new();
+        let mut i = 0;
+
+        while i + 1 < bytes.len() {
+            // Find `t(` or `tf(`, preceded by something that cannot be part of a
+            // longer identifier (`_t(`, `get(` etc. must not match).
+            let starts_here = bytes[i] == b't'
+                && matches!(bytes[i + 1], b'(')
+                && (i == 0 || !is_ident_byte(bytes[i - 1]));
+            let starts_tf = bytes[i] == b't'
+                && bytes[i + 1] == b'f'
+                && i + 2 < bytes.len()
+                && bytes[i + 2] == b'('
+                && (i == 0 || !is_ident_byte(bytes[i - 1]));
+
+            let mut open = if starts_here {
+                i + 1
+            } else if starts_tf {
+                i + 2
+            } else {
+                i += 1;
+                continue;
+            };
+
+            // Skip whitespace between `(` and the literal.
+            while open + 1 < bytes.len() && bytes[open + 1].is_ascii_whitespace() {
+                open += 1;
+            }
+            if open + 1 < bytes.len() && bytes[open + 1] == b'"' {
+                let start = open + 2;
+                let mut end = start;
+                while end < bytes.len() && bytes[end] != b'"' {
+                    end += 1;
+                }
+                if let Ok(key) = std::str::from_utf8(&bytes[start..end]) {
+                    if !key.is_empty()
+                        && key
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+                    {
+                        keys.push(key.to_string());
+                    }
+                }
+                i = end;
+            } else {
+                i = open;
+            }
+        }
+
+        keys
+    }
+
+    fn is_ident_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
     }
 
     #[test]
