@@ -100,8 +100,27 @@ jobs:
       - name: Build on the declared minimum
         run: cargo build --locked --all-targets
 
-  build:
+  release-profile:
+    # The release profile (opt-level="z", fat LTO, codegen-units=1, panic="abort")
+    # compiles differently enough from the debug profile that "tests pass" does
+    # not imply "the shipped binary builds". One native build per push keeps that
+    # honest without paying for the whole matrix; the cross targets follow below.
     needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build with the release profile
+        run: cargo build --release --locked
+
+  build:
+    # Packaging is a release concern: the cross targets and the archives only
+    # matter when a version is being shipped. A tag still builds, tests and
+    # packages everything, so nothing reaches a release unbuilt.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, release-profile]
     strategy:
       matrix:
         include:
@@ -127,16 +146,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Install ffmpeg (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
-      - name: Install ffmpeg (Windows)
-        if: runner.os == 'Windows'
-        run: choco install ffmpeg -y
 
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
