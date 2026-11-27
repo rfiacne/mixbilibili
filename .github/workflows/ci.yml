@@ -131,7 +131,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          VERSION="${GITHUB_REF_NAME:-dev}"
+          # On a pull_request event GITHUB_REF_NAME is "<pr>/merge", and a slash
+          # both nests the archive directory and breaks `tar -czf dist/...`:
+          # only tags carry a version worth naming.
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="dev"
+          fi
           ARCHIVE_NAME="mixbilibili-${VERSION}-${{ matrix.target }}"
           mkdir -p "${ARCHIVE_NAME}"
           cp target/${{ matrix.target }}/release/${{ matrix.bin }} "${ARCHIVE_NAME}/"
@@ -145,7 +152,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "dev" }
+          $version = if ($env:GITHUB_REF -like "refs/tags/v*") { $env:GITHUB_REF_NAME } else { "dev" }
           $target = "${{ matrix.target }}"
           $archiveName = "mixbilibili-$version-$target"
           New-Item -ItemType Directory -Force -Path $archiveName | Out-Null
