@@ -43,14 +43,15 @@ mixbilibili 是一个 Rust CLI 工具，批量合并 Bilibili 下载的 .mp4（�
 
 ### 构建
 - Release profile 优化体积：`opt-level="z"`, LTO=fat, strip=true, panic=abort
-- MSRV: Rust 2021 edition
+- MSRV：`Cargo.toml` 的 `rust-version = "1.88"` 是唯一权威值（由依赖图 `which` → `home 0.5.12` 决定）。CI 的 `msrv` job 会在该版本上 `cargo build --locked`，升级依赖前先确认它仍能编译
+- edition: 2021
 
 ## Agent 必须遵守的约束
 
 1. **不破坏中断恢复**：修改 `state` 或 `merger` 时必须保持原子写入和 `interrupt::Interrupt` 令牌检查；被中断的 pair 属于「未完成」而非「失败」（`was_interrupted`），`all_success()`——决定是否删除状态文件——只有全部 pair 到达终态才为真；`RunOutcome::Cancelled` 与 `RunOutcome::TimedOut` 必须保持区分，勿把两者合并为同一返回值
 2. **不引入转码**：ffmpeg 命令必须使用 `-c:v copy -c:a copy`，禁止添加编解码参数
 3. **符号链接安全**：`scanner` 必须跳过符号链接，防止无限循环和路径逃逸
-4. **路径遍历防护**：`--once` 模式的 stem 参数必须经过 `validate_stem()` 验证
+4. **路径遍历防护**：`--once` 模式的 stem 参数必须经过 `is_plain_stem()` 验证（`cli::Args::validate`）
 5. **源文件删除原子性**：先删音频，音频删除失败则保留视频，绝不中断时删除源文件
 6. **翻译完整性**：新增用户可见字符串必须同时提供中英文翻译
 7. **不添加运行时依赖**：除非有明确理由，优先使用标准库和现有依赖
