@@ -59,6 +59,29 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo clippy -- -D warnings
 
+      - name: Install deslop-please
+        if: runner.os == 'Linux'
+        env:
+          DESLOP_VERSION: v0.1.6
+        run: |
+          # Prebuilt musl binary: `cargo install` would pull rust-analyzer and
+          # take minutes. The version is pinned so a new release cannot turn
+          # this check red without a lockstep bump here.
+          name="deslop-please-x86_64-unknown-linux-musl-${DESLOP_VERSION}"
+          base="https://github.com/deterministic-machines/deslop-please/releases/download/${DESLOP_VERSION}"
+          mkdir -p "$HOME/.local/bin" /tmp/deslop
+          # The published .sha256 names the archive, so keep that exact file name.
+          curl -fsSL "${base}/${name}.tar.gz" -o "/tmp/deslop/${name}.tar.gz"
+          curl -fsSL "${base}/${name}.tar.gz.sha256" -o "/tmp/deslop/${name}.tar.gz.sha256"
+          cd /tmp/deslop && sha256sum -c "${name}.tar.gz.sha256"
+          tar -xzf "/tmp/deslop/${name}.tar.gz" -C "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/deslop-please"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run deslop-please
+        if: runner.os == 'Linux'
+        run: deslop-please
+
       - name: Run tests
         run: cargo test
 
