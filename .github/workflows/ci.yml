@@ -115,6 +115,23 @@ jobs:
       - name: Build with the release profile
         run: cargo build --release --locked
 
+  arm-build:
+    # The ARM target is not built per pull request (the tag build still covers
+    # it before anything ships), but a merge is the last cheap moment to notice
+    # that it broke: on master only, never on a pull request. Built on the native
+    # ARM runner, exactly as the release matrix does, so no cross linker is
+    # involved and this check cannot drift from what a release actually runs.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: test
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build with the release profile on aarch64
+        run: cargo build --release --locked
+
   build:
     # Packaging is a release concern: the cross targets and the archives only
     # matter when a version is being shipped. A tag still builds, tests and
