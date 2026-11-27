@@ -4,6 +4,12 @@
 > 版本基线：v0.8.0（`Cargo.toml` 已升到 0.8.0，`CHANGELOG.md` 仍停在 0.7.0，文档滞后待补）
 > 分析依据：codebase-memory 知识图谱（1209 节点 / 3257 边）+ 源码阅读 + 测试/CI 现状
 
+> **时效说明（2026-11-27 核实）**：本文是 v0.8.0 时点的快照，当前已是 v0.10.0。
+> 以下陈述已不成立，读时请勿当作现状：`cli::build_cli` 与 `cli::parse_args` 已被 clap
+> derive 取代（`build_cli` 仅作为测试函数名存留），`main` 已拆为 `main` + `lib`，
+> 并新增 `pipeline` / `interrupt` / `i18n` 模块。行数与依赖分层数据也不再准确。
+> 当前架构以 `CONTEXT.md`、`AGENTS.md` 和源码为准。
+
 ---
 
 ## 1. 现状架构概览

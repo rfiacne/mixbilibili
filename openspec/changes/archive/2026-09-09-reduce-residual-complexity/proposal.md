@@ -1,5 +1,15 @@
 # Proposal: reduce-residual-complexity
 
+> **归档说明（2026-11-27 核实）**：本文与 `simplify-overengineering` 于 2026-09-09
+> 实施并归档（`2731073`），但 2026-10-14 的 `52ad585`（reconcile local v0.8.1 with
+> upstream v0.9.1）合入上游架构时，被删除的部分代码又回到了源码中。
+>
+> 就当前 `master` 而言，本文描述的以下改动**已不再成立**：
+> `ffmpeg::Os` 枚举与 `detect_os()` 仍在、`package_managers` 仍返回 `Vec`、
+> `get_install_command` 仍存在（均见 `src/ffmpeg.rs`）。
+>
+> 本文保留为历史记录，不描述当前代码。若重新清理，需要基于当前基线重新评估。
+
 ## Why
 
 上一轮 `simplify-overengineering`（已归档）后，ponytail-review 复查发现仍有约 120 行残余过度设计：`ffmpeg.rs` 自建 `Os` 枚举重复 `std::env::consts::OS`、`package_managers` 返回 Vec 但调用点只取首个元素、clap 已声明 `default_value` 的参数在 `parse_args` 中二次 `unwrap_or`（不可达分支）、重复的 `ProgressBar` Arc 包装、`format_record` 用 bool 参数复制四个着色分支、若干空转/子集重复测试。均为纯删除/简化，不改变任何用户可见行为。

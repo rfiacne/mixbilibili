@@ -1,5 +1,15 @@
 # Proposal: simplify-overengineering
 
+> **归档说明（2026-11-27 核实）**：本提案与 `reduce-residual-complexity` 于 2026-09-09
+> 实施并归档（`2731073`），但 2026-10-14 的 `52ad585`（reconcile local v0.8.1 with
+> upstream v0.9.1）合入上游架构时，被删除的部分代码又回到了源码中。
+>
+> 就当前 `master` 而言，以下几点**已不再成立**，读本文时请勿当作现状：
+> `ffmpeg::Os` 枚举与 `detect_os()` 仍在（`src/ffmpeg.rs`）、
+> `package_managers` 仍返回 `Vec`、`get_install_command` 仍存在。
+>
+> 本文保留为历史记录，不描述当前代码。若重新清理，需要基于当前基线重新评估。
+
 ## Why
 
 ponytail-review 全项目审查发现约 390 行可删除的过度设计：未被引用的死代码与翻译键、只有一个实现/调用点的抽象、重复测试、标准库或依赖已内置功能的重复实现（indicatif 手写 `per_sec`/`eta` 闭包），以及 260KB 已交付版本的历史过程文档。这些不改变任何用户可见行为，只增加维护面。
